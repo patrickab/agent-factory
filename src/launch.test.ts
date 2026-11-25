@@ -318,6 +318,16 @@ describe("unmergedWork", () => {
     expect(await unmergedWork(record, undefined)).toEqual({ commits: 1, dirty: false });
     expect(await unmergedWork(record, "main")).toEqual({ commits: 1, dirty: false });
   });
+
+  test("an untracked file makes the worktree dirty even with status.showUntrackedFiles=no", async () => {
+    const repo = makeRepo("repo", "main");
+    const worktree = join(caseDir, "u-wt");
+    git(repo, "worktree", "add", "--quiet", "-b", "u", worktree);
+    git(repo, "config", "status.showUntrackedFiles", "no");
+    writeFileSync(join(worktree, "forgotten.txt"), "work\n");
+    const record = { id: "i", repo, worktree, branch: "u", title: "u", sessionId: "s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, kind: "task" as const };
+    expect(await unmergedWork(record, "main")).toEqual({ commits: 0, dirty: true });
+  });
 });
 
 describe("runnerSpawn", () => {

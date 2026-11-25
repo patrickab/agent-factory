@@ -16,7 +16,7 @@ process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
 
 // Pi's command context must fit what modelsCommand takes (compile-time check for index.ts).
-const piContextFits: (ctx: ExtensionCommandContext) => Promise<void> = (ctx) => modelsCommand("", ctx);
+const _piContextFits: (ctx: ExtensionCommandContext) => Promise<void> = (ctx) => modelsCommand("", ctx);
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-index-test-")));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -981,6 +981,26 @@ echo "{\\"type\\":\\"tool_execution_end\\",\\"toolName\\":\\"submit_verdict\\",\
     await startMergeRequest(pi);
     await pi.until("blocked/dirty");
     expect(pi.states()).toEqual(["running/start", "blocked/dirty"]);
+    expect(gitIn(repo, "rev-parse", "main")).toBe(main);
+    expect(readFileSync(join(worktree, "local.env"), "utf8")).toBe("secret\n");
+  });
+
+  test("a file the target's .gitignore stops ignoring while it waits for approve blocks its merge turn as dirty and stays", async () => {
+    writeFileSync(join(repo, ".gitignore"), "*.env\n");
+    gitIn(repo, "add", ".gitignore");
+    gitIn(repo, "commit", "--quiet", "-m", "ignore env files");
+    const worktree = waveWorktree();
+    writeFileSync(join(worktree, "local.env"), "secret\n");
+    const pi = session(worktree);
+    await startMergeRequest(pi, { merge: "review" });
+    await pi.until("waiting_approve/passed");
+    // Gated and reviewed clean; only the merge turn's rebase brings the .gitignore that no longer ignores local.env.
+    writeFileSync(join(repo, ".gitignore"), "*.envrc\n");
+    gitIn(repo, "commit", "--quiet", "-am", "ignore envrc files only");
+    const main = gitIn(repo, "rev-parse", "main");
+    await pi.command("approve");
+    await pi.until("blocked/dirty");
+    expect(pi.states()).toEqual(["running/start", "waiting_approve/passed", "merging/approved", "blocked/dirty"]);
     expect(gitIn(repo, "rev-parse", "main")).toBe(main);
     expect(readFileSync(join(worktree, "local.env"), "utf8")).toBe("secret\n");
   });

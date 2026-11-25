@@ -1,18 +1,63 @@
-# Pi factory plugin
+# agent-factory
 
-A Pi extension that runs coding tasks for you in the background. Each task gets its own git worktree and branch.
-A coder agent works on it in rounds: after every turn the repo's hooks and gates run, then an optional review, and
-problems go back to the coder. A passed round merges into the target branch, or waits for approve.
+Background coding tasks for agents. Each task gets its own git worktree and branch; a coder agent (Pi) works on it in
+rounds, and after every turn the repo's hooks and gates run, then an optional review, and problems go back to the
+coder. A passed round merges into the target branch, or waits for approve. A merge request gates an existing branch
+into its target without a coder. Agents and hosts reach the factory through one core (`src/core.ts`): the Pi extension
+(the `factory` tool and `/factory` commands), a CLI (`factory`) and an MCP server (`factory-mcp`). State is plain
+files under Pi's agent dir; there is no daemon.
 
-## Requirements
+## Terms
 
-- On PATH: `pi` (loads this directory from its extensions dir), `git`, `bun` (the detached task runner), `pgrep`
-  (finds a task's runner; without it task actions fail), `sh`, `awk`, `flock` and `sleep` (the merge lock and
-  queue)
+| Term | Meaning |
+|---|---|
+| **task** | One request in one worktree on its own branch, run by a detached runner that drives `pi --mode rpc`. |
+| **round** | A coder turn, then `after_code`, the gates and the optional review; a failed round goes back to the coder. |
+| **gates** | The commands in the target's `factory.yaml` that must pass: `gates` after every turn, `merge_gates` before the merge. |
+| **tag** | Path segments (`plugin/m1/w1`) grouping tasks; `tasks.list` and `tasks.wait` filter by a tag or its prefix. |
+| **merge request** | A task without a coder: rebase an existing branch, gate it, review it, merge it. |
+| **rest** | No runner lives and the task waits (`waiting_approve`, `waiting_answer`, `blocked`), ended (`done`, `cancelled`) or was interrupted. |
+
+## Install
+
+```bash
+bun install -g git+https://github.com/patrickab/agent-factory   # the factory and factory-mcp binaries
+pi install git:github.com/patrickab/agent-factory               # the Pi extension
+```
+
+- The Pi extension is required: a task's runner starts `pi` in the task's worktree, and the extension there runs the
+  task (`/factory start`, the gates, the review, the merge). Pi loads it as an installed package
+  (`package.json` `pi.extensions`: `src/pi/index.ts`); the runner passes no `-e`
+- On PATH: `pi`, `git`, `bun` (the detached task runner), `pgrep` (finds a task's runner; without it task actions
+  fail), `sh`, `awk`, `flock` and `sleep` (the merge lock and queue). `bun install -g` puts the binaries in
+  `~/.bun/bin`
 - Linux is the supported platform (`flock`, `/proc` for process liveness); macOS is untested
 - Optional: `agent-worktree` on PATH. When it is there, task worktrees are made with it, else with `git worktree add`
   into `<repo>/../worktrees/<repo name>/<task>`
 - The target branch must hold a committed `factory.yaml` (`/factory init` writes a draft into the main checkout)
+- Set the factory models before the first task: `factory models.set '{"models":["provider/model"]}'` or
+  `/factory models add <id>`
+
+## MCP setup
+
+Pi (instead of the extension's tool, not next to it: both offer a tool `factory`):
+
+```bash
+pi mcp add factory -- factory-mcp
+```
+
+Claude Code, Codex or any other stdio MCP client:
+
+```json
+{
+  "mcpServers": {
+    "factory": { "command": "factory-mcp" }
+  }
+}
+```
+
+(Claude Code: `claude mcp add factory -- factory-mcp`.) The server's working directory is where a call's `repo`
+defaults to. Tasks still run in Pi: the extension must be installed whatever the client is.
 
 ## `factory.yaml` (read from the task's base commit, never from the coder's tree)
 
@@ -27,9 +72,11 @@ problems go back to the coder. A passed round merges into the target branch, or 
 - Role prompts: `.factory/agents/coder.md`, `.factory/agents/reviewer.md`
 - See `factory.template.yaml` for a commented example
 
-## The core (`core.ts`) and the `factory` tool
+## Interface
 
-- `core.ts` is the one module clients import: `ACTIONS` (name -> `{summary, params (JSON schema), mutates, hostOnly}`)
+### Core (`src/core.ts`)
+
+- `core.ts` is the one module clients import, the package's entry (`import { callAction } from "agent-factory"`): `ACTIONS` (name -> `{summary, params (JSON schema), mutates, hostOnly}`)
   and `callAction(name, params, {cwd?, signal?, env?})`, plain JSON in and out. A failure throws
   `FactoryError(code, message, detail?)`, one sentence, `code` one of `invalid`, `not_found`, `busy`, `refused`,
   `failed`; `detail` is `{force: true}` on a refused `tasks.remove` that `force` would carry out. It imports only Bun
@@ -73,16 +120,52 @@ problems go back to the coder. A passed round merges into the target branch, or 
   closed Pi goes to a successor runner. Cancel or retry of an interrupted task fails when its runner ends before it ran
 - `tasks.remove`: deletes the record, log, worktree and the task's own branch (through git) of a task that is not
   running (an interrupted task counts as not running) and not in `waiting_answer`. It refuses a task with commits its target branch lacks or
-  uncommitted changes; with `force: true` it removes it anyway and names what it dropped. A merge request's source
+  uncommitted changes (untracked files count whatever `status.showUntrackedFiles` says); with `force: true` it removes it anyway and names what it dropped. A merge request's source
   branch is never deleted, so its commits count as nothing dropped
 - `overrides` and stored settings: `merge` (`auto` | `review`), `maxRounds` (1..20), `review` (bool), `branch`,
   `models.coder`, `models.reviewer` (`provider/model`)
+
+### CLI (`factory`)
+
+```bash
+factory --help                                          # one line per action with its summary
+factory actions                                         # the ACTIONS map as JSON
+factory repos.add                                       # repo = the current directory
+factory tasks.start '{"title": "feat: add b", "request": "Add b.txt", "tag": "me/w1"}'
+echo '{"tag": "me/w1"}' | factory tasks.wait -           # params from stdin
+factory --core-path                                     # absolute path of src/core.ts, for hosts that import it
+```
+
+- `factory <action> [<json params> | -]`: no params means `{}`, `-` reads them from stdin. The result goes to stdout
+  as JSON, exit 0. `cwd` is the caller's directory. `hostOnly` actions are available (the CLI is the host); Ctrl-C
+  aborts a blocking `tasks.wait`
+- A `FactoryError` goes to stderr as `factory: <code>: <message>`: exit 2 for `invalid` (also bad JSON, an unknown
+  action), exit 1 for the others
+- It holds no logic of its own: it parses arguments and calls `callAction`
+
+### MCP server (`factory-mcp`)
+
+- stdio, one tool `factory` with the name, description and schema of the Pi tool (both come from
+  `src/factory-tool.ts`, so they cannot drift): `{action, ...params}`, `action` an `ACTIONS` name that is not
+  `hostOnly`
+- The answer is the result as JSON text; a failure is an error result `factory: <message>`. Started by a task's
+  runner (`FACTORY_TASK_SESSION=1`) it offers only the actions with `mutates: false`
+
+### Pi extension (`src/pi/`)
+
 - The `factory` tool for agents: `{action, ...}` with `action` an `ACTIONS` name that is not `hostOnly` and that
   action's params. The answer is the result as JSON text and `details`; errors are error results starting `factory: `.
   Calls run one at a time
 - In a task's own session (Pi started by the runner, `FACTORY_TASK_SESSION=1`, or a session holding a `factory-task`
   entry) the tool offers only the actions with `mutates: false`; a mutating one (`tasks.start`, `models.set`, ...)
   answers as unknown. A task's coder starts a task only through `factory_new_task` (below)
+
+Commands (inside a task's own Pi session):
+
+- `/factory init`: write a draft `factory.yaml` into the main checkout (any session), uncommitted
+- `/factory start <json>`: `{"request", "title", "settings", "kind"?}`; what the tool's runner and gigachad-bot send
+- `/factory approve`, `/factory retry`, `/factory cancel`
+- A plain message to a resting task starts a new run; to a task in `waiting_answer` it is the answer (below)
 
 ## Factory models (`models.ts`)
 
@@ -92,26 +175,14 @@ problems go back to the coder. A passed round merges into the target branch, or 
 - `tasks.start` and `settings.set` are `refused` for a model not on the list, and for anything while it is empty
   ("no factory models are set (set them with /factory models)"). Reading settings and listing tasks never check it
 
-## Commands (inside a task's own Pi session)
+## Tags and merge requests
 
-- `/factory init`: write a draft `factory.yaml` into the main checkout (any session), uncommitted
-- `/factory start <json>`: `{"request", "title", "settings", "kind"?}`; what the tool's runner and gigachad-bot send
-- `/factory approve`, `/factory retry`, `/factory cancel`
-- A plain message to a resting task starts a new run; to a task in `waiting_answer` it is the answer (below)
+- Give related tasks one tag: `tasks.start {..., tag: "plugin/m1/w1"}` (default the system user name), then
+  `tasks.list {tag: "plugin/m1"}` lists them and `tasks.wait {tag: "plugin/m1/w1"}` blocks until the wave rests or one
+  task needs attention. `plan` stores a memory_store path next to the tag; the factory only keeps it
+- A wave's tasks merge into a wave branch; a merge request then gates that branch into the branch all waves flow into
 
-## Questions to the supervisor
-
-- In a task session the coder may call `factory_ask_supervisor {question}` while its task is `running`: it records a
-  `factory-question {text}` entry (timeline kind `question`, `TaskView.question`) and the resting state
-  `waiting_answer`, and ends the coder's turn. The round's hooks, gates and review do not run; the runner ends. It is
-  refused next to another tool call in the same message and while a message is queued for the coder: Pi would carry
-  the turn on past either
-- The next message (`tasks.message`) is the answer: the coder continues the same round, with no new round, no fresh
-  round budget and no squash or rebase of the worktree (the state goes back to `running`, reason `answer`). The
-  round's steps run when that turn ends, as for any turn. In `waiting_answer` the actions are `tasks.message` and
-  `tasks.cancel`; `tasks.wait` counts the task as needing attention
-
-## Merge requests
+### Merge requests
 
 - `tasks.start {kind: "merge_request", source, overrides: {branch: <target>}, title, request}` reviews and merges an
   existing branch, the gate between a wave's branch and the branch all waves flow into. `source` must be a local
@@ -146,7 +217,36 @@ problems go back to the coder. A passed round merges into the target branch, or 
   moves during the merge does not change them). The `factory-task` entry
   (timeline kind `task`) carries `kind` and `source` (null for a `task`)
 
-## Commit message
+## Questions to the supervisor
+
+- In a task session the coder may call `factory_ask_supervisor {question}` while its task is `running`: it records a
+  `factory-question {text}` entry (timeline kind `question`, `TaskView.question`) and the resting state
+  `waiting_answer`, and ends the coder's turn. The round's hooks, gates and review do not run; the runner ends. It is
+  refused next to another tool call in the same message and while a message is queued for the coder: Pi would carry
+  the turn on past either
+- The next message (`tasks.message`) is the answer: the coder continues the same round, with no new round, no fresh
+  round budget and no squash or rebase of the worktree (the state goes back to `running`, reason `answer`). The
+  round's steps run when that turn ends, as for any turn. In `waiting_answer` the actions are `tasks.message` and
+  `tasks.cancel`; `tasks.wait` counts the task as needing attention
+
+## How a task runs
+
+- `tasks.start` makes the worktree, runs `after_create` and spawns the runner, which starts `pi --mode rpc` in the
+  worktree with `/factory start`. The extension records the task and its rounds as `factory-*` session entries: the
+  coder's turn, `after_code`, the gates, the review; a failure goes back to the coder until `maxRounds`, then the
+  task blocks. A passed round is squashed into one commit, rebased onto the target and joins the merge queue (`merge_gates`, fast-forward), or
+  waits in `waiting_approve` with `merge: review`
+- `tasks.approve`, `retry` and `cancel` each start a runner for one command, as does `message` to a task no runner
+  holds (a live runner gets it through the task's inbox); a runner ends when the task rests again
+
+### The runner
+
+- `bun src/runner.ts <worktree> <sessionDir> <sessionId> <inboxPath> <message>` spawns `pi --mode rpc` in the worktree, sends one
+  command and closes Pi's stdin once no agent run is active and the task rests (for `approve`/`retry`: after it
+  has left the state it started in). Detached, one runner per command. A prompt Pi did not handle as a command (the
+  extension is not installed in Pi) makes it abort and exit 1; extension dialogs are answered as cancelled
+
+### Commit message
 
 - A task title that is a conventional commit title (`type(scope)!: summary`) is the merge commit's message. Else,
   after the last round passed and before the merge, the coder is asked for one: a conventional title of at most 72
@@ -154,7 +254,7 @@ problems go back to the coder. A passed round merges into the target branch, or 
   answer falls back to the task title. The message is the `factory-commit-message` entry and goes into the
   `factory-merge-intent` entry, so a later runner's approve uses it
 
-## Follow-up on a merged task
+### Follow-up on a merged task
 
 - A message to a task that is `done`/`merged` opens a follow-up run: the coder works in the task's worktree (made
   again from the task branch when it is gone). Once the gates pass, the change merges as a normal new commit through
@@ -164,13 +264,6 @@ problems go back to the coder. A passed round merges into the target branch, or 
   handoff}` (title a conventional commit title, handoff the complete request). The tool exists in task sessions only,
   works only in a follow-up run on a merged task, once per user message; the new task takes over this task's target
   branch and merge mode, and the parent records a `factory-spawn` entry (timeline kind `spawn`)
-
-## How a task runs without an interactive session
-
-- `bun runner.ts <worktree> <sessionDir> <sessionId> <inboxPath> <message>` spawns `pi --mode rpc` in the worktree, sends one
-  command and closes Pi's stdin once no agent run is active and the task rests (for `approve`/`retry`: after it
-  has left the state it started in). Detached, one runner per command. A prompt Pi did not handle as a command (the
-  plugin is not in Pi's extensions dir) makes it abort and exit 1; extension dialogs are answered as cancelled
 
 ## Where state lives (`<agent dir>/factory/`, agent dir = `PI_CODING_AGENT_DIR` or `~/.pi/agent`)
 
@@ -190,6 +283,21 @@ problems go back to the coder. A passed round merges into the target branch, or 
   `-round`, `-gate`, `-review`, `-merge-intent`, `-merge`, `-state`, `-commit-message`, `-spawn`, `-question`, and
   `factory-feedback` and `factory-commit-ask` messages
 
+## Suggested system prompt
+
+```text
+You can hand coding tasks to the factory (the `factory` tool or the `factory` CLI).
+- Give each task a self-contained request and a conventional commit title; group a wave under one tag.
+- Start with tasks.start, then block on tasks.wait (ids or tag) instead of polling tasks.get.
+- When a task needs attention, read tasks.get and tasks.timeline: answer a question with tasks.message, approve,
+  retry or cancel as its actions allow.
+- Gate a finished wave branch into its target with a merge_request task, not by merging it yourself.
+```
+
 ## Development
 
-- `bun run types`, `bun test` in this directory. Tests use temp git repos and a fake `pi`; no model is called
+- `bun run types`, `bun test`. Tests use temp git repos, a temp agent dir and a fake `pi`; no model is called
+- Layout: `src/` the core and what it imports (Bun and `node:` only, loadable without `node_modules`), `src/pi/`
+  everything that imports Pi's extension API, `src/cli.ts` and `src/mcp.ts` the binaries, tests beside their modules
+- State on disk, the entry protocol and the runner command line are a contract with tasks already running: change
+  them only with a migration

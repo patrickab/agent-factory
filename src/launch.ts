@@ -421,7 +421,7 @@ export async function unmergedWork(record: TaskRecord, target: string | undefine
   }
   let dirty = false;
   if (existsSync(record.worktree)) {
-    const status = await runCommand(["git", "status", "--porcelain"], { cwd: record.worktree, maxStdoutChars: 1000 });
+    const status = await runCommand(["git", "status", "--porcelain", "--untracked-files=normal"], { cwd: record.worktree, maxStdoutChars: 1000 });
     dirty = status.exitCode !== 0 || status.stdout.trim() !== "";
   }
   return { commits, dirty };
