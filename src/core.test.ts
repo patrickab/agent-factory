@@ -706,7 +706,7 @@ describe("tasks.import", () => {
     const repo = makeRepo();
     const worktree = join(caseDir, "task-wt");
     git(repo, "worktree", "add", "--quiet", "-b", "task", worktree);
-    const record = { id: ID, repo, worktree, branch: "task", title: "first", sessionId: "s", sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
+    const record = { id: ID, repo, worktree, branch: "task", title: "first", sessionId: "test-session-s", sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
     expect(await callAction("tasks.import", { record })).toMatchObject({ id: ID, title: "first", state: null });
     expect(await callAction("tasks.import", { record: { ...record, title: "second" } })).toMatchObject({ title: "first" });
     await expect(callAction("tasks.import", { record: { ...record, id: "abc" } })).rejects.toMatchObject({ code: "invalid" });
@@ -720,7 +720,7 @@ describe("tasks.import", () => {
     const victim = join(caseDir, "victim-wt");
     git(repo, "worktree", "add", "--quiet", "-b", "precious", victim);
     const other = makeRepo(true, "other");
-    const base = { id: ID, repo, worktree: victim, branch: "precious", title: "t", sessionId: "s", sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
+    const base = { id: ID, repo, worktree: victim, branch: "precious", title: "t", sessionId: "test-session-s", sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
     const refused = async (change: object, message: string) => expectError(callAction("tasks.import", { record: { ...base, ...change } }), "refused", message);
     await refused({ worktree: repo, branch: "main" }, `${repo} is not a linked worktree of ${repo}`);
     await refused({ branch: "main" }, `${victim} does not have branch main checked out`);

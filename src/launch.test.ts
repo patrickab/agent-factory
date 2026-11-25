@@ -299,7 +299,7 @@ describe("liveRunners", () => {
     const empty = join(caseDir, "empty-bin");
     mkdirSync(empty);
     process.env.PATH = empty;
-    await expect(liveRunners({ sessionId: "s" })).rejects.toThrow("pgrep");
+    await expect(liveRunners({ sessionId: "test-session-s" })).rejects.toThrow("pgrep");
   });
 
   test("no runner: an empty list", async () => {
@@ -314,7 +314,7 @@ describe("unmergedWork", () => {
     writeFileSync(join(caseDir, "t-wt", "x.txt"), "x\n");
     git(join(caseDir, "t-wt"), "add", "-A");
     git(join(caseDir, "t-wt"), "commit", "--quiet", "-m", "x");
-    const record = { id: "i", repo, worktree: join(caseDir, "t-wt"), branch: "t", title: "t", sessionId: "s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, kind: "task" as const };
+    const record = { id: "i", repo, worktree: join(caseDir, "t-wt"), branch: "t", title: "t", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, kind: "task" as const };
     expect(await unmergedWork(record, undefined)).toEqual({ commits: 1, dirty: false });
     expect(await unmergedWork(record, "main")).toEqual({ commits: 1, dirty: false });
   });
@@ -325,7 +325,7 @@ describe("unmergedWork", () => {
     git(repo, "worktree", "add", "--quiet", "-b", "u", worktree);
     git(repo, "config", "status.showUntrackedFiles", "no");
     writeFileSync(join(worktree, "forgotten.txt"), "work\n");
-    const record = { id: "i", repo, worktree, branch: "u", title: "u", sessionId: "s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, kind: "task" as const };
+    const record = { id: "i", repo, worktree, branch: "u", title: "u", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, kind: "task" as const };
     expect(await unmergedWork(record, "main")).toEqual({ commits: 0, dirty: true });
   });
 });

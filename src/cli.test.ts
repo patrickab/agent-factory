@@ -126,7 +126,7 @@ describe("factory as the host", () => {
     execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", "init"]);
     const worktree = join(scratch, `wt-${counter}`);
     execFileSync("git", ["-C", repo, "worktree", "add", "--quiet", "-b", "task", worktree]);
-    return { id: ID, repo, worktree, branch: "task", title: "t", sessionId: "s", sessionDir: join(scratch, `sessions-${counter}`), createdAt: "2026-01-01T00:00:00.000Z" };
+    return { id: ID, repo, worktree, branch: "task", title: "t", sessionId: "test-session-s", sessionDir: join(scratch, `sessions-${counter}`), createdAt: "2026-01-01T00:00:00.000Z" };
   }
 
   test("runs the hostOnly tasks.import: refuses a record whose worktree is the primary checkout, registers a linked one", () => {
