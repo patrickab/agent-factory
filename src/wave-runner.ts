@@ -14,8 +14,8 @@
  *   `merging`: the merge queue, merge gates (only when the target moved since the review's run) and the fast-forward
  *   (`mergeTask` `asIs`), then `merged` or `blocked`
  * - With the wave's `remote` on (`remote.ts`, every step a `remote` event, a failure never blocks): after the rebase
- *   the branch and target are pushed and the request opened (once), each recorded verdict is commented, and after
- *   the fast-forward both are pushed again. Off: no call
+ *   the wave's branch is pushed and the request opened (once), each recorded verdict is commented, and after the
+ *   fast-forward the branch and the target are pushed. Off: no call
  * - Every step appends its event (`gate`, `review`, `merge`, `stage`). A stage change is a compare-and-append on the
  *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there.
  *   While it reviews, the runner watches the log: once the stage left `reviewing` it kills the gates and the reviewer
@@ -35,6 +35,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
+import { withoutPaths } from "./agent-view.ts";
 import { loadTaskFiles, type FactoryConfig } from "./config.ts";
 import { FactoryError, oneLine, startWaveTasks, waveReviewWorktree, waveTaskViews } from "./core.ts";
 import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, treeDiff, uncommittedFiles } from "./git.ts";
@@ -131,14 +132,14 @@ const DIRTY_PATHS_SHOWN = 20;
  * the repository is made relative, any other absolute path is `<path>`; the text with its paths goes to the log.
  */
 function pathFree(declaration: WaveDeclaration, detail: string): string {
-  const named = detail
+  const relative = detail
     .split(reviewWorktree(declaration))
     .join(`the review worktree of wave ${declaration.id.slice(0, 8)}`)
     .split(`${declaration.repo}/`)
     .join("")
     .split(declaration.repo)
-    .join("the repository")
-    .replace(/(^|[\s'"`(=])\/[^\s'"`),;]+/g, "$1<path>");
+    .join("the repository");
+  const named = withoutPaths(relative);
   if (named !== detail) log(declaration.id, `with its paths: ${detail}`);
   return named;
 }

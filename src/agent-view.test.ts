@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { agentActions, agentError, agentView, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
+import { agentActions, agentError, agentView, taskBlock, unreachableTasks, waveBlock, withoutPaths } from "./agent-view.ts";
 import { ACTIONS, type TaskView } from "./core.ts";
 import type { WaveView } from "./waves.ts";
 
@@ -567,6 +567,21 @@ describe("agentError", () => {
     expect(agentError({ code: "not_found", message: "/home/me/x is not inside a git repository" })).toBe("not_found: ~/x is not inside a git repository · next: repos.list");
     expect(agentError({ code: "refused", message: "task 4ae7325b has unmerged work", detail: { force: true } })).toContain("next: the same call with force: true drops it");
     expect(agentError({ code: "busy", message: "a\nb" }).split("\n").length).toBe(1);
+  });
+});
+
+describe("withoutPaths", () => {
+  test("any absolute path in free text is <path>, in a view and in an error; relative paths and urls stay", () => {
+    expect(withoutPaths("ENOENT: open '/srv/app/x.ts' at /tmp/run-1/log (see src/a.ts, https://x.org/a)")).toBe(
+      "ENOENT: open '<path>' at <path> (see src/a.ts, https://x.org/a)",
+    );
+    expect(agentError({ code: "infra", message: "spawn /usr/bin/bun failed" })).toStartWith("infra: spawn <path> failed");
+    const blocked = agentView("tasks.get", {}, task({ state: "blocked", reason: "gates_failed", failure: "error: cannot open /var/tmp/out.txt" }));
+    expect(blocked).toContain("failure: error: cannot open <path>");
+  });
+
+  test("the repos actions keep the repository paths an agent passes back", () => {
+    expect(agentView("repos.list", {}, { repos: ["/srv/app"] })).toBe("/srv/app");
   });
 });
 

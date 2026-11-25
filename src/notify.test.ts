@@ -114,6 +114,12 @@ describe("pendingNotices: tasks", () => {
   });
 });
 
+const stuckTasks: WaveView["tasks"] = [
+  { key: "a", title: "a", after: [], model: "big", taskId: null, sessionId: null, state: "cancelled", usage: null },
+  { key: "b", title: "b", after: ["a"], model: "big", taskId: null, sessionId: null, state: "pending", usage: null },
+  { key: "c", title: "c", after: ["b"], model: "big", taskId: null, sessionId: null, state: "pending", usage: null },
+];
+
 describe("pendingNotices: waves", () => {
   const finding = { severity: "major" as const, file: "src/a.ts", line: 12, text: "the lock leaks" };
   const rejectedReview = { round: 2, at: "x", sessionId: null, model: null, verdict: "rejected" as const, status: "ok", findings: [finding], usage: null, wallMs: 1 };
@@ -125,7 +131,7 @@ describe("pendingNotices: waves", () => {
       [wave({ stage: "waiting_approve" }), "waiting_approve:1", "factory: wave factory/w1 waits for waves.approve"],
       [wave({ stage: "merged" }), "merged:1", "factory: wave factory/w1 was merged"],
       [wave({ stage: "reviewing", interrupted: true }), "interrupted:2", "factory: wave factory/w1 was interrupted"],
-      [wave({ stage: "building" }, true), "unreachable:2", "factory: wave factory/w1 has tasks that can never start"],
+      [wave({ stage: "building", tasks: stuckTasks }, true), "unreachable:b,c", "factory: wave factory/w1 has tasks that can never start"],
     ];
     for (const [input, key, first] of cases) {
       const notices = pendingNotices([], [input], none);
@@ -148,6 +154,14 @@ describe("pendingNotices: waves", () => {
     for (const input of [wave(), wave({ stage: "reviewing", running: true }), wave({ stage: "merging", running: true }), wave({ stage: "cancelled" }), wave({ stage: "merged", origin: null })]) {
       expect(pendingNotices([], [input], none)).toEqual([]);
     }
+  });
+
+  test("tasks that can never start are one event, also once the runner's stage event naming them lands", () => {
+    const before = wave({ stage: "building", tasks: stuckTasks }, true);
+    const after = wave({ stage: "building", tasks: stuckTasks }, true, [{ kind: "tasks" }, { kind: "stage" }, { kind: "stage" }]);
+    const delivered = new Set(pendingNotices([], [before], none).map((notice) => notice.key));
+    expect(delivered.size).toBe(1);
+    expect(pendingNotices([], [after], delivered)).toEqual([]);
   });
 
   test("a second rejection after a new stage event is a new event", () => {

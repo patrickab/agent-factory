@@ -11,10 +11,12 @@
  *   never start, nothing else moving it), `merged`
  * - `key` = `<task|wave>:<id>:<event>:<n>`. A task's n is its round, with the state entry's time after `@`: a coder may
  *   ask twice in one round. A wave's n is the index of its last `stage` event in the log for a stage; for
- *   `interrupted` and `unreachable`, which no stage event marks, the length of its log
+ *   `interrupted`, which no stage event marks, the length of its log; for `unreachable` the keys of the tasks that can
+ *   never start (`unreachableTasks`), not the log's length: the runner's `building` event naming them lands after the
+ *   task state that made them so, and must not make the same event a second one (invariant 12)
  * - `text`: `factory: <what happened>`, then the agent view block of the task or wave (a rejection carries its findings)
  */
-import { taskBlock, waveBlock } from "./agent-view.ts";
+import { taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
 import type { TaskView } from "./core.ts";
 import type { WaveView } from "./waves.ts";
 
@@ -51,12 +53,12 @@ const WAVE_STAGE_EVENTS: Partial<Record<WaveView["stage"], string>> = {
 
 function waveNotice({ view, stuck, events }: NoticeWave, origin: string): Notice | null {
   let event: string;
-  let n: number;
+  let n: number | string;
   let what: string;
   if (view.interrupted) {
     [event, n, what] = ["interrupted", events.length, "was interrupted"];
   } else if (view.stage === "building" && stuck) {
-    [event, n, what] = ["unreachable", events.length, "has tasks that can never start"];
+    [event, n, what] = ["unreachable", unreachableTasks(view.tasks).join(","), "has tasks that can never start"];
   } else {
     const said = WAVE_STAGE_EVENTS[view.stage];
     if (said === undefined) return null;

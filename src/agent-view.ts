@@ -7,7 +7,8 @@
  *   matter in that state, and `next:` with the actions valid now. A notification is `factory: <what>` over one of them
  * - `agentError`: an error as one line with the way out. `agentActions`: the action list, or one action's params
  * - Never in the output (invariant 10): paths, timestamps, session ids, settings, an echoed request, per-message usage.
- *   Usage is one cost figure. Every rendering goes through `scrub`: a home directory becomes `~`, a uuid its short id
+ *   Usage is one cost figure. Every rendering goes through `scrub`: a home directory becomes `~`, any other absolute
+ *   path `<path>` (`withoutPaths`, also the rule of a wave's stage details), a uuid its short id
  */
 import type { ActionSpec, TaskView } from "./core.ts";
 import type { Finding } from "./state.ts";
@@ -22,9 +23,18 @@ const UUID = /\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b
 const HOME = /\/(?:home|Users)\/[^/\s"'`]+/g;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
-/** A home directory as `~`, a uuid (task, wave, session) as its short id. */
-function scrub(text: string): string {
-  return text.replace(HOME, "~").replace(UUID, "$1");
+/** Every absolute path in free text as `<path>` (one rule for the agent view and a wave's stage details). */
+export function withoutPaths(text: string): string {
+  return text.replace(/(^|[\s'"`(=])\/[^\s'"`),;]+/g, "$1<path>");
+}
+
+/**
+ * A home directory as `~`, any other absolute path as `<path>`, a uuid (task, wave, session) as its short id. With
+ * `keepPaths` (the `repos.*` answers, whose repository paths are the handles an agent passes back) only the home goes.
+ */
+function scrub(text: string, keepPaths = false): string {
+  const homeless = text.replace(HOME, "~");
+  return (keepPaths ? homeless : withoutPaths(homeless)).replace(UUID, "$1");
 }
 
 function short(id: string | null | undefined): string {
@@ -479,7 +489,7 @@ export function hasAgentView(action: string): boolean {
 export function agentView(action: string, params: unknown, result: unknown): string {
   if (!hasAgentView(action)) throw new Error(`no agent view for ${action}`);
   const given = params !== null && typeof params === "object" ? (params as Params) : {};
-  return scrub(RENDERERS[action](given, result as never));
+  return scrub(RENDERERS[action](given, result as never), action.startsWith("repos."));
 }
 
 // ---- errors ----
