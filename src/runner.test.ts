@@ -4,7 +4,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { messageTask, sendCommand, taskInboxPath } from "./launch.ts";
-import { lastFactoryState } from "./runner.ts";
+import { lastFactoryState, piArgs } from "./runner.ts";
 import { lockTask, taskLockPath, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
 
 const savedEnv = { ...process.env };
@@ -501,6 +501,19 @@ describe("messageTask", () => {
     await expect(messageTask(fresh, "hi")).rejects.toThrow("has not started yet");
     expect(existsSync(taskInboxPath(record.id))).toBe(false);
     expect(existsSync(taskLockPath(record.id))).toBe(false);
+  });
+});
+
+describe("piArgs", () => {
+  const base = ["--mode", "rpc", "--session-dir", "/s", "--session-id", "id"];
+  test("a start with a coder model: Pi starts on it, so the plugin never switches models (no model_select to persist)", () => {
+    const start = `/factory start ${JSON.stringify({ request: "r", title: "t", settings: { models: { coder: "anthropic/claude-opus-5-5" } } })}`;
+    expect(piArgs("/s", "id", start)).toEqual([...base, "--model", "anthropic/claude-opus-5-5"]);
+  });
+  test("every other message, a start without a coder model or with an unreadable payload: no --model", () => {
+    for (const message of ["/factory approve", "rename the flag", "/factory start {}", "/factory start {bad", `/factory start ${JSON.stringify({ settings: { models: { coder: "" } } })}`]) {
+      expect(piArgs("/s", "id", message)).toEqual(base);
+    }
   });
 });
 

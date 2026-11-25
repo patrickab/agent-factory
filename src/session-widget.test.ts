@@ -126,4 +126,22 @@ describe("sessionWidget", () => {
       }
     }
   });
+
+  test("unreachable tasks with a live runner: the wave needs the supervisor", () => {
+    const tasks = [
+      { key: "a", title: "a", after: [], taskId: "x", sessionId: null, state: "cancelled", usage: null, model: "big" },
+      { key: "b", title: "b", after: ["a"], taskId: null, sessionId: null, state: "pending", usage: null, model: "big" },
+    ] as WaveView["tasks"];
+    const lines = sessionWidget([wave({ tag: "stuck", running: true, tasks })], { showFinished: false, width: 80 });
+    expect(lines[0]).toBe("Factory · 1 active · 1 needs you");
+    expect(lines[1]).toStartWith(" ! stuck");
+    expect(lines[1]).toContain(" stuck");
+  });
+
+  test("tag and title scrubbed as in the agent view", () => {
+    const lines = sessionWidget([wave({ tag: "t/w1", title: "fix /home/me/git/app/src/x.ts for 3f2a91c0-1111-4222-8333-444455556666" })], { showFinished: false, width: 120 });
+    expect(lines[1]).not.toContain("/home/me");
+    expect(lines[1]).not.toContain("1111-4222");
+    expect(lines[1]).toContain("3f2a91c0");
+  });
 });

@@ -7,6 +7,7 @@ import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import factory from "./index.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
@@ -199,6 +200,16 @@ describe("the session's waves widget", () => {
     const lines = a.widgets.findLast((shown) => shown !== undefined)!;
     expect(lines[0]).toStartWith("Factory · 1 active");
     expect(lines.slice(1).map((line) => line.trim().split(/\s+/)[1])).toEqual(["ui/w1"]);
+  });
+
+  test("a line with wide characters is cut to the width it is rendered at", async () => {
+    await createWave({ id: ID(3), repo: join(scratch, "repo"), tag: "ui/w3", plan: null, title: "日本語のタイトルがとても長くて端末の幅に収まらない🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀", request: "r", branch: "main-ui-w3", target: "main", base: "abc", origin: "sess-W", createdAt: "2026-01-01T00:00:03.000Z", overrides: {} });
+    const a = piSession("sess-W", [], "tui");
+    await a.emit("session_start");
+    await until(() => a.widgets.some((lines) => lines !== undefined));
+    const lines = a.widgets.findLast((shown) => shown !== undefined)!;
+    expect(lines[1]).toContain("ui/w3");
+    for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
   });
 
   test("no widget in RPC or print mode, nor in a task's own session; none without waves", async () => {

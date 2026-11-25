@@ -4,12 +4,14 @@
  * - Header: `Factory · <n> active[ · <m> needs you]` and the active waves' cost; with no active wave
  *   `Factory · <n> finished`. No waves: no lines (the widget goes)
  * - Active (not `merged`, not `cancelled`): those that need the supervisor first (`rejected`, `blocked`,
- *   `waiting_approve`, interrupted, building with tasks that can never start), then newest first
+ *   `waiting_approve`, interrupted, building with tasks that can never start, whether a runner lives or not), then
+ *   newest first
  * - Finished: one line `<n> finished` while closed; open (`showFinished`), that line carries their cost and every
  *   finished wave follows, newest first
- * - A row: mark, tag, title, done/total, state, cost. Only the title gives way to the width; a line never exceeds it
+ * - A row: mark, tag, title, done/total, state, cost. Only the title gives way to the width. Tag and title go through
+ *   the agent view's `scrub` (no paths, no long ids)
  */
-import { unreachableTasks } from "./agent-view.ts";
+import { scrub, unreachableTasks } from "./agent-view.ts";
 import type { WaveView } from "./waves.ts";
 
 export interface SessionWidgetOptions {
@@ -22,8 +24,9 @@ const FINISHED_STAGES: readonly string[] = ["merged", "cancelled"];
 const ATTENTION_STAGES: readonly string[] = ["rejected", "blocked", "waiting_approve"];
 const ELLIPSIS = "…";
 
+/** Building with tasks that can never start: the agent view's and `tasks.wait`'s notion, whatever `running` says. */
 function stuck(view: WaveView): boolean {
-  return view.stage === "building" && !view.running && unreachableTasks(view.tasks).length > 0;
+  return view.stage === "building" && unreachableTasks(view.tasks).length > 0;
 }
 
 function needsYou(view: WaveView): boolean {
@@ -83,8 +86,8 @@ function newestFirst(a: WaveView, b: WaveView): number {
 function rows(views: readonly WaveView[], width: number): string[] {
   const cells = views.map((view) => ({
     mark: mark(view),
-    tag: view.tag,
-    title: view.title.replace(/\s+/g, " ").trim(),
+    tag: scrub(view.tag),
+    title: scrub(view.title.replace(/\s+/g, " ").trim()),
     count: `${view.counts.done}/${view.counts.total}`,
     state: state(view),
     cost: money(view.usage?.cost ?? null),

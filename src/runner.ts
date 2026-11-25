@@ -4,7 +4,9 @@
  * `bun runner.ts <worktree> <sessionDir> <sessionId> <inboxPath> <message>`
  *
  * - Spawns `pi --mode rpc --session-dir <sessionDir> --session-id <sessionId>` in the worktree (Pi loads the
- *   agent-factory Pi package by itself), with `TASK_SESSION_ENV=1`, and sends `message` as the prompt
+ *   agent-factory Pi package by itself), with `TASK_SESSION_ENV=1`, and sends `message` as the prompt. For
+ *   `/factory start` with a coder model, Pi starts on it (`--model`, `piArgs`): a model set later in the session fires
+ *   `model_select`, on which a user's extension may persist it into the worktree's `.pi/settings.json`
  * - Closes Pi's stdin once Pi answered the prompt, no agent run is active (`agent_start` .. `agent_settled`), no inbox
  *   line is unsent or unanswered and the task rests (`RESTING_STATES`). `/factory approve`, `/factory retry` and a plain
  *   message start at rest, so for them the task must first have left that rest: a `factory-state` entry written after
@@ -157,6 +159,29 @@ function inboxLineText(line: string): string | undefined {
   return undefined;
 }
 
+const START_PREFIX = "/factory start ";
+
+/**
+ * Pi's arguments for `message`. `/factory start` with `settings.models.coder` (`provider/id`): `--model` with it, so
+ * the session starts on the coder's model and the plugin need not switch to it (`setModel` fires `model_select`,
+ * which an extension such as `@xynogen/pix-models` answers by writing `defaultProvider`/`defaultModel` into
+ * `<worktree>/.pi/settings.json`, and the factory's commit of the worktree then took that file).
+ */
+export function piArgs(sessionDir: string, sessionId: string, message: string): string[] {
+  const args = ["--mode", "rpc", "--session-dir", sessionDir, "--session-id", sessionId];
+  const text = message.trimStart();
+  if (!text.startsWith(START_PREFIX)) return args;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text.slice(START_PREFIX.length));
+  } catch {
+    return args;
+  }
+  const models = isRecord(payload) && isRecord(payload.settings) ? payload.settings.models : undefined;
+  const coder = isRecord(models) ? models.coder : undefined;
+  return typeof coder === "string" && /^[^/\s]+\/\S+$/.test(coder) ? [...args, "--model", coder] : args;
+}
+
 /**
  * Runs the message to the task's rest, sending the lines of `inboxPath` meanwhile, and resolves with the runner's exit
  * code.
@@ -167,7 +192,7 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
   const plain = !message.trimStart().startsWith("/");
   const mustLeave = plain || LEAVES_REST.test(message.trim());
   let inboxOffset = await readInboxOffset(inboxPath);
-  const pi = Bun.spawn(["pi", "--mode", "rpc", "--session-dir", sessionDir, "--session-id", sessionId], {
+  const pi = Bun.spawn(["pi", ...piArgs(sessionDir, sessionId, message)], {
     cwd: worktree,
     env: { ...process.env, [TASK_SESSION_ENV]: "1", [TASK_WAVE_ENV]: undefined },
     stdin: "pipe",

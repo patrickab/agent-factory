@@ -32,7 +32,7 @@ export function withoutPaths(text: string): string {
  * A home directory as `~`, any other absolute path as `<path>`, a uuid (task, wave, session) as its short id. With
  * `keepPaths` (the `repos.*` answers, whose repository paths are the handles an agent passes back) only the home goes.
  */
-function scrub(text: string, keepPaths = false): string {
+export function scrub(text: string, keepPaths = false): string {
   const homeless = text.replace(HOME, "~");
   return (keepPaths ? homeless : withoutPaths(homeless)).replace(UUID, "$1");
 }

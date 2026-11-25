@@ -45,6 +45,7 @@
  *   are `gates` and `task_gates` (`taskWave`), not `merge_gates`: the wave runs those
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { sessionWidget } from "../session-widget.ts";
 import type { WaveView } from "../waves.ts";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
@@ -153,7 +154,11 @@ export default function (pi: ExtensionAPI) {
     setModel: async (name) => {
       const slash = name.indexOf("/");
       const model = ctx.modelRegistry.find(name.slice(0, slash), name.slice(slash + 1));
-      return model !== undefined && (await pi.setModel(model));
+      if (model === undefined) return false;
+      // Already on it (the runner starts Pi with `--model`): no switch, so no `model_select` that an extension could
+      // persist into the worktree's `.pi/settings.json`.
+      if (ctx.model?.provider === model.provider && ctx.model.id === model.id) return ctx.modelRegistry.hasConfiguredAuth(model);
+      return pi.setModel(model);
     },
     hasPendingMessages: () => ctx.hasPendingMessages(),
     followUps: () => followUpMessages(ctx.sessionManager.getBranch()),
@@ -215,7 +220,9 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setWidget(WAVES_WIDGET, undefined);
       return;
     }
-    ctx.ui.setWidget(WAVES_WIDGET, () => ({ render: (width: number) => sessionWidget(waves, { showFinished, width }), invalidate: () => undefined }));
+    // sessionWidget counts code points; a wide character takes two columns, so pi-tui cuts every line to the width.
+    const render = (width: number) => sessionWidget(waves, { showFinished, width }).map((line) => truncateToWidth(line, width));
+    ctx.ui.setWidget(WAVES_WIDGET, () => ({ render, invalidate: () => undefined }));
   };
 
   let notifier: Notifier | undefined;
