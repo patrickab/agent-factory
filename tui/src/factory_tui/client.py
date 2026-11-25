@@ -58,6 +58,9 @@ class FactoryClient:
             done = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False)
         except FileNotFoundError:
             raise FactoryCliError("failed", f"factory CLI not found: {self.binary} (set FACTORY_CLI)") from None
+        except OSError as error:  # not executable, a directory, ...: the CLI cannot start
+            reason = error.strerror or str(error)
+            raise FactoryCliError("failed", f"factory CLI cannot start: {self.binary}: {reason}") from None
         except subprocess.TimeoutExpired:
             raise FactoryCliError("failed", f"{action} timed out after {TIMEOUT_SECONDS}s") from None
         if done.returncode != 0:
@@ -70,20 +73,27 @@ class FactoryClient:
             raise FactoryCliError("failed", f"{action}: output is not a JSON object")
         return result
 
+    def list_of(self, action: str, key: str, params: dict[str, Any] | None = None) -> list:
+        """`result[key]` of one call, a list (missing means empty); any other shape is the CLI's error."""
+        value = self.call(action, params).get(key, [])
+        if not isinstance(value, list):
+            raise FactoryCliError("failed", f"{action}: {key} is not a list")
+        return value
+
     def repos(self) -> list[str]:
-        return list(self.call("repos.list").get("repos", []))
+        return self.list_of("repos.list", "repos")
 
     def tasks(self) -> list[dict]:
-        return list(self.call("tasks.list").get("tasks", []))
+        return self.list_of("tasks.list", "tasks")
 
     def waves(self) -> list[dict]:
         """Every wave; none while the installed factory has no `waves.list`."""
         try:
-            return list(self.call("waves.list").get("waves", []))
+            return self.list_of("waves.list", "waves")
         except FactoryCliError as error:
             if error.unknown_action:
                 return []
             raise
 
     def timeline(self, task_id: str) -> list[dict]:
-        return list(self.call("tasks.timeline", {"id": task_id}).get("entries", []))
+        return self.list_of("tasks.timeline", "entries", {"id": task_id})

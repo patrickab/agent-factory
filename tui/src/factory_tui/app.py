@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -81,6 +82,14 @@ def matches(query: str, *fields: Any) -> bool:
     return query in " ".join(str(value) for value in fields if value).lower()
 
 
+def guarded(what: str, build: Callable[[], Text]) -> Text:
+    """The detail text, or one red error line when the CLI's JSON is not the shape it reads."""
+    try:
+        return build()
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as error:
+        return Text(f"cannot show this {what}: unexpected JSON ({type(error).__name__}: {error})", style="red")
+
+
 @dataclass(frozen=True)
 class Item:
     """What a tree node stands for. `key` survives a refresh, so the cursor and collapsed nodes do too."""
@@ -98,14 +107,60 @@ class Snapshot:
     errors: list[str] = field(default_factory=list)
 
 
+NUMBER = (int, float)
+USAGE_SHAPE = {"input": NUMBER, "output": NUMBER, "cost": NUMBER}
+COUNTS_SHAPE = {"done": int, "total": int}
+WAVE_SHAPE = {
+    "id": str, "repo": str, "tag": str, "title": str, "stage": str, "branch": str, "createdAt": str, "tasks": list
+}  # fmt: skip
+TASK_SHAPE = {"id": str, "repo": str, "title": str, "state": str, "createdAt": str}
+
+
+def shape_problem(record: Any, shape: dict[str, Any]) -> str | None:
+    """The first field of `record` the tree cannot read, else None."""
+    if not isinstance(record, dict):
+        return "not an object"
+    for key, kind in shape.items():
+        if not isinstance(record.get(key), kind) or isinstance(record.get(key), bool):
+            return f"{key} is not {kind.__name__ if isinstance(kind, type) else 'a number'}"
+    return None
+
+
+def record_problem(name: str, record: Any) -> str | None:
+    """Why the tree cannot show this repo, wave or task, else None. The detail pane guards the rest itself."""
+    if name == "repos":
+        return None if isinstance(record, str) else "not a path"
+    if problem := shape_problem(record, WAVE_SHAPE if name == "waves" else TASK_SHAPE):
+        return problem
+    if name == "waves" and (problem := shape_problem(record.get("counts"), COUNTS_SHAPE)):
+        return f"counts: {problem}"
+    if record.get("usage") is not None and (problem := shape_problem(record["usage"], USAGE_SHAPE)):
+        return f"usage: {problem}"
+    return None
+
+
 def load_snapshot(client: Client) -> Snapshot:
-    """One read of the factory. A failing call leaves its part empty and adds an error; `waves.list` missing is no error."""
+    """One read of the factory. A failing call leaves its part empty and adds an error; `waves.list` missing is no error.
+    A record of the wrong shape is left out with an error line naming it."""
     snapshot = Snapshot()
     for name, read in (("repos", client.repos), ("waves", client.waves), ("tasks", client.tasks)):
         try:
-            setattr(snapshot, name, read())
+            records = read()
         except FactoryCliError as error:
             snapshot.errors.append(f"{name}: {error}")
+            continue
+        if not isinstance(records, list):
+            snapshot.errors.append(f"{name}: not a list")
+            continue
+        kept = []
+        for index, record in enumerate(records):
+            problem = record_problem(name, record)
+            if problem is None:
+                kept.append(record)
+            else:
+                label = record.get("id") if isinstance(record, dict) and isinstance(record.get("id"), str) else index
+                snapshot.errors.append(f"{name}: {label}: {problem}")
+        setattr(snapshot, name, kept)
     return snapshot
 
 
@@ -202,11 +257,13 @@ class FactoryView(App[None]):
             tasks = [task for task in snapshot.tasks if task.get("repo") == repo and not task.get("wave")]
             if query:
                 waves = [w for w in waves if matches(query, w["id"], w["tag"], w["title"], w["stage"], w["branch"])]
-                tasks = [t for t in tasks if matches(query, t["id"], t["tag"], t["title"], t["state"], t["branch"])]
+                tasks = [
+                    t for t in tasks if matches(query, t["id"], t.get("tag"), t["title"], t["state"], t.get("branch"))
+                ]
                 if not waves and not tasks:
                     continue
             node = self.add_node(tree.root, Item("repo", ("repo", repo), repo), Text(short(repo), style="bold"))
-            for added in self.add_waves(node, repo, waves) + self.add_tasks(node, repo, tasks):
+            for added in [node, *self.add_waves(node, repo, waves), *self.add_tasks(node, repo, tasks)]:
                 if keep and added.data is not None and added.data.key == keep:
                     found = added
         cursor = found or self.first_leaf(tree.root)
@@ -233,12 +290,12 @@ class FactoryView(App[None]):
                 if prefix not in groups:
                     below = [w for w in waves if w["tag"].startswith(prefix + "/")]
                     label = self.row(
-                        segments[depth - 1], sum_counts(below), None, sum_usage([w["usage"] for w in below])
+                        segments[depth - 1], sum_counts(below), None, sum_usage([w.get("usage") for w in below])
                     )
                     groups[prefix] = self.add_node(node, Item("group", ("group", repo, prefix), (prefix, below)), label)
                     added.append(groups[prefix])
                 node = groups[prefix]
-            label = self.row(segments[-1], wave["counts"], wave["stage"], wave["usage"], wave["title"])
+            label = self.row(segments[-1], wave["counts"], wave["stage"], wave.get("usage"), wave["title"])
             if wave.get("interrupted"):
                 label.append("  interrupted", style="red")
             added.append(self.add_node(node, Item("wave", ("wave", wave["id"]), wave), label, leaf=True))
@@ -302,20 +359,20 @@ class FactoryView(App[None]):
             body.update(Text(errors or "no repositories, waves or tasks", style="red" if errors else "dim"))
         elif item.kind == "wave":
             detail.border_title, detail.border_subtitle = f"wave {item.data['tag']}", item.data["id"]
-            body.update(self.wave_text(item.data))
+            body.update(guarded("wave", lambda: self.wave_text(item.data)))
         elif item.kind == "task":
             detail.border_title, detail.border_subtitle = "task", item.data["id"]
             self.timeline = []
-            body.update(self.task_text(item.data, None))
+            body.update(guarded("task", lambda: self.task_text(item.data, None)))
             self.load_timeline(item.data)
         elif item.kind == "group":
             prefix, waves = item.data
             detail.border_title = prefix
-            body.update(self.group_text(waves))
+            body.update(guarded("group", lambda: self.group_text(waves)))
         elif item.kind == "repo":
             detail.border_title = short(item.data)
             repo_waves = [wave for wave in self.snapshot.waves if wave.get("repo") == item.data]
-            body.update(self.group_text(repo_waves))
+            body.update(guarded("repository", lambda: self.group_text(repo_waves)))
         else:
             detail.border_title = "tasks"
             body.update(Text("tasks outside a wave", style="dim"))
@@ -332,14 +389,16 @@ class FactoryView(App[None]):
         if not self.selected or self.selected.key != ("task", task["id"]):
             return
         self.timeline = entries if isinstance(entries, list) else []
-        self.query_one("#body", Static).update(self.task_text(task, entries))
+        self.query_one("#body", Static).update(guarded("task", lambda: self.task_text(task, entries)))
 
     @staticmethod
     def group_text(waves: list[dict]) -> Text:
         counts = sum_counts(waves)
         text = Text.assemble(("waves  ", "dim"), str(len(waves)), "\n")
         text.append_text(Text.assemble(("tasks  ", "dim"), f"{counts['done']}/{counts['total']} done", "\n"))
-        text.append_text(Text.assemble(("usage  ", "dim"), usage_text(sum_usage([w["usage"] for w in waves])), "\n"))
+        text.append_text(
+            Text.assemble(("usage  ", "dim"), usage_text(sum_usage([w.get("usage") for w in waves])), "\n")
+        )
         for wave in sorted(waves, key=lambda wave: wave["tag"]):
             line = Text.assemble(
                 "\n", (wave["tag"], "bold"), "  ", f"{wave['counts']['done']}/{wave['counts']['total']}  "
@@ -372,6 +431,8 @@ class FactoryView(App[None]):
         if wave.get("request"):
             text.append("\n" + wave["request"].strip() + "\n", style="italic")
         text.append("\ntasks\n", style="bold")
+        if not wave["tasks"]:
+            text.append("  none\n", style="dim")
         for task in wave["tasks"]:
             line = Text.assemble("  ", styled(task["state"]), "  ", (task["key"], "bold"), f"  {task['title']}")
             if task.get("usage"):

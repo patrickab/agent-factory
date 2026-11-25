@@ -40,6 +40,8 @@ pi mcp add factory -- factory-mcp  # only for a harness that wants the MCP tool 
   (`package.json` `pi.extensions`: `src/pi/index.ts`); the runner passes no `-e`
 - On PATH: `pi`, `git`, `bun` (the detached task runner), `pgrep` (finds a task's runner; without it task actions
   fail), `sh`, `awk`, `flock` and `sleep` (the merge lock and queue)
+- Optional terminal view: `factory-tui` (`tui/`, read-only, the full view over `factory ... --json`), install with
+  `uv tool install ./tui`
 - Linux is the supported platform (`flock`, `/proc` for process liveness); macOS is untested
 - Optional: `agent-worktree` on PATH. When it is there, task worktrees are made with it, else with `git worktree add`
   into `<repo>/../worktrees/<repo name>/<task>`

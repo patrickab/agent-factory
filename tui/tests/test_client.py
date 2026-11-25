@@ -1,5 +1,6 @@
 import json
 import stat
+import subprocess
 
 import pytest
 
@@ -10,7 +11,9 @@ def fake_cli(tmp_path, script: str):
     """A fake `factory` executable: a python script that sees argv and writes its answer."""
     path = tmp_path / "factory"
     path.write_text(
-        f"#!/usr/bin/env python3\nimport json, sys\naction, params = sys.argv[1], json.loads(sys.argv[2])\n{script}\n"
+        "#!/usr/bin/env python3\nimport json, sys\n"
+        "assert sys.argv[3:] == ['--json'], sys.argv  # the full view, never the agent text\n"
+        f"action, params = sys.argv[1], json.loads(sys.argv[2])\n{script}\n"
     )
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
     return str(path)
@@ -63,3 +66,25 @@ def test_binary_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("FACTORY_CLI", binary)
     assert FactoryClient().repos() == ["/r"]
     assert json.loads(json.dumps(FactoryClient().binary)) == binary
+
+
+def test_fake_cli_refuses_a_call_without_json(tmp_path):
+    binary = fake_cli(tmp_path, "print(json.dumps({}))")
+    done = subprocess.run([binary, "repos.list", "{}"], capture_output=True, text=True, check=False)
+    assert done.returncode != 0 and "AssertionError" in done.stderr
+
+
+def test_cli_that_cannot_start_is_a_cli_error(tmp_path):
+    binary = tmp_path / "factory"
+    binary.write_text("#!/bin/sh\n")  # not executable: PermissionError, an OSError
+    with pytest.raises(FactoryCliError) as raised:
+        FactoryClient(str(binary)).call("repos.list")
+    assert raised.value.code == "failed" and "cannot start" in raised.value.message
+    with pytest.raises(FactoryCliError, match="cannot start"):
+        FactoryClient(str(tmp_path)).call("repos.list")  # a directory
+
+
+def test_list_of_wrong_shape_is_a_cli_error(tmp_path):
+    binary = fake_cli(tmp_path, "print(json.dumps({'waves': 7}))")
+    with pytest.raises(FactoryCliError, match="waves is not a list"):
+        FactoryClient(binary).waves()

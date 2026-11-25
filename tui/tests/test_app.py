@@ -1,3 +1,5 @@
+from textual.widgets import Tree
+
 from factory_tui.app import FactoryView
 from factory_tui.client import FactoryCliError
 
@@ -241,3 +243,66 @@ async def test_q_quits():
     async with app.run_test() as pilot:
         await pilot.press("q")
         assert not app.is_running
+
+
+async def test_refresh_keeps_the_cursor_on_a_repository_row():
+    client = FakeClient()
+    app = FactoryView(client, refresh_seconds=0)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await started(app, pilot)
+        await pilot.press("k", "k", "k")  # w1 -> m1 -> factory -> /repo
+        await pilot.pause()
+        assert selected(app).key == ("repo", "/repo")
+        await pilot.press("r")
+        await started(app, pilot)
+        assert selected(app).key == ("repo", "/repo")
+        cursor = app.query_one(Tree).cursor_node
+        assert cursor is not None and cursor.data is not None and cursor.data.key == ("repo", "/repo")
+
+
+async def test_wrong_shaped_json_is_an_error_line_not_a_crash():
+    broken_wave = {**wave("w4444", "x/w1", 0, 1), "counts": "lots"}
+    detail_broken = {**wave("w55555", "y/w1", 0, 1), "tasks": [{"title": "no key or state"}]}
+    client = FakeClient(waves=[broken_wave, detail_broken, "not a wave"], tasks=[task("t1", "fine"), {"id": "t2"}])
+    app = FactoryView(client, refresh_seconds=0)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await started(app, pilot)
+        assert app.is_running
+        assert app.snapshot.errors == [
+            "waves: w4444: counts: not an object",
+            "waves: 2: not an object",
+            "tasks: t2: repo is not str",
+        ]
+        assert [w["id"] for w in app.snapshot.waves] == ["w55555"]
+        assert selected(app).key == ("wave", "w55555")
+        assert "cannot show this wave: unexpected JSON (KeyError" in body(app)
+
+
+async def test_null_usage_everywhere():
+    quiet = wave("w1", "a/w1", 0, 1, usage=None)
+    quiet["tasks"][0]["usage"] = None
+    loose = {**task("t1", "loose"), "usage": None}
+    app = FactoryView(FakeClient(waves=[quiet], tasks=[loose]), refresh_seconds=0)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await started(app, pilot)
+        assert app.snapshot.errors == []
+        assert labels(app)[1] == "  a  0/1"  # no cost on the group
+        assert labels(app)[2].startswith("    w1  0/1  building  title w1")
+        assert "usage  none" in body(app)
+        await pilot.press("k")
+        await pilot.pause()
+        assert "usage  none" in body(app)  # the group sums nothing
+        for _ in range(4):
+            await pilot.press("down")
+        await started(app, pilot)
+        assert selected(app).key == ("task", "t1") and "usage  none" in body(app)
+
+
+async def test_wave_without_tasks():
+    empty = wave("w1", "a/w1", 0, 0, tasks=[], usage=None)
+    app = FactoryView(FakeClient(waves=[empty], tasks=[]), refresh_seconds=0)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await started(app, pilot)
+        assert labels(app) == ["/repo", "  a  0/0", "    w1  0/0  building  title w1"]
+        assert selected(app).key == ("wave", "w1")
+        assert "tasks\n  none" in body(app)
