@@ -10,7 +10,10 @@ hooks:
 # After every coder turn: types only.
 gates:
   - [bun, run, types]
-# In the merge queue, on the rebased branch: types and the whole suite.
+# When a wave's task merges into the wave's branch: the tests its change reaches.
+task_gates:
+  - [bun, scripts/changed-tests.ts]
+# Once per wave before its review, and at the merge of a task outside a wave: types and the whole suite.
 merge_gates:
   - [bun, run, types]
   - [bun, run, test]

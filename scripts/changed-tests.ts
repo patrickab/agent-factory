@@ -87,6 +87,8 @@ if (import.meta.main) {
     process.exit(0);
   }
   console.log(`changed-tests: ${tests.length} test file(s): ${tests.join(" ")}`);
-  const run = Bun.spawnSync(["bun", "test", ...tests.map((path) => `./${path}`)], { cwd: root, stdout: "inherit", stderr: "inherit" });
+  // The tests run without FACTORY_BASE: it is this gate's input, and tests that check a command's environment would see it.
+  const { FACTORY_BASE: _base, ...env } = process.env;
+  const run = Bun.spawnSync(["bun", "test", ...tests.map((path) => `./${path}`)], { cwd: root, env, stdout: "inherit", stderr: "inherit" });
   process.exit(run.exitCode ?? 1);
 }
