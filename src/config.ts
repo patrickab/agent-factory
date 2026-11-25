@@ -38,6 +38,9 @@ export interface FactoryConfig {
 
 export const DEFAULT_PROTECTED = ["factory.yaml", ".factory/**"];
 
+/** The top-level keys of `factory.yaml`; any other is an error (a misspelt `task_gates` must not pass unnoticed). `preview` belongs to the backend. */
+const KNOWN_KEYS = ["hooks", "gates", "merge_gates", "task_gates", "protected", "lockfiles", "preview"];
+
 function argvList(value: unknown, key: string): string[][] {
   if (value === undefined || value === null) return [];
   const valid =
@@ -53,6 +56,8 @@ export function parseFactoryConfig(raw: unknown): FactoryConfig {
     return { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
   }
   if (!isRecord(raw)) throw new Error("factory.yaml: the document must be a mapping");
+  const unknown = Object.keys(raw).filter((key) => !KNOWN_KEYS.includes(key));
+  if (unknown.length > 0) throw new Error(`factory.yaml: unknown key ${unknown.join(", ")} (known: ${KNOWN_KEYS.join(", ")})`);
   const hooks = raw.hooks ?? {};
   if (!isRecord(hooks)) throw new Error("factory.yaml: hooks must be a mapping");
   const globs = raw.protected ?? DEFAULT_PROTECTED;

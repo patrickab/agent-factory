@@ -376,6 +376,29 @@ describe("the wave runner", () => {
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
   }, 30_000);
 
+  test("an invalid factory.yaml blocks the wave as infra, naming the file; nothing is reviewed or merged", async () => {
+    const repo = await waveRepo("gates: []\ntask_gate: []\n");
+    await runWave(WAVE);
+    const wave = await getWave();
+    expect([wave.stage, wave.reason, wave.reviews]).toEqual(["blocked", "infra", []]);
+    const timeline = (await callAction("waves.timeline", { id: WAVE })) as { events: { kind: string; detail?: string }[] };
+    expect(timeline.events.at(-1)?.detail).toContain("factory.yaml: unknown key task_gate");
+    expect(git(repo, "log", "--format=%s", "main")).toBe("init");
+    expect(existsSync(reviewWorktree(repo))).toBe(false);
+  });
+
+  test("a review worktree created again after the review ran the after_create hooks again", async () => {
+    const count = join(caseDir, "hook-count");
+    await waveRepo(`hooks:\n  after_create:\n    - ["sh", "-c", "echo x >> ${count}"]\ngates: []\n`, "done", { merge: "review" });
+    await runWave(WAVE);
+    expect((await getWave()).stage).toBe("waiting_approve");
+    expect(readFileSync(count, "utf8")).toBe("x\n");
+    await callAction("waves.approve", { id: WAVE });
+    await until(async () => (await getWave()).stage === "merged");
+    await until(async () => (await liveWaveRunners(WAVE)).length === 0);
+    expect(readFileSync(count, "utf8")).toBe("x\nx\n");
+  }, 30_000);
+
   test("a dirty review worktree blocks it with reason dirty; the file and the worktree stay", async () => {
     const repo = await waveRepo('hooks:\n  after_create:\n    - ["sh", "-c", "echo x > stray.txt"]\ngates: []\n');
     await runWave(WAVE);

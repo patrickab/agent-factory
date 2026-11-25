@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_PROTECTED, globToRegExp, loadTaskFiles, parseFactoryConfig, protectedPaths, rolePromptText } from "./config.ts";
+import { DEFAULT_PROTECTED, globToRegExp, loadTaskFiles, parseFactoryConfig, parseFactoryYaml, protectedPaths, rolePromptText } from "./config.ts";
 import { LOCKFILES } from "./git.ts";
 import { CommandRunner } from "./run.ts";
 
@@ -25,9 +25,14 @@ describe("parseFactoryConfig", () => {
     expect(parseFactoryConfig({ gates: [] }).lockfiles).toEqual(["uv.lock", "package-lock.json", "bun.lock", "bun.lockb"]);
   });
 
-  test("reads hooks, gates and protected, ignores the keys of other consumers", () => {
+  test("an unknown top-level key is an error (a misspelt task_gates), the backend's preview is not", () => {
+    expect(() => parseFactoryConfig({ task_gate: [["x"]] })).toThrow("factory.yaml: unknown key task_gate");
+    expect(() => parseFactoryYaml("gates: []\nhoks: {}\n")).toThrow("factory.yaml: unknown key hoks");
+    expect(parseFactoryConfig({ preview: { processes: [] } }).gates).toEqual([]);
+  });
+
+  test("reads hooks, gates and protected, ignores the keys inside the known ones", () => {
     const config = parseFactoryConfig({
-      profile: "old",
       hooks: { after_create: [["npm", "ci"]], after_code: [["make", "fmt"]], after_merge: [["bun", "install"]], before_remove: [] },
       gates: [["bash", "factory/gates.sh", "lint"], ["sleep", 1]],
       protected: ["factory.yaml", "secrets/**"],

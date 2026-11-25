@@ -11,7 +11,6 @@ import { initDraft } from "./draft.ts";
 import {
   abortLeftoverRebase,
   git,
-  LOCKFILES,
   nulList,
   primaryCheckout,
   rebaseInProgress,
@@ -183,7 +182,12 @@ export async function openRun(deps: OpsDeps, current: Snapshot): Promise<RunOpen
   const { runner } = deps.session;
   const open = await rebaseInProgress(runner.cleanup, deps.cwd);
   if (open) return { conflict: conflictFeedback(current.round, task.mainBranch, open, true) };
-  const protectedGlobs = (await taskFiles(deps, task).catch(() => undefined))?.config.protected ?? [];
+  let protectedGlobs: string[];
+  try {
+    protectedGlobs = (await taskFiles(deps, task)).config.protected;
+  } catch (error) {
+    return { failed: `infra: ${errorText(error)}` };
+  }
   try {
     const conflicts = await rebaseWorktree(runner.cleanup, runner.cleanup, deps.cwd, task, protectedGlobs);
     return conflicts ? { conflict: conflictFeedback(current.round, task.mainBranch, conflicts, false) } : {};
@@ -252,7 +256,7 @@ export async function finishMerge(deps: OpsDeps, current: Snapshot): Promise<voi
     const mergeSteps = pipelineSteps(deps, current.task, await taskFiles(deps, current.task), true);
     drafts = await runMerge(current, mergeSteps.config(), mergeSteps);
   } catch (error) {
-    drafts = [session.runner.cancelled ? stateDraft("cancelled", current.round, "cancelled") : stateDraft("blocked", current.round, `pipeline_error: ${errorText(error)}`)];
+    drafts = [session.runner.cancelled ? stateDraft("cancelled", current.round, "cancelled") : stateDraft("blocked", current.round, `${isConfigError(error) ? "infra" : "pipeline_error"}: ${errorText(error)}`)];
   }
   // The task then stays `merging` in the file and is reconciled on `session_start`.
   if (session.disposed) return;
@@ -276,11 +280,15 @@ async function landedMerge(deps: OpsDeps, current: Snapshot): Promise<Draft[] | 
   const target = `refs/heads/${current.task.mainBranch}`;
   if ((await exec(["git", "merge-base", "--is-ancestor", intent.commit, target], { cwd: primary })).exitCode !== 0) return undefined;
   const changed = nulList(await git(exec, primary, ["diff", "--no-renames", "--name-only", "-z", intent.before, intent.commit]));
-  // The rules of the run the merge belonged to; the default list when they cannot be read any more.
-  const lockfiles = (await taskFiles(deps, current.task).catch(() => undefined))?.config.lockfiles ?? LOCKFILES;
+  // The rules of the run the merge belonged to; an unreadable `factory.yaml` throws (the caller blocks the task as infra).
+  const lockfiles = (await taskFiles(deps, current.task)).config.lockfiles;
   const error = changed.some((path) => lockfiles.includes(basename(path))) ? "after_merge did not run: the session ended during the merge" : null;
   const merge: MergeData = { ok: true, commit: intent.commit, error, depsSynced: false };
   return [customDraft("factory-merge", merge), stateDraft("done", current.round, error ? "merged, after_merge failed" : "merged")];
+}
+
+function isConfigError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("factory.yaml:");
 }
 
 /**
@@ -289,7 +297,12 @@ async function landedMerge(deps: OpsDeps, current: Snapshot): Promise<Draft[] | 
  */
 export async function resumeTask(deps: OpsDeps, current: Snapshot): Promise<void> {
   if (current.state === "merging") {
-    const landed = await landedMerge(deps, current).catch(() => undefined);
+    let landed: Draft[] | undefined;
+    try {
+      landed = await landedMerge(deps, current);
+    } catch (error) {
+      if (isConfigError(error)) return endState(deps, current, "blocked", `infra: ${errorText(error)}`);
+    }
     if (landed) return recordDrafts(deps, landed);
   }
   if (current.state === "merging") await abortLeftoverRebase(deps.session.runner.cleanup, deps.cwd).catch(() => undefined);

@@ -15,6 +15,7 @@ import {
   CODER_REQUEST_LINE,
   coderRequest,
   initConfig,
+  openRun,
   newTaskSession,
   pipelineSteps,
   record,
@@ -217,6 +218,18 @@ describe("factory.yaml lockfiles", () => {
     await resumeTask(pi.deps, pi.deps.session.snapshot!);
     expect(pi.entries.find((entry) => entry.customType === "factory-merge")?.data.error).toBe("after_merge did not run: the session ended during the merge");
     expect(pi.states().at(-1)).toBe("done/merged, after_merge failed");
+  });
+});
+
+describe("an invalid factory.yaml", () => {
+  test("a run does not open on defaults: the task blocks as infra, naming the file and the error", async () => {
+    writeFileSync(join(repo, "factory.yaml"), "task_gate: []\n");
+    gitIn(repo, "commit", "--quiet", "-am", "typo");
+    const worktree = addTaskWorktree();
+    const pi = fake(worktree);
+    pi.holdTask("blocked");
+    const opening = await openRun(pi.deps, pi.deps.session.snapshot!);
+    expect(opening.failed).toStartWith("infra: factory.yaml: unknown key task_gate");
   });
 });
 
