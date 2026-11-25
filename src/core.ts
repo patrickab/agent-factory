@@ -75,6 +75,8 @@ import {
   removeWave,
   RESTING_WAVE_STAGES,
   startableKeys,
+  stuckKeys,
+  unreachableKeys,
   unlockWave,
   validateTaskSpecs,
   waveCounts,
@@ -223,7 +225,7 @@ export const ACTIONS = {
     {
       record: {
         type: "object",
-        description: "id, repo, worktree, branch, title, sessionId, sessionDir, createdAt: non-empty strings; optional tag (default the system user), plan (string or null)",
+        description: "id, repo, worktree, branch, title, sessionId, sessionDir, createdAt: non-empty strings; optional tag (default the system user), plan (string or null). A wave field is dropped: an imported task belongs to no wave",
       },
     },
     ["record"],
@@ -251,7 +253,7 @@ export const ACTIONS = {
     true,
   ),
   "tasks.wait": spec(
-    "Wait until the watched tasks and waves rest or one needs attention, or the timeout passes. A task rests with no runner in waiting_approve, waiting_answer, blocked, done or cancelled, or interrupted; it needs attention resting and not done (a cancelled task of a watched wave left the wave and needs none). A wave rests merged or cancelled; it needs attention rejected, blocked, waiting_approve or interrupted; its tasks resting while it builds, reviews or merges is not the end. Answers {tasks, waves, attention: task and wave ids, timedOut}",
+    "Wait until the watched tasks and waves rest or one needs attention, or the timeout passes. A task rests with no runner in waiting_approve, waiting_answer, blocked, done or cancelled, or interrupted; it needs attention resting and not done (a cancelled task of a watched wave left the wave and needs none). A wave rests merged or cancelled; it needs attention rejected, blocked, waiting_approve, interrupted, or building with tasks that can never start (a task they wait for was cancelled or removed) while none of its tasks runs; its tasks resting while it builds, reviews or merges is not the end. Answers {tasks, waves, attention: task and wave ids, timedOut}",
     {
       ids: { type: "array", items: { type: "string" }, description: "Watch these tasks (ids or unique prefixes); give exactly one of ids, tag and wave" },
       tag: {
@@ -303,7 +305,7 @@ export const ACTIONS = {
     true,
   ),
   "waves.add": spec(
-    "Add tasks to a wave (after may name its existing keys); a rejected, blocked, reviewing or waiting_approve wave builds again. Answers {wave}",
+    "Add tasks to a wave (after may name its existing keys); a rejected, blocked, reviewing or waiting_approve wave builds again. Pending tasks that can never start (a task they wait for was cancelled or removed) are dropped: they count as cancelled. Answers {wave}",
     {
       id: WAVE_ID,
       tasks: { type: "array", description: "Tasks as for waves.start", items: { type: "object" } },
@@ -324,7 +326,12 @@ export const ACTIONS = {
     ["id"],
     false,
   ),
-  "waves.retry": spec("Run a blocked or interrupted wave again: review and merge from the rebase on (an interrupted one resumes from its log). Answers {wave}", { id: WAVE_ID }, ["id"], true),
+  "waves.retry": spec(
+    "Run a blocked or interrupted wave again: a blocked wave with tasks not started or not finished builds again (starts them), else review and merge from the rebase on; an interrupted one resumes from its log. Answers {wave}",
+    { id: WAVE_ID },
+    ["id"],
+    true,
+  ),
   "waves.approve": spec("Merge a wave waiting for approve (its merge setting is review). Answers {wave}", { id: WAVE_ID }, ["id"], true),
   "waves.cancel": spec("Stop a wave: cancel its tasks that are not done or cancelled, stop its runner; its branch stays. Answers {wave}", { id: WAVE_ID }, ["id"], true),
   "waves.remove": spec(
@@ -526,7 +533,7 @@ async function taskView(record: TaskRecord): Promise<TaskView> {
     settings,
     usage,
   };
-  return { ...view, actions: taskActions(view) };
+  return { ...view, actions: taskActions(view, record.kind === "merge_request") };
 }
 
 const APPROVE_STATES: readonly State[] = ["waiting_approve"];
@@ -538,16 +545,27 @@ function isActive(view: Omit<TaskView, "actions">): boolean {
   return view.running || (view.state !== null && !RESTING_STATES.includes(view.state) && !view.interrupted);
 }
 
-/** The predicates of the task actions' own checks (`requireState`, the lock, the runner), as one list for clients. */
-function taskActions(view: Omit<TaskView, "actions">): TaskActionName[] {
+/**
+ * The predicates of the task actions' own checks (`requireState`, the lock, the runner), as one list for clients. An
+ * old merge request (`mergeRequest`) can only be removed.
+ */
+function taskActions(view: Omit<TaskView, "actions">, mergeRequest = false): TaskActionName[] {
   const allowed: Record<TaskActionName, boolean> = {
-    "tasks.approve": !view.running && !view.interrupted && view.state !== null && APPROVE_STATES.includes(view.state),
-    "tasks.retry": !view.running && (view.interrupted || (view.state !== null && RETRY_STATES.includes(view.state))),
-    "tasks.cancel": view.state === null || !FINAL_STATES.includes(view.state),
+    "tasks.approve": !mergeRequest && !view.running && !view.interrupted && view.state !== null && APPROVE_STATES.includes(view.state),
+    "tasks.retry": !mergeRequest && !view.running && (view.interrupted || (view.state !== null && RETRY_STATES.includes(view.state))),
+    "tasks.cancel": !mergeRequest && (view.state === null || !FINAL_STATES.includes(view.state)),
     "tasks.remove": !isActive(view) && view.state !== "waiting_answer",
-    "tasks.message": view.state !== null && view.state !== "merging",
+    "tasks.message": !mergeRequest && view.state !== null && view.state !== "merging",
   };
   return (Object.keys(allowed) as TaskActionName[]).filter((name) => allowed[name]);
+}
+
+/**
+ * Refuses `what` for an old merge request (invariant 7): it ran without a coder, under rules that are gone; no runner
+ * starts for it again, it can only be removed.
+ */
+function refuseMergeRequest(record: TaskRecord, what: string): void {
+  if (record.kind === "merge_request") throw new FactoryError("refused", `task ${shortId(record)} is an old merge request: ${what} is refused, it can only be removed`);
 }
 
 /** No runner lives and nothing moves the task on by itself: its state is a resting one, or it is interrupted. */
@@ -765,28 +783,50 @@ async function waitMayEnd(records: TaskRecord[], states: (State | null)[], waves
 /** The stages a resting wave waits for the supervisor in (`interrupted` too). */
 const WAVE_ATTENTION_STAGES: readonly WaveStage[] = ["rejected", "blocked", "waiting_approve"];
 
-/** No runner lives and nothing moves the wave on by itself: its stage is a resting one, or it is interrupted. */
-function waveRests(view: WaveView): boolean {
-  return view.interrupted || (!view.running && RESTING_WAVE_STAGES.includes(view.stage));
-}
-
-/** It rests and waits for the supervisor: `rejected`, `blocked`, `waiting_approve` or interrupted. */
-function waveNeedsAttention(view: WaveView): boolean {
-  return waveRests(view) && (view.interrupted || WAVE_ATTENTION_STAGES.includes(view.stage));
+/**
+ * No runner lives and nothing moves the wave on by itself: its stage is a resting one, it is interrupted, or it builds
+ * stuck (`stuckKeys`: tasks that can never start and nothing else running), where its runner rests too.
+ */
+function waveRests({ view, stuck }: WaveLook): boolean {
+  return view.interrupted || (!view.running && (stuck || RESTING_WAVE_STAGES.includes(view.stage)));
 }
 
 /**
- * One cheap look at the watched waves (their logs, a runner lookup only for a wave that does not rest): `attention`
- * when one may need it (a resting stage that asks for it, or no runner where one should live), `busy` when one still
- * moves (a runner builds, reviews or merges it).
+ * It waits for the supervisor (invariant 8): resting `rejected`, `blocked`, `waiting_approve` or interrupted, or stuck
+ * while it builds (whether or not its runner has rested yet).
  */
-async function pollWaves(files: WaveFile[]): Promise<{ attention: boolean; busy: boolean }> {
+function waveNeedsAttention(look: WaveLook): boolean {
+  return look.stuck || (waveRests(look) && (look.view.interrupted || WAVE_ATTENTION_STAGES.includes(look.view.stage)));
+}
+
+/**
+ * One cheap look at the watched waves (their logs, the polled states of a building wave's tasks, a runner lookup only
+ * for a wave that does not rest): `attention` when one may need it (a resting stage that asks for it, a building wave
+ * stuck, or no runner where one should live), `busy` when one still moves (a runner builds, reviews or merges it).
+ * `stateOf` is a started task's state, `undefined` when its record is gone (it counts as cancelled).
+ */
+async function pollWaves(files: WaveFile[], stateOf: (taskId: string) => Promise<State | null | undefined>): Promise<{ attention: boolean; busy: boolean }> {
   let attention = false;
   let busy = false;
   for (const file of files) {
-    const { stage } = foldWave(file.declaration, file.events);
-    if (RESTING_WAVE_STAGES.includes(stage)) attention ||= WAVE_ATTENTION_STAGES.includes(stage);
-    else if ((await liveWaveRunners(file.declaration.id)).length > 0) busy = true;
+    const fold = foldWave(file.declaration, file.events);
+    if (RESTING_WAVE_STAGES.includes(fold.stage)) {
+      attention ||= WAVE_ATTENTION_STAGES.includes(fold.stage);
+      continue;
+    }
+    if (fold.stage === "building") {
+      const states = new Map<string, string | null>();
+      for (const task of fold.tasks) {
+        if (task.taskId === null) continue;
+        const state = await stateOf(task.taskId);
+        states.set(task.key, state === undefined ? "cancelled" : state);
+      }
+      if (stuckKeys(fold, states).length > 0) {
+        attention = true;
+        continue;
+      }
+    }
+    if ((await liveWaveRunners(file.declaration.id)).length > 0) busy = true;
     else attention = true;
   }
   return { attention, busy };
@@ -815,17 +855,22 @@ async function waitForTasks(watched: Watched, ignore: string[], timeoutMs: numbe
     const records = all.records.filter((record) => !ignored(record.id));
     const leftWave = (record: TaskRecord, state: State | null) => state === "cancelled" && record.wave !== null && waveIds.has(record.wave);
     const timedOut = Date.now() >= deadline;
-    const waves = await pollWaves(files);
+    const byId = new Map(all.records.map((record) => [record.id, record]));
+    const waves = await pollWaves(files, async (taskId) => {
+      const record = byId.get(taskId);
+      return record === undefined ? undefined : polledState(record, cache);
+    });
     const states = (await Promise.all(records.map((record) => polledState(record, cache)))).map((state, index) => (leftWave(records[index], state) ? "done" : state));
     if (timedOut || waves.attention || (await waitMayEnd(records, states, waves.busy))) {
       const tasks = await Promise.all(records.map(taskView));
-      const waveViews = await Promise.all(files.map(waveView));
+      const looks = await Promise.all(files.map(waveLook));
+      const waveViews = looks.map((look) => look.view);
       const attention = [
         ...tasks.filter((view) => needsAttention(view) && !(view.state === "cancelled" && view.wave !== null && waveIds.has(view.wave))).map((view) => view.id),
-        ...waveViews.filter(waveNeedsAttention).map((view) => view.id),
+        ...looks.filter(waveNeedsAttention).map((look) => look.view.id),
       ];
       // The views are read after the poll: a task or wave that moved on in between is polled again.
-      if ((tasks.every(rests) && waveViews.every(waveRests)) || attention.length > 0) return { tasks, waves: waveViews, attention, timedOut: false };
+      if ((tasks.every(rests) && looks.every(waveRests)) || attention.length > 0) return { tasks, waves: waveViews, attention, timedOut: false };
       if (timedOut) return { tasks, waves: waveViews, attention, timedOut: true };
     }
     await abortableSleep(Math.min(WAIT_POLL_MS, deadline - Date.now()), signal);
@@ -1011,13 +1056,24 @@ function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["u
   return { input: (sum?.input ?? 0) + usage.input, output: (sum?.output ?? 0) + usage.output, cost: (sum?.cost ?? 0) + usage.cost };
 }
 
+/**
+ * A wave as `tasks.wait` judges it: its view, and whether it builds stuck (`stuckKeys`): tasks that can never start
+ * while nothing else moves it. A stuck wave rests (its runner does too) and needs attention; it is not interrupted.
+ */
+type WaveLook = { view: WaveView; stuck: boolean };
+
 /** The wave as clients see it: its fold, its tasks' states and usage, whether its runner lives. */
 async function waveView(file: WaveFile): Promise<WaveView> {
+  return (await waveLook(file)).view;
+}
+
+async function waveLook(file: WaveFile): Promise<WaveLook> {
   const full = foldWave(file.declaration, file.events);
-  const { overrides: _overrides, ...fold } = full;
+  const { overrides: _overrides, detail: _detail, ...fold } = full;
   const { states, views } = await waveTaskViews(full);
   const running = (await liveWaveRunners(fold.id)).length > 0;
-  const interrupted = !RESTING_WAVE_STAGES.includes(fold.stage) && !running;
+  const stuck = fold.stage === "building" && stuckKeys(full, states).length > 0;
+  const interrupted = !RESTING_WAVE_STAGES.includes(fold.stage) && !running && !stuck;
   let usage: WaveView["usage"] = null;
   const tasks = fold.tasks.map((task) => {
     const taskUsage = views.get(task.key)?.usage ?? null;
@@ -1035,14 +1091,16 @@ async function waveView(file: WaveFile): Promise<WaveView> {
     "waves.remove": !running && [...views.values()].every((view) => view.actions.includes("tasks.remove")),
   };
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
-  return { ...fold, running, interrupted, tasks, counts: waveCounts(full, states), usage, actions };
+  return { view: { ...fold, running, interrupted, tasks, counts: waveCounts(full, states), usage, actions }, stuck };
 }
 
 /**
  * The scheduler: starts every pending task of the wave whose `after` tasks are all `done`, through `launchTask` with
  * the wave's branch as target, its tag, plan and id, and records a `task` event for each. Only the wave's runner calls
- * it, holding the runner's lock: no task starts twice. Nothing starts unless the wave is `building`. Resolves with the
- * started keys.
+ * it, holding the runner's lock: no task starts twice. A record of this wave no `task` event names (a runner died
+ * between the launch and its event) is adopted for the first pending task of its title instead of a second launch.
+ * Nothing starts unless the wave is `building`. Resolves with the started keys; a launch that fails throws (`refused`
+ * or `failed`) after the tasks started before it are recorded.
  */
 export async function startWaveTasks(id: string, env?: RunnerEnv): Promise<string[]> {
   const { declaration, events } = await readWave(id);
@@ -1052,16 +1110,23 @@ export async function startWaveTasks(id: string, env?: RunnerEnv): Promise<strin
   const { models, maxRounds, review } = declaration.overrides;
   // A wave's task always merges into the wave branch by itself; `merge` of the overrides is the wave's.
   const overrides: StoredSettings = { models, maxRounds, review, merge: "auto", branch: declaration.branch };
+  const named = new Set(fold.tasks.map((task) => task.taskId));
+  const orphans = (await listTasks()).filter((record) => record.wave === id && !named.has(record.id));
   const started: string[] = [];
   for (const key of startableKeys(fold, states)) {
     const task = fold.tasks.find((candidate) => candidate.key === key);
     if (task === undefined) continue;
+    const orphan = orphans.findIndex((record) => record.title === task.title);
     let record: TaskRecord;
-    try {
-      record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, tag: declaration.tag, plan: declaration.plan, wave: id, env });
-    } catch (error) {
-      const why = `wave ${id.slice(0, SHORT_ID_CHARS)}: starting its task ${key} failed (${oneLine(errorText(error))}); the next waves.add or wave poke tries again`;
-      throw new FactoryError(error instanceof LaunchRefusedError ? "refused" : "failed", why);
+    if (orphan >= 0) {
+      [record] = orphans.splice(orphan, 1);
+    } else {
+      try {
+        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, tag: declaration.tag, plan: declaration.plan, wave: id, env });
+      } catch (error) {
+        const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
+        throw new FactoryError(error instanceof LaunchRefusedError ? "refused" : "failed", why);
+      }
     }
     await appendWaveEvent(id, { kind: "task", key, taskId: record.id, sessionId: record.sessionId });
     started.push(key);
@@ -1190,7 +1255,8 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const raw = params.record as Record<string, unknown>;
     let record: TaskRecord;
     try {
-      record = parseTaskRecord(raw, String(raw.id));
+      // Invariant 4: only `waves.start`/`waves.add` put a task into a wave, never an import.
+      record = { ...parseTaskRecord(raw, String(raw.id)), wave: null };
       if (!/^[0-9a-f-]{36}$/.test(record.id)) throw new Error(`${record.id} is not a task id`);
       if (!isAbsolute(record.repo) || !isAbsolute(record.worktree)) throw new Error("repo and worktree must be absolute paths");
     } catch (error) {
@@ -1243,6 +1309,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
 
   "tasks.approve": async (params, { env }) => {
     const record = await findTask(params.id);
+    refuseMergeRequest(record, "approve");
     const check = async (view: TaskView) => requireState(view, APPROVE_STATES, "approve needs waiting_approve");
     await withTaskLock(record, check, () => sendToRestingTask(record, "/factory approve", env));
     return taskView(record);
@@ -1250,6 +1317,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
 
   "tasks.retry": async (params, { env }) => {
     const record = await findTask(params.id);
+    refuseMergeRequest(record, "retry");
     // An interrupted task is set right by the session's start (`resumeTask`) before the retry runs.
     const check = async (view: TaskView) => requireState(view, RETRY_STATES, "retry needs blocked, cancelled or interrupted", true);
     const sent = await withTaskLock(record, check, async (view) => {
@@ -1263,6 +1331,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
 
   "tasks.cancel": async (params, { env }) => {
     const record = await findTask(params.id);
+    refuseMergeRequest(record, "cancel");
     const before = await taskView(record);
     if (before.state !== null && FINAL_STATES.includes(before.state)) throw new FactoryError("refused", `task ${shortId(record)} is ${before.state} already`);
     await cancelTask(record, env);
@@ -1284,6 +1353,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
 
   "tasks.message": async (params, { env }) => {
     const record = await findTask(params.id);
+    refuseMergeRequest(record, "a message");
     const text = nonEmpty(params.text);
     if (text === undefined) throw new FactoryError("invalid", "tasks.message needs a text that is not empty");
     const view = await taskView(record);
@@ -1366,12 +1436,18 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
   },
 
   "waves.add": async (params, { env }) => {
-    const id = (await findWave(params.id)).declaration.id;
+    const file = await findWave(params.id);
+    const { id } = file.declaration;
+    // Task states only move on: pending tasks that can never start now never will (a cancel is final).
+    const { states } = await waveTaskViews(foldWave(file.declaration, file.events));
     // Checked and appended under the log lock: a runner's stage change after it loses, never the added tasks.
     await busyAsFactoryError(() =>
       appendWaveEvents(id, (fold) => {
         if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage}, it takes no more tasks`);
-        const events: NewWaveEvent[] = [{ kind: "tasks", tasks: validateTaskSpecs(params.tasks, fold.tasks) }];
+        const tasks = validateTaskSpecs(params.tasks, fold.tasks);
+        // The supervisor acts on a wave whose pending tasks can never start: they leave it (count as cancelled).
+        const dropped = unreachableKeys(fold, states);
+        const events: NewWaveEvent[] = [{ kind: "tasks", tasks, ...(dropped.length > 0 ? { dropped } : {}) }];
         if (fold.stage !== "building") events.push({ kind: "stage", stage: "building", reason: null });
         return events;
       }),
@@ -1397,11 +1473,16 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
   },
 
   "waves.retry": async (params, { env }) => {
-    const view = await waveView(await findWave(params.id));
+    const file = await findWave(params.id);
+    const view = await waveView(file);
     const { id } = view;
     if (!view.actions.includes("waves.retry")) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${waveStageText(view)}, retry needs blocked or interrupted`);
-    // Blocked: review and merge again from the rebase. Interrupted: the runner resumes the stage the log holds.
-    if (view.stage === "blocked") await moveWave(id, "blocked", "reviewing", "retry needs blocked or interrupted");
+    // Blocked with tasks not started or not finished (a launch failed): build again, the runner starts them. Blocked
+    // otherwise: review and merge again from the rebase. Interrupted: the runner resumes the stage the log holds.
+    if (view.stage === "blocked") {
+      const unfinished = view.tasks.some((task) => task.state !== "done" && task.state !== "cancelled");
+      await moveWave(id, "blocked", unfinished ? "building" : "reviewing", "retry needs blocked or interrupted");
+    }
     await pokeWaveRunner(id, env);
     return { wave: await waveView(await readWave(id)) };
   },
@@ -1506,7 +1587,7 @@ async function waveRecords(id: string): Promise<TaskRecord[]> {
 }
 
 /** One sentence: a multi-line error (git output) on one line. */
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return text.replace(/\s*\n\s*/g, " ").trim();
 }
 

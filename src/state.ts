@@ -17,6 +17,7 @@ export const RESTING_STATES: readonly State[] = ["waiting_approve", "waiting_ans
 export type GatePhase = "hooks" | "gates" | "merge_gates" | "after_merge";
 export type Trigger = "start" | "hooks" | "gates" | "review" | "protected" | "message" | "retry" | "conflict";
 export type Severity = "blocker" | "major" | "minor";
+/** `timeout`: only in entries written while the reviewer had a time limit; a review no longer times out. */
 export type ReviewStatus = "ok" | "malformed" | "timeout" | "aborted" | "failed" | "no_diff";
 
 export interface Settings {

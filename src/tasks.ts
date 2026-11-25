@@ -8,8 +8,9 @@
  *   then acts on it (spawns a runner, deletes the task) holds it, and a spawned runner holds it until it exits. The
  *   file holds `<pid> <start time>` of its holder; a holder that no longer runs (`hostLiveness`) leaves a stale lock
  *   the next `lockTask` takes over; a lock a live process holds is a `TaskBusyError`
- * - A record written before `tag`, `plan` and `wave` existed reads with their defaults (`systemUser()`, null, null);
- *   the `kind` field of older records is ignored
+ * - A record written before `tag`, `plan` and `wave` existed reads with their defaults (`systemUser()`, null, null).
+ *   Of the `kind` field of older records only `merge_request` is kept (`kind`), so such a task keeps its old limits:
+ *   its branch is its source, never the task's own; no coder runs it again
  */
 import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
@@ -37,6 +38,11 @@ export interface TaskRecord {
   plan: string | null;
   /** The wave the task belongs to (`waves.start`, `waves.add`), null for a task outside one. */
   wave: string | null;
+  /**
+   * Only on a record written while merge requests existed (`kind: "merge_request"`): its `branch` is the source branch
+   * it merged, which it never owned. Internal: no `TaskView` shows it.
+   */
+  kind?: "merge_request";
 }
 
 const RECORD_KEYS = ["id", "repo", "worktree", "branch", "title", "sessionId", "sessionDir", "createdAt"] as const;
@@ -95,7 +101,7 @@ export function parseTaskRecord(raw: unknown, id: string): TaskRecord {
   if (wave !== null && (typeof wave !== "string" || wave === "")) throw new Error("wave must be a non-empty string or null");
   const fields = {} as Record<(typeof RECORD_KEYS)[number], string>;
   for (const key of RECORD_KEYS) fields[key] = raw[key] as string;
-  return { ...fields, tag, plan, wave };
+  return { ...fields, tag, plan, wave, ...(raw.kind === "merge_request" ? { kind: "merge_request" as const } : {}) };
 }
 
 /** Temp file in the same directory + rename: a reader sees the old record or the new one, never half of one. */

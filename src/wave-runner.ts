@@ -6,12 +6,16 @@
  *   (`WAVE_LOCK_ENV`); started by hand it takes the lock itself, and ends at once when a live runner holds it
  * - Loop: clear the poke marker, read the log, act on the stage, again. `building`: start the tasks whose predecessors
  *   are done (`startWaveTasks`), then `reviewing` once every task is done or cancelled (`cancelled` when all are);
- *   else wait for a poke or `POLL_MS`. `reviewing`: the review worktree on the wave's branch (`after_create` hooks of
- *   the target's tip run when it is made), the rebase onto the target unsquashed, the gates, the reviewer on the whole
- *   diff since the target; then `merging` (`waiting_approve` with the wave's `merge: review`), `rejected` or `blocked`.
+ *   else wait for a poke or `POLL_MS`. A launch that fails blocks the wave (`infra`, the error as the stage's detail);
+ *   tasks that can never start while nothing else runs (`stuckKeys`) make the runner rest, the wave `building` with a
+ *   `stage` event naming them (once): invariant 8, the wave never waits silently. `reviewing`: the review worktree on
+ *   the wave's branch (`after_create` hooks of the target's tip run when it is made), the rebase onto the target
+ *   unsquashed, the gates, the reviewer on the whole diff since the target; then `merging` (`waiting_approve` with the wave's `merge: review`), `rejected` or `blocked`.
  *   `merging`: the merge queue, merge gates and the fast-forward (`mergeTask` `asIs`), then `merged` or `blocked`
  * - Every step appends its event (`gate`, `review`, `merge`, `stage`). A stage change is a compare-and-append on the
- *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there
+ *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there.
+ *   While it reviews, the runner watches the log: once the stage left `reviewing` it kills the gates and the reviewer
+ * - A block's `stage` event says why in `detail` (the conflicting paths, the error, the dirty worktree and its paths)
  * - Resumable from the log: a runner started on a wave in `reviewing` or `merging` runs that step again from its start
  * - Invariant 2: the review worktree must hold nothing but HEAD's tree before the rebase, after it, and after the gates
  *   (their untracked output is removed); else `blocked`, `dirty`. Rules, gates and the reviewer prompt are read from
@@ -25,7 +29,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { loadTaskFiles, type FactoryConfig } from "./config.ts";
-import { FactoryError, startWaveTasks, waveTaskViews } from "./core.ts";
+import { FactoryError, oneLine, startWaveTasks, waveTaskViews } from "./core.ts";
 import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, treeDiff, uncommittedFiles } from "./git.ts";
 import { runAfterCreate, worktreePath } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
@@ -43,6 +47,7 @@ import {
   readWave,
   readyForReview,
   RESTING_WAVE_STAGES,
+  stuckKeys,
   unlockWave,
   type NewWaveEvent,
   type WaveDeclaration,
@@ -85,12 +90,70 @@ function reviewWorktree(declaration: WaveDeclaration): string {
   return worktreePath(declaration.repo, `wave-${declaration.id.slice(0, 8)}-review`);
 }
 
-/** Appends `events` and the new stage when the wave is still at `from`. False when it moved on meanwhile. */
-async function moveStage(id: string, from: WaveStage, to: WaveStage, reason: WaveReason | null, events: NewWaveEvent[] = []): Promise<boolean> {
-  const written = await appendWaveEvents(id, (fold) => (fold.stage === from ? [...events, { kind: "stage", stage: to, reason }] : null));
+/**
+ * Appends `events` and the new stage, with `detail` (why, invariant 8) when given, if the wave is still at `from`.
+ * False when it moved on meanwhile.
+ */
+async function moveStage(id: string, from: WaveStage, to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []): Promise<boolean> {
+  const stage: NewWaveEvent = { kind: "stage", stage: to, reason, ...(detail === null ? {} : { detail }) };
+  const written = await appendWaveEvents(id, (fold) => (fold.stage === from ? [...events, stage] : null));
   if (written === null) log(id, `left ${from} meanwhile: ${to} is not recorded`);
-  else log(id, `${from} -> ${to}${reason ? ` (${reason})` : ""}`);
+  else log(id, `${from} -> ${to}${reason ? ` (${reason})` : ""}${detail === null ? "" : `: ${detail}`}`);
   return written !== null;
+}
+
+/** How many paths a `dirty` detail names. */
+const DIRTY_PATHS_SHOWN = 20;
+
+/** Why the worktree at `root` is dirty: its path and what it holds besides its commit (`git status` paths). */
+async function dirtyDetail(root: string): Promise<string> {
+  const status = await runner.cleanup(["git", "status", "--porcelain", "--untracked-files=normal"], { cwd: root, maxStdoutChars: 100_000 });
+  const paths = status.stdout
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => line.slice(3));
+  const shown = paths.slice(0, DIRTY_PATHS_SHOWN).join(", ") + (paths.length > DIRTY_PATHS_SHOWN ? ` and ${paths.length - DIRTY_PATHS_SHOWN} more` : "");
+  return `the review worktree ${root} holds what its commit does not (${shown || "unknown paths"}): commit or remove it there, then waves.retry`;
+}
+
+/** Why a gate run failed, for the stage's detail (its output tail is in the `gate` event). */
+function gateDetail(argv: string[], result: Pick<CommandResult, "exitCode" | "killed" | "timedOut">): string {
+  const how = result.timedOut ? "timed out" : result.killed ? "was killed" : `exited ${result.exitCode}`;
+  return `the gate ${argv.join(" ")} ${how}`;
+}
+
+/** How often a running review looks at the log for a stage change. */
+const STAGE_POLL_MS = 250;
+
+/**
+ * Runs `act` while watching the wave's log: once the wave left `stage` (a `waves.add` moved it back to `building`,
+ * the wave was removed) the running commands are killed, so the step ends at once; its stage change then loses its
+ * compare-and-append. The commands run again afterwards unless the runner stops.
+ */
+async function whileAt<T>(id: string, stage: WaveStage, act: () => Promise<T>): Promise<T> {
+  let done = false;
+  const watch = (async () => {
+    while (!done) {
+      await Bun.sleep(STAGE_POLL_MS);
+      if (done) return;
+      const now = await readWave(id).then(
+        (file) => foldWave(file.declaration, file.events).stage,
+        (error: unknown) => (error instanceof FactoryError && error.code === "not_found" ? "removed" : stage),
+      );
+      if (now !== stage) {
+        log(id, `the wave left ${stage} (${now}): stopping the running step`);
+        runner.cancel();
+        return;
+      }
+    }
+  })();
+  try {
+    return await act();
+  } finally {
+    done = true;
+    await watch;
+    if (!stopping) runner.reset();
+  }
 }
 
 /** The rules of the target's tip. */
@@ -151,34 +214,30 @@ function sessionIdOf(sessionFile: string | null): string | null {
 async function review(fold: WaveFold): Promise<void> {
   const { id } = fold;
   const task = waveTask(fold);
-  const leave = async (to: WaveStage, reason: WaveReason | null, events: NewWaveEvent[] = []) => {
-    const moved = await moveStage(id, "reviewing", to, reason, events);
+  const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []) => {
+    const moved = await moveStage(id, "reviewing", to, reason, detail, events);
     if (!moved || to !== "merging") await removeWorktree(fold);
   };
   let root: string;
   try {
     root = await ensureWorktree(fold);
   } catch (error) {
-    log(id, `the review worktree: ${errorText(error)}`);
-    return void (await moveStage(id, "reviewing", "blocked", "infra"));
+    return void (await moveStage(id, "reviewing", "blocked", "infra", `the review worktree: ${oneLine(errorText(error))}`));
   }
   try {
     const { config, prompts } = await targetConfig(fold, root);
     // The gates and the reviewer see the committed tree only: anything else in the worktree is somebody's work.
-    if (await uncommittedFiles(runner.run, root)) return leave("blocked", "dirty");
+    if (await uncommittedFiles(runner.run, root)) return leave("blocked", "dirty", await dirtyDetail(root));
     const conflicts = await rebaseWorktree(runner.run, runner.cleanup, root, task, config.protected, task.title, true);
-    if (conflicts) {
-      log(id, `the rebase onto ${fold.target} conflicts on ${conflicts.join(", ")}`);
-      return leave("blocked", "conflict");
-    }
+    if (conflicts) return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${conflicts.join(", ")}`);
     // The rebase brings the target's .gitignore: a file it stopped ignoring is no gate output.
-    if (await uncommittedFiles(runner.run, root)) return leave("blocked", "dirty");
-    const gates: { result: CommandResult; passed: boolean }[] = [];
+    if (await uncommittedFiles(runner.run, root)) return leave("blocked", "dirty", await dirtyDetail(root));
+    const gates: { argv: string[]; result: CommandResult; passed: boolean }[] = [];
     try {
       for (const argv of config.gates) {
         log(id, `gate ${argv.join(" ")}`);
         const result = await runner.run(argv, { cwd: root });
-        gates.push({ result, passed: passed(result) });
+        gates.push({ argv, result, passed: passed(result) });
         if (!passed(result)) break;
       }
     } finally {
@@ -187,9 +246,9 @@ async function review(fold: WaveFold): Promise<void> {
     }
     const gate = gates.length === 0 ? [] : [gateEvent("review", gates)];
     const failed = gates.find((run) => !run.passed);
-    if (failed) return leave("blocked", gateReason(failed.result), gate);
+    if (failed) return leave("blocked", gateReason(failed.result), gateDetail(failed.argv, failed.result), gate);
     // A gate that rewrote a tracked file passed on a tree the target would never get.
-    if (await trackedChanges(runner.run, root)) return leave("blocked", "dirty", gate);
+    if (await trackedChanges(runner.run, root)) return leave("blocked", "dirty", await dirtyDetail(root), gate);
     if (gate.length > 0 && (await appendWaveEvents(id, (now) => (now.stage === "reviewing" ? gate : null))) === null) return removeWorktree(fold);
 
     const base = await taskBase(runner.run, root, task);
@@ -223,12 +282,11 @@ async function review(fold: WaveFold): Promise<void> {
       usage: { input: data.usage.input, output: data.usage.output, cost: data.usage.cost },
       wallMs: data.wallMs,
     };
-    if (verdict === "failed") return leave("blocked", "review_failed", [event]);
-    if (verdict === "rejected") return leave("rejected", null, [event]);
-    return leave(fold.overrides.merge === "review" ? "waiting_approve" : "merging", null, [event]);
+    if (verdict === "failed") return leave("blocked", "review_failed", `the reviewer gave no verdict (${data.status})`, [event]);
+    if (verdict === "rejected") return leave("rejected", null, null, [event]);
+    return leave(fold.overrides.merge === "review" ? "waiting_approve" : "merging", null, null, [event]);
   } catch (error) {
-    log(id, `review: ${errorText(error)}`);
-    return leave("blocked", "infra");
+    return leave("blocked", "infra", `review: ${oneLine(errorText(error))}`);
   }
 }
 
@@ -236,8 +294,8 @@ async function review(fold: WaveFold): Promise<void> {
 async function merge(fold: WaveFold): Promise<void> {
   const { id } = fold;
   const task = waveTask(fold);
-  const leave = async (to: WaveStage, reason: WaveReason | null, events: NewWaveEvent[] = []) => {
-    await moveStage(id, "merging", to, reason, events);
+  const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []) => {
+    await moveStage(id, "merging", to, reason, detail, events);
     await removeWorktree(fold);
   };
   let root: string;
@@ -246,8 +304,7 @@ async function merge(fold: WaveFold): Promise<void> {
     root = await ensureWorktree(fold);
     config = (await targetConfig(fold, root)).config;
   } catch (error) {
-    log(id, `the merge worktree: ${errorText(error)}`);
-    return leave("blocked", "infra");
+    return leave("blocked", "infra", `the merge worktree: ${oneLine(errorText(error))}`);
   }
   const started = Date.now();
   let queueMs = 0;
@@ -279,17 +336,15 @@ async function merge(fold: WaveFold): Promise<void> {
   const { result } = outcome;
   switch (result.kind) {
     case "merged":
-      return leave("merged", null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }]);
+      return leave("merged", null, null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }]);
     case "conflict":
-      log(id, `the rebase onto ${fold.target} conflicts on ${result.files.join(", ")}`);
-      return leave("blocked", "conflict", gate);
+      return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${result.files.join(", ")}`, gate);
     case "gate_failed":
-      return leave("blocked", gateReason(result.gate.result), gate);
+      return leave("blocked", gateReason(result.gate.result), gateDetail(result.gate.argv, result.gate.result), gate);
     case "dirty":
-      return leave("blocked", "dirty", gate);
+      return leave("blocked", "dirty", await dirtyDetail(root), gate);
     case "failed":
-      log(id, `merge failed: ${result.merge.error ?? "unknown"}`);
-      return leave("blocked", "infra", gate);
+      return leave("blocked", "infra", `the merge failed: ${oneLine(result.merge.error ?? "unknown")}`, gate);
   }
 }
 
@@ -299,14 +354,22 @@ async function step(id: string): Promise<Next> {
   const fold = foldWave(declaration, events);
   if (RESTING_WAVE_STAGES.includes(fold.stage)) return "rest";
   if (fold.stage === "reviewing") {
-    await review(fold);
+    await whileAt(id, "reviewing", () => review(fold));
     return "again";
   }
   if (fold.stage === "merging") {
     await merge(fold);
     return "again";
   }
-  // building
+  return build(fold);
+}
+
+/**
+ * `building`: the next stage once every task finished, else start what can start. A launch that fails blocks the
+ * wave; tasks that can never start while nothing else runs make the runner rest (the stage's detail names them, once).
+ */
+async function build(fold: WaveFold): Promise<Next> {
+  const { id } = fold;
   const { states } = await waveTaskViews(fold);
   if (allCancelled(fold, states)) return (await moveStage(id, "building", "cancelled", null)) ? "rest" : "again";
   if (readyForReview(fold, states)) {
@@ -317,11 +380,21 @@ async function step(id: string): Promise<Next> {
   delete env[WAVE_LOCK_ENV];
   try {
     const started = await startWaveTasks(id, env);
-    if (started.length > 0) log(id, `started ${started.join(", ")}`);
+    if (started.length > 0) {
+      log(id, `started ${started.join(", ")}`);
+      return "again";
+    }
   } catch (error) {
-    log(id, errorText(error));
+    // A launch that failed: as `tasks.start` would tell its caller, the wave tells the supervisor.
+    if (!(error instanceof FactoryError) || (error.code !== "refused" && error.code !== "failed")) throw error;
+    return (await moveStage(id, "building", "blocked", "infra", `${error.message}; waves.retry starts it again`)) ? "rest" : "again";
   }
-  return "wait";
+  const stuck = stuckKeys(fold, states);
+  if (stuck.length === 0) return "wait";
+  const detail = `${stuck.length === 1 ? "task" : "tasks"} ${stuck.join(", ")} can never start (a task waited for was cancelled or removed) and no task runs: waves.add (which drops them) or waves.cancel`;
+  const written = await appendWaveEvents(id, (now) => (now.stage === "building" && now.detail !== detail ? [{ kind: "stage", stage: "building", reason: null, detail }] : null));
+  log(id, `${detail}${written === null ? "" : " (recorded)"}; resting`);
+  return "rest";
 }
 
 /** Waits until a poke marker appears, `POLL_MS` passes or the runner stops. */

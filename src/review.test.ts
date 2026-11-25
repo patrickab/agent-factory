@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseFindings, readReviewerOutput, reviewPatch, runReview, WAVE_REVIEW_TIMEOUT_MS } from "./review.ts";
+import { parseFindings, readReviewerOutput, reviewPatch, runReview } from "./review.ts";
 import type { CommandOptions, CommandResult } from "./run.ts";
 import type { Finding, Task } from "./state.ts";
 
@@ -131,14 +131,15 @@ describe("runReview", () => {
     expect(argv.join(" ")).toContain(`--session-dir ${reviewsDir} --model anthropic/claude-haiku-5-5 --append-system-prompt Be strict.`);
     expect(argv.at(-1)).toContain(join(reviewsDir, "round-2.patch"));
     expect(argv.at(-1)).not.toContain(task.request);
-    expect(options).toMatchObject({ cwd: "/repo", timeoutMs: 300_000 });
+    expect(options.cwd).toBe("/repo");
+    // The reviewer has no time limit.
+    expect(options.timeoutMs).toBeUndefined();
     expect(options.maxStdoutChars).toBeGreaterThan(1_000_000);
     expect(readFileSync(join(reviewsDir, "round-2.patch"), "utf8")).toBe("Changed files (1):\n- src/cart.js\n\ndiff --git a/src/cart.js b/src/cart.js\n");
     expect(readFileSync(join(reviewsDir, "round-2.request.md"), "utf8")).toBe("# Fix the cart\n\nThe total is off by one.\n");
   });
 
   test.each([
-    ["timeout", { timedOut: true, killed: true, exitCode: null }],
     ["aborted", { killed: true, exitCode: null }],
     ["failed", { exitCode: 1 }],
     ["malformed", { stdout: line({ type: "session", id: "abc-123" }) }],
@@ -172,8 +173,21 @@ describe("runReview", () => {
     expect(prompt).toContain(join(reviewsDir, "round-3.patch"));
     expect(prompt.endsWith("## Instructions from the supervisor\n\nRead plan/w1.md.\nThe wave adds a greeting.\n")).toBe(true);
     expect(existsSync(join(reviewsDir, "round-3.request.md"))).toBe(false);
-    // A whole wave's diff gets the wave reviewer's time limit, not a task round's.
-    expect(calls[0].options.timeoutMs).toBe(WAVE_REVIEW_TIMEOUT_MS);
-    expect(WAVE_REVIEW_TIMEOUT_MS).toBe(20 * 60_000);
+    // A wave's reviewer has no time limit either.
+    expect(calls[0].options.timeoutMs).toBeUndefined();
+  });
+
+  test.each([false, true])("a review longer than the old limits is not cut (wave: %p): its verdict counts", async (wave) => {
+    // The fake child reports a run of an hour (past the old 5 and 20 minutes): no limit may have stopped it.
+    const calls: { argv: string[]; options: CommandOptions }[] = [];
+    const hour = child({ durationMs: 60 * 60_000, stdout: [line({ type: "session", id: "abc-123" }), verdictEnd([])].join("\n") });
+    const data = await runReview({ exec: async (argv, options) => (calls.push({ argv, options }), hour), root: "/repo", round: 4, task, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => false, wave });
+    expect(calls[0].options.timeoutMs).toBeUndefined();
+    expect(data).toMatchObject({ status: "ok", approved: true, findings: [], wallMs: 60 * 60_000 });
+  });
+
+  test("a cancelled review still ends aborted", async () => {
+    const data = await runReview({ exec: async () => child({ killed: true, exitCode: null }), root: "/repo", round: 5, task, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => true });
+    expect(data).toMatchObject({ status: "aborted", approved: false });
   });
 });

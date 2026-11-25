@@ -14,7 +14,9 @@ import {
   readWave,
   readyForReview,
   removeWave,
+  parseWaveEvent,
   startableKeys,
+  stuckKeys,
   unreachableKeys,
   validateTaskSpecs,
   waveCounts,
@@ -156,7 +158,7 @@ describe("wave records", () => {
 
 describe("foldWave", () => {
   test("a declared wave is building with nothing else", () => {
-    expect(foldWave(declaration(ONE), [])).toEqual({ ...declaration(ONE), stage: "building", reason: null, tasks: [], reviews: [], gates: [], merge: null, remote: null });
+    expect(foldWave(declaration(ONE), [])).toEqual({ ...declaration(ONE), stage: "building", reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null });
   });
 
   test("tasks and task: specs in order, ids once started; unknown keys and repeated keys change nothing", () => {
@@ -247,6 +249,49 @@ describe("scheduling", () => {
   test("unreachableKeys: unstarted tasks behind a cancelled one, directly or not", () => {
     expect(unreachableKeys(fold(), states({ a: "done", b: "running" }))).toEqual([]);
     expect(unreachableKeys(fold(), states({ a: "cancelled", b: "done" }))).toEqual(["c", "d"]);
+  });
+
+  test("stuckKeys: unreachable tasks once nothing can start and no started task is active", () => {
+    // c and d wait behind the cancelled a; b still runs (or has no state yet): it may poke the wave, nothing is stuck yet.
+    expect(stuckKeys(fold(), states({ a: "cancelled", b: "running" }))).toEqual([]);
+    expect(stuckKeys(fold(), states({ a: "cancelled" }))).toEqual([]);
+    expect(stuckKeys(fold(), states({ a: "cancelled", b: null }))).toEqual([]);
+    // Every started task rests: nothing will ever move the wave without the supervisor.
+    expect(stuckKeys(fold(), states({ a: "cancelled", b: "done" }))).toEqual(["c", "d"]);
+    expect(stuckKeys(fold(), states({ a: "cancelled", b: "blocked" }))).toEqual(["c", "d"]);
+    // A task that can still start is no stuck wave: the runner starts it.
+    const startable = folded([spec("a"), spec("b", ["a"]), spec("c")], ["a"]);
+    expect(stuckKeys(startable, states({ a: "cancelled" }))).toEqual([]);
+    expect(stuckKeys(fold(), states({ a: "done", b: "done" }))).toEqual([]);
+  });
+
+  test("a tasks event's dropped keys: pending tasks that count as cancelled from then on; started ones stay", () => {
+    const events: WaveEvent[] = [
+      { at: "t1", kind: "tasks", tasks: [spec("a"), spec("b", ["a"]), spec("c", ["b"])] },
+      { at: "t2", kind: "task", key: "a", taskId: "id-a", sessionId: "s-a" },
+      { at: "t3", kind: "tasks", tasks: [spec("d", ["a"])], dropped: ["a", "b", "c", "nope"] },
+    ];
+    const f = foldWave(declaration(ONE), events);
+    const done = states({ a: "cancelled" });
+    expect(f.tasks.map((task) => [task.key, waveTaskState(task, done)])).toEqual([
+      ["a", "cancelled"],
+      ["b", "cancelled"],
+      ["c", "cancelled"],
+      ["d", "pending"],
+    ]);
+    expect([unreachableKeys(f, done), startableKeys(f, states({ a: "done" })), waveCounts(f, done)]).toEqual([["d"], ["d"], { total: 1, done: 0 }]);
+    expect(f.tasks[0]?.dropped).toBeUndefined();
+  });
+
+  test("a stage event's detail: parsed, folded as the last stage's, optional", () => {
+    const f = foldWave(declaration(ONE), [
+      parseWaveEvent({ at: "t1", kind: "stage", stage: "blocked", reason: "infra", detail: "starting its task a failed" }),
+    ]);
+    expect([f.stage, f.reason, f.detail]).toEqual(["blocked", "infra", "starting its task a failed"]);
+    expect(foldWave(declaration(ONE), [{ at: "t1", kind: "stage", stage: "blocked", reason: "infra", detail: "x" }, { at: "t2", kind: "stage", stage: "reviewing", reason: null }]).detail).toBeNull();
+    expect(parseWaveEvent({ at: "t", kind: "stage", stage: "building", reason: null })).toEqual({ at: "t", kind: "stage", stage: "building", reason: null });
+    expect(() => parseWaveEvent({ at: "t", kind: "stage", stage: "building", reason: null, detail: 3 })).toThrow("detail must be a string or null");
+    expect(() => parseWaveEvent({ at: "t", kind: "tasks", tasks: [], dropped: [1] })).toThrow("dropped must be an array of keys");
   });
 
   test("readyForReview: every task done or cancelled, at least one done", () => {

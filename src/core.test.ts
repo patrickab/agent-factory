@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { ACTIONS, callAction, FactoryError, type TaskView, type TimelineEntry } from "./core.ts";
+import { ACTIONS, callAction, FactoryError, startWaveTasks, type TaskView, type TimelineEntry } from "./core.ts";
 import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, lockTask, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
@@ -753,6 +753,51 @@ describe("tasks.import", () => {
     expect(await listTasks()).toEqual([]);
     expect(existsSync(victim)).toBe(true);
   });
+
+  test("an imported record belongs to no wave, whatever its wave field says (invariant 4)", async () => {
+    const repo = makeRepo();
+    const worktree = join(caseDir, "task-wt");
+    git(repo, "worktree", "add", "--quiet", "-b", "task", worktree);
+    const wave = "60000000-0000-4000-8000-000000000001";
+    const record = { id: ID, repo, worktree, branch: "task", title: "t", sessionId: "test-session-s", sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z", wave };
+    expect(((await callAction("tasks.import", { record })) as TaskView).wave).toBeNull();
+    expect((await listTasks()).map((task) => [task.id, task.wave])).toEqual([[ID, null]]);
+  });
+});
+
+describe("an old merge request record (invariant 7)", () => {
+  test("keeps its limits: removing it keeps its source branch and its commits, approve, retry, cancel and message are refused", async () => {
+    const repo = makeRepo();
+    const worktree = join(caseDir, "mr-wt");
+    git(repo, "worktree", "add", "--quiet", "-b", "feature", worktree);
+    writeFileSync(join(worktree, "f.txt"), "f\n");
+    git(worktree, "add", "-A");
+    git(worktree, "commit", "--quiet", "-m", "feature work");
+    const feature = git(repo, "rev-parse", "feature");
+    const record = { ...fakeRecord(ID_1, repo), worktree, branch: "feature" };
+    mkdirSync(tasksDir(), { recursive: true });
+    writeFileSync(join(tasksDir(), `${ID_1}.json`), JSON.stringify({ ...record, kind: "merge_request", source: "feature" }));
+    writeSession(record, [{ type: "custom", customType: "factory-state", timestamp: "t", data: { state: "waiting_approve", round: 1, reason: "passed" } }]);
+    const [loaded] = await listTasks();
+    expect(loaded.kind).toBe("merge_request");
+    const view = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
+    expect("kind" in view).toBe(false);
+    expect(view.actions).toEqual(["tasks.remove"]);
+    for (const [action, params, what] of [
+      ["tasks.approve", {}, "approve"],
+      ["tasks.retry", {}, "retry"],
+      ["tasks.cancel", {}, "cancel"],
+      ["tasks.message", { text: "hi" }, "a message"],
+    ] as const) {
+      await expectError(callAction(action, { id: ID_1, ...params }), "refused", `is an old merge request: ${what} is refused, it can only be removed`);
+    }
+    expect(prompts()).toEqual([]);
+    // Its commits are its source branch's, which it never owned: no force needed, and the branch stays.
+    expect(await callAction("tasks.remove", { id: ID_1 })).toEqual({ removed: ID_1, dropped: null });
+    expect(git(repo, "rev-parse", "feature")).toBe(feature);
+    expect(existsSync(worktree)).toBe(false);
+    expect(await listTasks()).toEqual([]);
+  });
 });
 
 describe("D review fixes", () => {
@@ -1209,6 +1254,22 @@ describe("waves", () => {
     await expectError(callAction("waves.timeline", { id, since: 8 }), "invalid", "past");
   });
 
+  test("a record of the wave no task event names (its runner died after the launch) is adopted, not launched again", async () => {
+    const repo = makeRepo();
+    git(repo, "branch", "main-factory-w9");
+    const id = "20000000-0000-4000-8000-000000000002";
+    await createWave({ id, repo, tag: "factory/w9", plan: null, title: "w", request: "r", branch: "main-factory-w9", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
+    await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a")] });
+    const orphan = { ...fakeRecord(ID_1, repo), title: "Task a", tag: "factory/w9", wave: id };
+    await writeTask(orphan);
+    // Another wave's record and one of another title are no orphans of this task.
+    await writeTask({ ...fakeRecord(ID_2, repo), title: "Task a", wave: "20000000-0000-4000-8000-000000000003" });
+    expect(await startWaveTasks(id)).toEqual(["a"]);
+    expect(taskOf(await getWave(id), "a")).toMatchObject({ taskId: ID_1, sessionId: orphan.sessionId });
+    expect((await listTasks()).map((record) => record.id)).toEqual([ID_1, ID_2]);
+    expect(prompts()).toEqual([]);
+  });
+
   test("tasks.start cannot set a wave", async () => {
     const repo = makeRepo();
     expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("wave");
@@ -1292,6 +1353,21 @@ describe("waiting on waves and the wave actions", () => {
     await stop();
     // Without its runner the building wave is interrupted: attention.
     expect((await wait({ wave: WAVE })).attention).toEqual([ID_2, WAVE]);
+  });
+
+  test("by wave: building with a task that can never start needs attention once no task runs, its runner alive or not", async () => {
+    await writtenWave("/r", ["cancelled", "starting"]);
+    await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "c", title: "Task c", request: "do c", after: ["a"] }] });
+    const stop = await fakeRunner();
+    // b still runs: the wave may move on by itself.
+    const quiet = await wait({ wave: WAVE, timeoutMs: 1_000 });
+    expect([quiet.timedOut, quiet.attention]).toEqual([true, []]);
+    writeSession((await listTasks())[1], [stateEntry("done")]);
+    const stuck = await wait({ wave: WAVE, timeoutMs: 10_000 });
+    expect([stuck.timedOut, stuck.attention, stuck.waves[0].stage, stuck.waves[0].running, stuck.waves[0].interrupted]).toEqual([false, [WAVE], "building", true, false]);
+    await stop();
+    const rested = await wait({ wave: WAVE, timeoutMs: 10_000 });
+    expect([rested.attention, rested.waves[0].interrupted, rested.waves[0].actions]).toEqual([[WAVE], false, ["waves.add", "waves.cancel", "waves.remove"]]);
   });
 
   test("exactly one of ids, tag and wave", async () => {

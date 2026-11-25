@@ -14,7 +14,8 @@
  * - Provides `defaultBranch`, `localBranchExists` and `startCommand` (the payload `parseStartPayload` accepts)
  * - Provides `liveRunners`/`stopRunners` (a task's runner processes: `pgrep -f`, then the session id as a whole argument
  *   of the command line), `unmergedWork` and
- *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another)
+ *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another;
+ *   an old merge request's record names its source branch, which stays)
  * - The detached spawn itself (`runnerSpawn`, `spawnDetached`) lives in `spawn.ts`, shared with the wave runner's poke
  */
 import { existsSync } from "node:fs";
@@ -89,6 +90,11 @@ async function removeWorktree(repo: string, path: string | undefined, branch: st
   if (path !== undefined && existsSync(path)) await runCommand(["git", "worktree", "remove", "--force", path], { cwd: repo });
   await runCommand(["git", "worktree", "prune"], { cwd: repo });
   if (branch !== undefined && (await localBranchExists(repo, branch))) await runCommand(["git", "branch", "-D", branch], { cwd: repo });
+}
+
+/** The task's own branch: none for an old merge request, whose `branch` is the source it merged (invariant 7). */
+function ownBranch(record: Pick<TaskRecord, "branch" | "kind">): string | undefined {
+  return record.kind === "merge_request" ? undefined : record.branch;
 }
 
 /** Where a worktree named `name` of `repo` lies when `agent-worktree` does not choose. */
@@ -337,11 +343,12 @@ export interface UnmergedWork {
 
 /**
  * The task's unmerged work. Without a `target` (the task never recorded one) its commits are those no other local
- * branch has. A worktree whose status cannot be read counts as dirty.
+ * branch has. A worktree whose status cannot be read counts as dirty. An old merge request's commits stay on its
+ * source branch, which removing it keeps: none count.
  */
 export async function unmergedWork(record: TaskRecord, target: string | undefined): Promise<UnmergedWork> {
   let commits = 0;
-  if (await localBranchExists(record.repo, record.branch)) {
+  if (ownBranch(record) !== undefined && (await localBranchExists(record.repo, record.branch))) {
     const range =
       target !== undefined && (await localBranchExists(record.repo, target))
         ? [`refs/heads/${target}..refs/heads/${record.branch}`]
@@ -358,14 +365,14 @@ export async function unmergedWork(record: TaskRecord, target: string | undefine
 }
 
 /**
- * Removes the task's worktree, its own branch (through git), its record, its runner log, its lock and its inbox. The
- * session file stays.
+ * Removes the task's worktree, its own branch (through git; an old merge request's source branch stays), its record,
+ * its runner log, its lock and its inbox. The session file stays.
  */
 export async function deleteTask(record: TaskRecord): Promise<void> {
-  const branch = record.branch;
+  const branch = ownBranch(record);
   await removeWorktree(record.repo, record.worktree, branch);
   if (existsSync(record.worktree)) throw new Error(`${record.worktree}: the worktree could not be removed`);
-  if (await localBranchExists(record.repo, branch)) throw new Error(`${record.repo}: the branch ${branch} could not be deleted`);
+  if (branch !== undefined && (await localBranchExists(record.repo, branch))) throw new Error(`${record.repo}: the branch ${branch} could not be deleted`);
   await removeTask(record.id);
   await rm(taskInboxPath(record.id), { force: true });
   await rm(inboxReadPath(taskInboxPath(record.id)), { force: true });

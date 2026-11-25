@@ -5,8 +5,9 @@
  * - Provides `runReview` (the `factory-review` data) and the pure parts it is built from: the patch file's text, the
  *   findings check and the reading of the child's `--mode json` stdout
  * - A wave's reviewer (`ReviewInput.wave`) reviews the wave's whole branch against its target, the wave's request as
- *   its instructions, verbatim in the prompt under a heading of its own: it reads like a task description but is not one.
- *   It gets `WAVE_REVIEW_TIMEOUT_MS` (20 minutes) where a task's reviewer gets 5
+ *   its instructions, verbatim in the prompt under a heading of its own: it reads like a task description but is not one
+ * - The reviewer has no time limit, a task's and a wave's alike: it runs until it answers or is cancelled (`cancelled`,
+ *   `tasks.cancel` / `waves.cancel`). `timeout` stays a `ReviewStatus` only so that old entries still read
  */
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,10 +20,6 @@ const REVIEWER_TOOL_EXTENSION = join(import.meta.dirname, "pi", "reviewer-tool.t
 const SEVERITIES: readonly Severity[] = ["blocker", "major", "minor"];
 const PATCH_MAX_CHARS = 200_000;
 const PATHS_MAX = 500;
-/** A task's reviewer judges one round's diff. */
-const REVIEW_TIMEOUT_MS = 300_000;
-/** A wave's reviewer judges the whole wave's diff: it gets longer. */
-export const WAVE_REVIEW_TIMEOUT_MS = 1_200_000;
 /** The child's JSONL stream: the session line, the verdict call and the usage of every message. */
 const REVIEWER_STDOUT_MAX_CHARS = 32_000_000;
 
@@ -166,14 +163,14 @@ export async function runReview(input: ReviewInput): Promise<ReviewData> {
   if (input.rolePrompt) argv.push("--append-system-prompt", input.rolePrompt);
   argv.push(prompt);
 
-  const child = await exec(argv, { cwd: root, timeoutMs: input.wave ? WAVE_REVIEW_TIMEOUT_MS : REVIEW_TIMEOUT_MS, maxStdoutChars: REVIEWER_STDOUT_MAX_CHARS });
+  // No `timeoutMs`: a review takes as long as the change needs; only a cancel ends it early.
+  const child = await exec(argv, { cwd: root, maxStdoutChars: REVIEWER_STDOUT_MAX_CHARS });
   const output = readReviewerOutput(child.stdout);
   const sessionName = output.sessionId ? (await readdir(reviewsDir)).find((name) => name.endsWith(`${output.sessionId}.jsonl`)) : undefined;
   const sessionFile = sessionName ? join(reviewsDir, sessionName) : null;
   // A killed or failed run never yields a verdict, even when a verdict call is already in the stream.
   let status: ReviewStatus = "ok";
-  if (child.timedOut) status = "timeout";
-  else if (child.killed || input.cancelled()) status = "aborted";
+  if (child.killed || input.cancelled()) status = "aborted";
   else if (child.exitCode !== 0) status = "failed";
   else if (output.findings === null) status = "malformed";
   return result(status, output, sessionFile, child.durationMs);

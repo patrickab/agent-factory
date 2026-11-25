@@ -4,7 +4,11 @@
  * - One file per wave, `<factoryHome>/waves/<id>.jsonl`, append-only: line 1 is the declaration (`createWave`), every
  *   later line one event (`appendWaveEvent`, `appendWaveEvents`). Its other files lie next to it (`wave-poke.ts`)
  * - The wave's state is only ever `foldWave` of its events plus its tasks' states: the scheduling helpers
- *   (`startableKeys`, `readyForReview`, `allCancelled`, `waveCounts`) take the fold and a map key -> task state
+ *   (`startableKeys`, `readyForReview`, `allCancelled`, `waveCounts`, `stuckKeys`) take the fold and a map key -> task
+ *   state
+ * - Invariant 8, a wave never waits silently: a `stage` event may carry `detail`, one sentence on why (a block's cause,
+ *   the tasks that can never start). A `tasks` event may carry `dropped`: pending keys that could never start when the
+ *   supervisor added tasks, which count as cancelled from then on
  * - Every append holds the log lock (`waveLogLockPath`) from the read of the log to its write: appends never interleave,
  *   and `appendWaveEvents` checks the fold under it (a compare-and-append: the runner's stage change loses against a
  *   `waves.add` that came first). A line cut short by a crash is skipped when read, and the next append starts on a
@@ -13,7 +17,7 @@
  */
 import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { FactoryError } from "./core.ts";
-import { parseSettingsFields, type Settings } from "./state.ts";
+import { parseSettingsFields, RESTING_STATES, type Settings, type State } from "./state.ts";
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
@@ -77,9 +81,9 @@ export type WaveRemote = { number: number | null; url: string | null; pushed: st
 
 /** One line after the declaration. A `remote` event sets only the fields it carries. */
 export type WaveEvent =
-  | { at: string; kind: "tasks"; tasks: Required<WaveTaskSpec>[] }
+  | { at: string; kind: "tasks"; tasks: Required<WaveTaskSpec>[]; dropped?: string[] }
   | { at: string; kind: "task"; key: string; taskId: string; sessionId: string }
-  | { at: string; kind: "stage"; stage: WaveStage; reason: WaveReason | null }
+  | { at: string; kind: "stage"; stage: WaveStage; reason: WaveReason | null; detail?: string }
   | ({ kind: "gate" } & WaveGate)
   | ({ kind: "review" } & WaveReview)
   | ({ kind: "merge" } & WaveMerge)
@@ -94,14 +98,19 @@ export interface WaveFile {
   events: WaveEvent[];
 }
 
-/** A wave's task as the log knows it: null ids until the `task` event that started it. */
-export type FoldedTask = { key: string; title: string; request: string; after: string[]; taskId: string | null; sessionId: string | null };
+/**
+ * A wave's task as the log knows it: null ids until the `task` event that started it. `dropped`: never started, and a
+ * later `tasks` event dropped it (it could never start); it counts as cancelled.
+ */
+export type FoldedTask = { key: string; title: string; request: string; after: string[]; taskId: string | null; sessionId: string | null; dropped?: boolean };
 
-/** Everything of a `WaveView` that needs no task state. */
+/** Everything of a `WaveView` that needs no task state, and the last stage event's `detail` (not part of the view). */
 export interface WaveFold extends WaveDeclaration {
   stage: WaveStage;
   /** Only when `stage` is `blocked`. */
   reason: WaveReason | null;
+  /** Why the wave is at its stage, when the last `stage` event says (invariant 8); null otherwise. */
+  detail: string | null;
   tasks: FoldedTask[];
   reviews: WaveReview[];
   gates: WaveGate[];
@@ -236,7 +245,12 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
   switch (kind) {
     case "tasks": {
       if (!Array.isArray(raw.tasks)) throw new Error("tasks must be an array");
-      return { at, kind, tasks: raw.tasks.map(parseSpec) };
+      const event: WaveEvent = { at, kind, tasks: raw.tasks.map(parseSpec) };
+      if (raw.dropped !== undefined && raw.dropped !== null) {
+        if (!Array.isArray(raw.dropped) || !raw.dropped.every((key) => typeof key === "string")) throw new Error("dropped must be an array of keys");
+        event.dropped = [...raw.dropped];
+      }
+      return event;
     }
     case "task":
       return { at, kind, key: str(raw, "key"), taskId: str(raw, "taskId"), sessionId: str(raw, "sessionId") };
@@ -244,7 +258,10 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       const stage = oneOf(raw, "stage", WAVE_STAGES);
       const reason = raw.reason ?? null;
       if (reason !== null && !WAVE_REASONS.includes(reason as WaveReason)) throw new Error(`reason must be one of ${WAVE_REASONS.join(", ")} or null`);
-      return { at, kind, stage, reason: reason as WaveReason | null };
+      const event: WaveEvent = { at, kind, stage, reason: reason as WaveReason | null };
+      const detail = strOrNull(raw, "detail");
+      if (detail !== null) event.detail = detail;
+      return event;
     }
     case "gate": {
       if (typeof raw.passed !== "boolean") throw new Error("passed must be a boolean");
@@ -424,10 +441,14 @@ export async function removeWave(id: string): Promise<void> {
 
 /** The wave's state from its declaration and events: a declared wave is `building`. */
 export function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): WaveFold {
-  const fold: WaveFold = { ...declaration, stage: "building", reason: null, tasks: [], reviews: [], gates: [], merge: null, remote: null };
+  const fold: WaveFold = { ...declaration, stage: "building", reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null };
   for (const event of events) {
     switch (event.kind) {
       case "tasks":
+        for (const key of event.dropped ?? []) {
+          const task = fold.tasks.find((candidate) => candidate.key === key);
+          if (task !== undefined && task.taskId === null) task.dropped = true;
+        }
         for (const spec of event.tasks) {
           // Validation keeps keys unique; a repeated key in a hand-edited log keeps its first declaration.
           if (fold.tasks.some((task) => task.key === spec.key)) continue;
@@ -445,6 +466,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
       case "stage":
         fold.stage = event.stage;
         fold.reason = event.stage === "blocked" ? event.reason : null;
+        fold.detail = event.detail ?? null;
         break;
       case "gate": {
         const { kind: _kind, ...gate } = event;
@@ -478,25 +500,25 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
 /** Task states by wave task key; a key missing or null means no state is known yet. */
 export type TaskStates = ReadonlyMap<string, string | null>;
 
-/** A wave task's state: `pending` before it started, `running` once started but before its first state. */
+/** A wave task's state: `pending` before it started (`cancelled` when dropped), `running` once started but before its first state. */
 export function waveTaskState(task: FoldedTask, states: TaskStates): string {
-  if (task.taskId === null) return "pending";
+  if (task.taskId === null) return task.dropped ? "cancelled" : "pending";
   return states.get(task.key) ?? "running";
 }
 
-/** The keys of tasks not yet started whose `after` tasks are all `done`, in declaration order. */
+/** The keys of tasks not yet started (nor dropped) whose `after` tasks are all `done`, in declaration order. */
 export function startableKeys(fold: WaveFold, states: TaskStates): string[] {
   const byKey = new Map(fold.tasks.map((task) => [task.key, task]));
   const done = (key: string) => {
     const task = byKey.get(key);
     return task !== undefined && waveTaskState(task, states) === "done";
   };
-  return fold.tasks.filter((task) => task.taskId === null && task.after.every(done)).map((task) => task.key);
+  return fold.tasks.filter((task) => task.taskId === null && !task.dropped && task.after.every(done)).map((task) => task.key);
 }
 
 /**
- * The keys of tasks not yet started that never can: an `after` task, directly or through others, is `cancelled`.
- * The wave waits for the supervisor then (cancel the wave, or add tasks).
+ * The keys of tasks not yet started (nor dropped) that never can: an `after` task, directly or through others, is
+ * `cancelled`.
  */
 export function unreachableKeys(fold: WaveFold, states: TaskStates): string[] {
   const byKey = new Map(fold.tasks.map((task) => [task.key, task]));
@@ -511,7 +533,23 @@ export function unreachableKeys(fold: WaveFold, states: TaskStates): string[] {
     memo.set(key, result);
     return result;
   };
-  return fold.tasks.filter((task) => task.taskId === null && task.after.some(dead)).map((task) => task.key);
+  return fold.tasks.filter((task) => task.taskId === null && !task.dropped && task.after.some(dead)).map((task) => task.key);
+}
+
+/**
+ * The keys of the tasks that can never start while nothing else can move the wave: no task can start and no started
+ * task is active (every one rests). Empty otherwise. A `building` wave with such keys waits for the supervisor
+ * (`waves.cancel`, or `waves.add`, which drops them): it needs attention and its runner rests.
+ */
+export function stuckKeys(fold: WaveFold, states: TaskStates): string[] {
+  const unreachable = unreachableKeys(fold, states);
+  if (unreachable.length === 0 || startableKeys(fold, states).length > 0) return [];
+  const active = fold.tasks.some((task) => {
+    if (task.taskId === null) return false;
+    const state = states.get(task.key) ?? null;
+    return state === null || !RESTING_STATES.includes(state as State);
+  });
+  return active ? [] : unreachable;
 }
 
 /** Every task, started or pending, is `done` or `cancelled`, and at least one is `done`. */
