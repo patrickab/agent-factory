@@ -141,6 +141,7 @@ async function waveRepo(config = "gates:\n  - [\"true\"]\n", state = "done", ove
       tag: "factory/w1",
       plan: null,
       wave: WAVE,
+      origin: null,
     };
     await writeTask(record);
     mkdirSync(record.sessionDir, { recursive: true });
@@ -461,6 +462,7 @@ describe("a wave never waits silently (invariant 8)", () => {
       tag: "factory/w1",
       plan: null,
       wave: WAVE,
+      origin: null,
     };
     await writeTask(record);
     setState("x", "done");

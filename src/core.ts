@@ -48,6 +48,7 @@ import {
 } from "./launch.ts";
 import { inboxReadPath, readFactoryStates, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { loadModels, requireModels, saveModels } from "./models.ts";
+import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
 import {
   DEFAULT_SETTINGS,
@@ -123,6 +124,8 @@ export interface TaskView {
   plan: string | null;
   /** The wave the task belongs to (`waves.start`, `waves.add`), null outside one. */
   wave: string | null;
+  /** The Pi session that started the task (a wave's task: the wave's); null when none did (CLI, MCP, old records). */
+  origin: string | null;
   sessionId: string;
   sessionPath: string | null;
   state: State | null;
@@ -373,7 +376,7 @@ type Params = Record<string, unknown>;
 /**
  * `cwd`: where relative `repo` params start. `signal`: aborts a `tasks.start` before its runner is spawned. `env`: the
  * environment of every runner the action starts (default `process.env`). `origin`: the calling Pi session's id
- * (`waves.start` records it); the CLI and MCP give none.
+ * (`tasks.start` and `waves.start` record it); the CLI and MCP give none.
  */
 export interface CallOptions {
   cwd?: string;
@@ -612,6 +615,7 @@ async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise
     tag: record.tag,
     plan: record.plan,
     wave: record.wave,
+    origin: record.origin,
     sessionId: record.sessionId,
     sessionPath,
     state: last?.state ?? null,
@@ -1294,6 +1298,18 @@ async function waveLook(file: WaveFile): Promise<WaveLook> {
 }
 
 /**
+ * What notifications (`notify.ts`) judge for the Pi session `origin`: the views of the tasks it started and of the
+ * waves it declared, a wave with whether it builds stuck and its log. Only those records are read.
+ */
+export async function noticeInputs(origin: string): Promise<{ tasks: TaskView[]; waves: NoticeWave[] }> {
+  const records = (await listTasks()).filter((record) => record.origin === origin);
+  const files = (await listWaves()).filter((file) => file.declaration.origin === origin);
+  const tasks = await Promise.all(records.map((record) => taskView(record)));
+  const waves = await Promise.all(files.map(async (file) => ({ ...(await waveLook(file)), events: file.events })));
+  return { tasks, waves };
+}
+
+/**
  * The scheduler: starts every pending task of the wave whose `after` tasks are all `done`, through `launchTask` with
  * the wave's branch as target, its tag, plan and id, and records a `task` event for each. Only the wave's runner calls
  * it, holding the runner's lock: no task starts twice. A record of this wave no `task` event names (a runner died
@@ -1325,7 +1341,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
       try {
         // The task's own model is its coder's; the reviewer's stays the wave's.
         const taskOverrides: StoredSettings = task.model === null ? overrides : { ...overrides, models: { ...models, coder: task.model } };
-        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides: taskOverrides, tag: declaration.tag, plan: declaration.plan, wave: id, env, signal });
+        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides: taskOverrides, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal });
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
@@ -1488,7 +1504,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     return { base, diff: diff.patch, files };
   },
 
-  "tasks.start": async (params, { cwd, signal, env }) => {
+  "tasks.start": async (params, { cwd, signal, env, origin }) => {
     const title = nonEmpty(params.title);
     const request = nonEmpty(params.request);
     if (title === undefined) throw new FactoryError("invalid", "tasks.start needs a title that is not empty");
@@ -1509,7 +1525,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const target = overrides.branch ?? stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target !== undefined) await requireNoOpenWaveBranch(repo, target);
     try {
-      return taskView(await launchTask({ repo, title, request, overrides, tag, plan, signal, env }));
+      return taskView(await launchTask({ repo, title, request, overrides, tag, plan, origin: origin ?? null, signal, env }));
     } catch (error) {
       if (error instanceof LaunchRefusedError) throw new FactoryError("refused", error.message);
       throw error;

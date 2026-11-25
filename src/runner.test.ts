@@ -422,6 +422,7 @@ describe("sendCommand", () => {
       tag: "t",
       plan: null,
       wave: null,
+      origin: null,
     };
     await lockTask(record.id);
     await sendCommand(record, "/factory approve");
@@ -452,6 +453,7 @@ describe("messageTask", () => {
       tag: "t",
       plan: null,
       wave: null,
+      origin: null,
     };
   }
 

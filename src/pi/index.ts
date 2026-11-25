@@ -35,6 +35,8 @@
  *   commit, with a commit message the coder is asked for; a part outside the task's scope goes to a new task through
  *   `factory_new_task` (registered in task sessions only, usable in a follow-up run, once per user message), on this
  *   task's target branch and merge mode
+ * - Notifications (`notifier.ts`): in a session that is not a task's own, the notices of the tasks it started and the
+ *   waves it declared arrive as a message that starts a turn (`factory-notice`)
  * - A task of a wave merges into the wave's branch only until the wave's review began (`waveMergeRefusal`, invariant
  *   2): a merge after that ends the task `blocked`, `merge_failed`, its work stays in its worktree. Its merge gates
  *   are `gates` and `task_gates` (`taskWave`), not `merge_gates`: the wave runs those
@@ -68,7 +70,9 @@ import {
   type RunOpening,
 } from "../ops.ts";
 import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, wasInterrupted, type Draft, type Snapshot, type State } from "../state.ts";
-import { registerFactoryTool } from "./tool.ts";
+import { startNotifier, type Notifier } from "./notifier.ts";
+import { isTaskSession, registerFactoryTool } from "./tool.ts";
+import { TASK_SESSION_ENV } from "../runner.ts";
 import { errorText } from "../util.ts";
 
 /** Tag of the system prompt section that carries `.factory/agents/coder.md`. */
@@ -190,7 +194,18 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  let notifier: Notifier | undefined;
   pi.on("session_start", async (_event, ctx) => {
+    notifier?.stop();
+    notifier = undefined;
+    // A runner's Pi is a task's own session from the start; a session that gets its task later is checked per look.
+    if (process.env[TASK_SESSION_ENV] !== "1") {
+      notifier = startNotifier({
+        origin: ctx.sessionManager.getSessionId(),
+        send: (text) => pi.sendMessage({ customType: "factory-notice", content: text, display: true }, { triggerTurn: true }),
+        isTaskSession: () => session.snapshot !== undefined || isTaskSession(ctx.sessionManager.getBranch()),
+      });
+    }
     session.snapshot = rebuild(ctx.sessionManager.getBranch());
     session.files = undefined;
     registerTaskTools();
@@ -203,6 +218,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    notifier?.stop();
+    notifier = undefined;
     session.disposed = true;
     session.runner.cancel();
   });

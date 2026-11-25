@@ -18,6 +18,7 @@ function task(over: Partial<TaskView> = {}): TaskView {
     tag: "factory/w1",
     plan: "agent-factory/waves run/plan.md",
     wave: null,
+    origin: null,
     sessionId: SESSION,
     sessionPath: `/home/me/.pi/agent/sessions/${SESSION}.jsonl`,
     state: "running",

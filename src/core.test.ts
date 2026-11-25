@@ -233,6 +233,7 @@ function fakeRecord(id: string, repo: string): TaskRecord {
     tag: "team/a",
     plan: null,
     wave: null,
+    origin: null,
   };
 }
 
@@ -493,6 +494,7 @@ describe("task reads", () => {
       tag: "team/a",
       plan: null,
       wave: null,
+      origin: null,
       sessionId: record.sessionId,
       sessionPath: path,
       state: "blocked",

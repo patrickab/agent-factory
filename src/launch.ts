@@ -154,6 +154,8 @@ export interface LaunchInput {
   env?: RunnerEnv;
   /** The wave the task belongs to: only `waves.start`/`waves.add` (the scheduler) give one, never `tasks.start`. */
   wave?: string;
+  /** The Pi session that starts the task (`TaskRecord.origin`). */
+  origin?: string | null;
 }
 
 export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
@@ -205,6 +207,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
         tag: input.tag ?? systemUser(),
         plan: input.plan ?? null,
         wave: input.wave ?? null,
+        origin: input.origin ?? null,
       };
       await writeTask(record);
       recorded = true;

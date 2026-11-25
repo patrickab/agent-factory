@@ -315,7 +315,7 @@ describe("unmergedWork", () => {
     writeFileSync(join(caseDir, "t-wt", "x.txt"), "x\n");
     git(join(caseDir, "t-wt"), "add", "-A");
     git(join(caseDir, "t-wt"), "commit", "--quiet", "-m", "x");
-    const record = { id: "i", repo, worktree: join(caseDir, "t-wt"), branch: "t", title: "t", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, wave: null };
+    const record = { id: "i", repo, worktree: join(caseDir, "t-wt"), branch: "t", title: "t", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, wave: null, origin: null };
     expect(await unmergedWork(record, undefined)).toEqual({ commits: 1, dirty: false });
     expect(await unmergedWork(record, "main")).toEqual({ commits: 1, dirty: false });
   });
@@ -326,7 +326,7 @@ describe("unmergedWork", () => {
     git(repo, "worktree", "add", "--quiet", "-b", "u", worktree);
     git(repo, "config", "status.showUntrackedFiles", "no");
     writeFileSync(join(worktree, "forgotten.txt"), "work\n");
-    const record = { id: "i", repo, worktree, branch: "u", title: "u", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, wave: null };
+    const record = { id: "i", repo, worktree, branch: "u", title: "u", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, wave: null, origin: null };
     expect(await unmergedWork(record, "main")).toEqual({ commits: 0, dirty: true });
   });
 });
