@@ -209,6 +209,37 @@ describe("the wave runner", () => {
     expect((await getWave()).reviews).toEqual([]);
   });
 
+  test("waves.retry after a blocked rebase: review and merge run again from the rebase, in a runner it starts", async () => {
+    const repo = await waveRepo();
+    const init = git(repo, "rev-parse", "main");
+    commit(repo, "b.txt", "main's b\n", "main: add b");
+    await runWave(WAVE);
+    expect([(await getWave()).stage, (await getWave()).actions]).toEqual(["blocked", ["waves.add", "waves.retry", "waves.cancel", "waves.remove"]]);
+    // The supervisor resolves it: the conflicting commit leaves the target.
+    git(repo, "reset", "--quiet", "--hard", init);
+    const retried = ((await callAction("waves.retry", { id: WAVE })) as { wave: WaveView }).wave;
+    expect(retried.stage).toBe("reviewing");
+    await until(async () => (await getWave()).stage === "merged");
+    await until(async () => (await liveWaveRunners(WAVE)).length === 0);
+    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
+    const timeline = (await callAction("waves.timeline", { id: WAVE })) as { events: { kind: string; stage?: string; reason?: string }[] };
+    expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "blocked", "reviewing", "gate", "review", "merging", "merge", "merged"]);
+  }, 30_000);
+
+  test("merge review: waves.approve only from waiting_approve, then the runner merges", async () => {
+    const repo = await waveRepo(undefined, "done", { merge: "review" });
+    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
+    await expect(callAction("waves.approve", { id: WAVE })).rejects.toThrow("is reviewing, approve needs waiting_approve");
+    await runWave(WAVE);
+    const waiting = await getWave();
+    expect([waiting.stage, waiting.actions.includes("waves.approve")]).toEqual(["waiting_approve", true]);
+    const approved = ((await callAction("waves.approve", { id: WAVE })) as { wave: WaveView }).wave;
+    expect(approved.stage).toBe("merging");
+    await until(async () => (await getWave()).stage === "merged");
+    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
+    await expect(callAction("waves.approve", { id: WAVE })).rejects.toThrow("is merged, approve needs waiting_approve");
+  }, 30_000);
+
   test("a failing gate blocks it with reason gates, its output in the gate event; the wave's commits stay", async () => {
     const repo = await waveRepo('gates:\n  - ["sh", "-c", "echo gate broke; exit 1"]\n');
     await runWave(WAVE);

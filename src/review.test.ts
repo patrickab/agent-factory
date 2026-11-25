@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseFindings, readReviewerOutput, reviewPatch, runReview } from "./review.ts";
+import { parseFindings, readReviewerOutput, reviewPatch, runReview, WAVE_REVIEW_TIMEOUT_MS } from "./review.ts";
 import type { CommandOptions, CommandResult } from "./run.ts";
 import type { Finding, Task } from "./state.ts";
 
@@ -172,5 +172,8 @@ describe("runReview", () => {
     expect(prompt).toContain(join(reviewsDir, "round-3.patch"));
     expect(prompt.endsWith("## Instructions from the supervisor\n\nRead plan/w1.md.\nThe wave adds a greeting.\n")).toBe(true);
     expect(existsSync(join(reviewsDir, "round-3.request.md"))).toBe(false);
+    // A whole wave's diff gets the wave reviewer's time limit, not a task round's.
+    expect(calls[0].options.timeoutMs).toBe(WAVE_REVIEW_TIMEOUT_MS);
+    expect(WAVE_REVIEW_TIMEOUT_MS).toBe(20 * 60_000);
   });
 });

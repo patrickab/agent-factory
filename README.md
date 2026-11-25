@@ -105,16 +105,20 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   `interrupted`, the task's settings, token and cost usage of coder and reviews, `actions` = the task actions the core
   accepts now), `tasks.timeline` (session entries as `{at, kind, data}`, `since`/`next` = a byte cursor, read from
   `since` on), `tasks.diff` (base, patch, per-file added/removed lines), `tasks.start|approve|retry|cancel|remove|message`,
-  `tasks.wait`, `waves.start|add|get|list|timeline` (below)
+  `tasks.wait`, `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below)
 - `tasks.list {repo?, tag?}`: `tag` keeps the tasks whose tag is it or starts with `tag + "/"` (`a` holds `a/b`, not
   `ab`)
-- `tasks.wait {ids?, tag?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique prefixes,
-  resolved once) and `tag` (as in `tasks.list`, re-listed on every poll, so tasks started later count); `ignore` leaves
-  ids out; `timeoutMs` 1000..3600000, default 600000. A task rests when no runner lives and its state is
+- `tasks.wait {ids? | tag? | wave?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique
+  prefixes, resolved once), `tag` (the tasks and the waves under it as in `tasks.list`, re-listed on every poll, so
+  tasks and waves started later count) and `wave` (that wave, id or unique prefix, and its tasks); `ignore` leaves task
+  or wave ids out; `timeoutMs` 1000..3600000, default 600000. A task rests when no runner lives and its state is
   `waiting_approve`, `waiting_answer`, `blocked`, `done` or `cancelled`, or it is interrupted; it needs attention when
-  it rests and is not `done`. Answers `{tasks, attention: ids, timedOut}` once every watched task rests, one needs
-  attention, the timeout passes or no task is watched; an abort fails it. A poll re-reads a session file only when it
-  changed and looks for runners only where that decides the answer
+  it rests and is not `done` (a `cancelled` task of a watched wave needs none: it left the wave, which goes on). A wave
+  rests `merged` or `cancelled`; it needs attention `rejected`, `blocked`, `waiting_approve` or interrupted. Answers
+  `{tasks, waves, attention: task and wave ids, timedOut}` once everything watched rests, one needs attention, the
+  timeout passes or nothing is watched; an abort fails it. A wave's tasks all resting while the wave builds, reviews
+  or merges is not the end. A poll re-reads a session file only when it changed and looks for runners only where that
+  decides the answer
 - `tasks.import` (`hostOnly`, `{record}`): registers a task record another store kept; an existing id stays. It refuses
   a record unless `repo` is a primary checkout and `worktree` one of its linked worktrees with `branch` checked out
 - A `repo` param is a path inside the repository, relative to the caller's `cwd`, which is also its default; without
@@ -152,8 +156,31 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   through `waves.start`/`waves.add`)
 - `waves.add {id, tasks}`: more tasks (`after` may name existing keys); a `rejected`, `blocked`, `reviewing` or
   `waiting_approve` wave goes back to `building`; refused when `merged`, `cancelled` or `merging`
-- The log `waves/<id>.jsonl` is append-only; every append holds `waves/<id>.log.lock` from its read of the log to its
-  write, and a stage change is a compare-and-append on the stage it leaves (a `waves.add` that came first wins)
+- `waves.retry {id}`: a `blocked` wave runs review and merge again from the rebase (stage `reviewing`), an interrupted
+  one resumes the stage its log holds; it pokes the runner. `waves.approve {id}`: only from `waiting_approve` (the
+  wave's `merge: review`), on to `merging`. Both answer `{wave}`
+- `waves.cancel {id}`: refused when `merged` or `cancelled`; records `cancelled`, stops the wave's runner and cancels
+  its tasks that are not `done` or `cancelled` (as `tasks.cancel`). The wave's branch stays. Answers `{wave}`
+- `waves.remove {id, force?}`: refused while the wave's runner lives or one of its tasks runs or waits for an answer;
+  removes its tasks as `tasks.remove` does (refused, before anything is deleted, for unmerged work without `force`),
+  then its record, lock, log and reviews. The wave's branch is deleted only when the wave is `merged`. Answers
+  `{removed: id}`
+- `WaveView.actions` lists exactly the `waves.*` actions valid now
+- The record `waves/<id>.jsonl` is an event log, append-only: line 1 the declaration, then one event per line
+  (`tasks`, `task`, `stage`, `gate`, `review`, `merge`, `remote`); the wave's state is their fold plus its tasks' states
+  and is never stored. Every append holds `waves/<id>.log.lock` from its read of the log to its write, and a stage
+  change is a compare-and-append on the stage it leaves (a `waves.add` that came first wins). `waves.timeline` replays it
+
+#### The supervisor's loop
+
+1. Declare: `waves.start` with every task of the wave and which waits for which (`after`), the reviewer's
+   instructions as `request`
+2. Wait: `tasks.wait {wave}` answers when the wave is `merged` or `cancelled` or something needs the supervisor: a
+   task's question (`tasks.message` answers it), a blocked task (`tasks.retry`, `tasks.message` or `tasks.cancel`), a
+   `rejected`, `blocked`, `waiting_approve` or interrupted wave. Then wait again
+3. Decide after a rejection: read the findings (`waves.get` `reviews`), then `waves.add` fix tasks (the wave builds
+   again, then is reviewed again) or `waves.cancel`. Nothing moves until then: the factory never creates fix tasks.
+   After `blocked`: fix the cause, then `waves.retry` (or `waves.add`); `waiting_approve`: `waves.approve`
 
 ### The wave runner (`src/wave-runner.ts`, `src/wave-poke.ts`)
 
@@ -161,7 +188,7 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   wave's lock `waves/<id>.lock` for its life, logs to `waves/<id>.log` and lives while the wave does not rest
   (`running`; a wave not resting without one is `interrupted`). No Pi session: it calls the pure steps (`git.ts`,
   `rebaseWorktree`, `mergeTask`, `runReview`, the merge queue) with its own commands
-- Poked by `waves.start`, `waves.add` and by a wave's task whose runner ends with the task at rest (`FACTORY_TASK_WAVE`
+- Poked by `waves.start`, `waves.add`, `waves.retry`, `waves.approve` and by a wave's task whose runner ends with the task at rest (`FACTORY_TASK_WAVE`
   is set on the runners of a wave's tasks). A poke writes `waves/<id>.poke` and starts a runner unless a live one holds
   the lock: that one sees the marker and looks again before it ends, a second runner never starts
 - `building`: starts the tasks whose `after` are all `done` (target = the wave branch); a blocked task holds the wave
@@ -173,6 +200,7 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   the target: `merged` without a review. `factory.yaml` and the reviewer prompt come from the target's tip
 - `merging`: the normal merge queue (`merge_gates`, fast-forward of the target); `merge` records the commit range and
   the queue wait
+- The wave's reviewer gets 20 minutes (a whole wave's diff); a task's reviewer keeps its 5
 - A rebase conflict, failed gates (`gates`; exit 75: `infra`), a dirty worktree (`dirty`), a failed reviewer
   (`review_failed`) or anything else (`infra`) ends it `blocked` with that `reason`, and nothing is deleted
 - The gates and the reviewer see exactly the committed tree that reaches the target: before the rebase, after it (the
@@ -246,8 +274,8 @@ Commands (inside a task's own Pi session):
 ## Tags
 
 - Give related tasks one tag: `tasks.start {..., tag: "plugin/m1/w1"}` (default the system user name), then
-  `tasks.list {tag: "plugin/m1"}` lists them and `tasks.wait {tag: "plugin/m1/w1"}` blocks until the wave rests or one
-  task needs attention. `plan` stores a memory_store path next to the tag; the factory only keeps it
+  `tasks.list {tag: "plugin/m1"}` lists them and `tasks.wait {tag: "plugin/m1"}` blocks until the tasks and waves
+  under it rest or one needs attention. `plan` stores a memory_store path next to the tag; the factory only keeps it
 - A wave's tasks merge into a wave branch; its runner then gates that branch into the target all waves flow into
 
 ## Questions to the supervisor
@@ -324,10 +352,11 @@ Commands (inside a task's own Pi session):
 ```text
 You can hand coding tasks to the factory (the `factory` tool or the `factory` CLI).
 - Give each task a self-contained request and a conventional commit title; group a wave under one tag.
-- Start with tasks.start, then block on tasks.wait (ids or tag) instead of polling tasks.get.
+- Start with tasks.start, then block on tasks.wait (ids, tag or wave) instead of polling tasks.get.
 - When a task needs attention, read tasks.get and tasks.timeline: answer a question with tasks.message, approve,
   retry or cancel as its actions allow.
-- Declare a planned set of tasks as a wave (waves.start); its runner reviews and merges it, never merge it yourself.
+- Declare a planned set of tasks as a wave (waves.start) and wait on it (tasks.wait {wave}); its runner reviews and
+  merges it, never merge it yourself. After a rejection add fix tasks (waves.add) or cancel it (waves.cancel).
 ```
 
 ## Development

@@ -97,6 +97,16 @@ process.exit(0);
 `,
 );
 
+/** A wave runner stand-in `liveWaveRunners` finds (`wave-runner.ts <id>`); it exits once `$FAKE_RUNNER_END` exists. */
+const fakeWaveRunner = join(scratch, "fake-runner", "wave-runner.ts");
+writeFileSync(
+  fakeWaveRunner,
+  `import { existsSync } from "node:fs";
+while (!existsSync(process.env.FAKE_RUNNER_END)) await Bun.sleep(20);
+process.exit(0);
+`,
+);
+
 /** A PATH with the fake `pi` and without any directory that holds `agent-worktree`. */
 const testPath = [fakeBin, ...(savedEnv.PATH ?? "").split(":").filter((dir) => dir !== "" && !existsSync(join(dir, "agent-worktree")))].join(":");
 
@@ -261,6 +271,10 @@ describe("callAction", () => {
         "waves.get",
         "waves.list",
         "waves.timeline",
+        "waves.retry",
+        "waves.approve",
+        "waves.cancel",
+        "waves.remove",
       ].sort(),
     );
     expect(ACTIONS["tasks.get"].mutates).toBe(false);
@@ -876,7 +890,7 @@ describe("tasks.wait", () => {
     return record;
   }
 
-  type WaitResult = { tasks: TaskView[]; attention: string[]; timedOut: boolean };
+  type WaitResult = { tasks: TaskView[]; waves: WaveView[]; attention: string[]; timedOut: boolean };
   const wait = async (params: object) => (await callAction("tasks.wait", params)) as WaitResult;
 
   test("returns at once when every watched task rests; done needs no attention", async () => {
@@ -923,7 +937,7 @@ describe("tasks.wait", () => {
     const result = await wait({ ids: [ID_1], timeoutMs: 1_000 });
     expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
     expect([result.tasks.map((view) => view.id), result.attention, result.timedOut]).toEqual([[ID_1], [], true]);
-    expect(await wait({ tag: "nobody" })).toEqual({ tasks: [], attention: [], timedOut: false });
+    expect(await wait({ tag: "nobody" })).toEqual({ tasks: [], waves: [], attention: [], timedOut: false });
   });
 
   test("an abort ends the wait", async () => {
@@ -968,8 +982,8 @@ describe("tasks.wait", () => {
 
   test("invalid: ids and tag both or neither, empty ids, a timeout out of bounds", async () => {
     await waitTask(ID_1, "w", "done");
-    await expectError(wait({}), "invalid", "tasks.wait needs exactly one of ids and tag");
-    await expectError(wait({ ids: [ID_1], tag: "w" }), "invalid", "tasks.wait needs exactly one of ids and tag");
+    await expectError(wait({}), "invalid", "tasks.wait needs exactly one of ids, tag and wave");
+    await expectError(wait({ ids: [ID_1], tag: "w" }), "invalid", "tasks.wait needs exactly one of ids, tag and wave");
     await expectError(wait({ ids: [""] }), "invalid", "ids must hold non-empty strings");
     await expectError(wait({ ids: [ID_1], timeoutMs: 999 }), "invalid", "timeoutMs must be at least 1000");
     await expectError(wait({ ids: [ID_1], timeoutMs: 3_600_001 }), "invalid", "timeoutMs must be at most 3600000");
@@ -1183,7 +1197,7 @@ describe("waves", () => {
     expect(wave.reviews).toEqual([{ at: expect.any(String), ...review }]);
     // Not resting and no runner: interrupted, whatever the stage.
     expect([wave.running, wave.interrupted]).toEqual([false, true]);
-    expect(wave.actions).toEqual(isActionNameList(["waves.add", "waves.retry", "waves.cancel", "waves.remove"]));
+    expect(wave.actions).toEqual(["waves.add", "waves.retry", "waves.cancel", "waves.remove"]);
     await appendWaveEvent(id, { kind: "stage", stage: "reviewing", reason: null });
     expect((await getWave(id)).interrupted).toBe(true);
     await appendWaveEvent(id, { kind: "stage", stage: "rejected", reason: null });
@@ -1204,7 +1218,171 @@ describe("waves", () => {
   });
 });
 
-/** The names of `names` the core has as actions (the others come with later versions). */
-function isActionNameList(names: string[]): string[] {
-  return names.filter((name) => Object.hasOwn(ACTIONS, name));
-}
+describe("waiting on waves and the wave actions", () => {
+  const WAVE = "50000000-0000-4000-8000-000000000001";
+  const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [] });
+  const stateEntry = (state: string) => ({ type: "custom", customType: "factory-state", timestamp: "t", data: { state, round: 1, reason: "r" } });
+  type WaitResult = { tasks: TaskView[]; waves: WaveView[]; attention: string[]; timedOut: boolean };
+  const wait = async (params: object) => (await callAction("tasks.wait", params)) as WaitResult;
+  const getWave = async (id = WAVE) => ((await callAction("waves.get", { id })) as { wave: WaveView }).wave;
+
+  /** A wave written directly with two tasks in `states` (a, b), at `stage`. */
+  async function writtenWave(repo: string, states: string[], stage?: "reviewing" | "rejected" | "merged" | "waiting_approve" | "blocked", branch = "main-factory-w1"): Promise<TaskRecord[]> {
+    await createWave({ id: WAVE, repo, tag: "factory/w1", plan: null, title: "w", request: "r", branch, target: "main", base: "abc", origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
+    await appendWaveEvent(WAVE, { kind: "tasks", tasks: states.map((_, index) => spec(String.fromCharCode(97 + index))) });
+    const records: TaskRecord[] = [];
+    for (const [index, state] of states.entries()) {
+      const record = { ...fakeRecord([ID_1, ID_2, ID_3][index], repo), tag: "factory/w1", wave: WAVE };
+      await writeTask(record);
+      // "starting": no session file yet.
+      if (state !== "starting") writeSession(record, [stateEntry(state)]);
+      await appendWaveEvent(WAVE, { kind: "task", key: String.fromCharCode(97 + index), taskId: record.id, sessionId: record.sessionId });
+      records.push(record);
+    }
+    if (stage) await appendWaveEvent(WAVE, { kind: "stage", stage, reason: stage === "blocked" ? "conflict" : null });
+    return records;
+  }
+
+  /** A live stand-in of the wave's runner; resolves with the function that ends it. */
+  async function fakeRunner(): Promise<() => Promise<void>> {
+    const end = join(caseDir, "runner-end");
+    const child = Bun.spawn(["bun", fakeWaveRunner, WAVE], { env: { ...process.env, FAKE_RUNNER_END: end } });
+    await until(async () => (await liveWaveRunners(WAVE)).length === 1);
+    return async () => {
+      writeFileSync(end, "");
+      await child.exited;
+    };
+  }
+
+  test("by wave: not while it reviews with every task done; on merged, without attention", async () => {
+    await writtenWave("/r", ["done", "done"], "reviewing");
+    const stop = await fakeRunner();
+    const busy = await wait({ wave: WAVE.slice(0, 8), timeoutMs: 1_500 });
+    expect([busy.timedOut, busy.attention, busy.tasks.map((view) => view.id), busy.waves.map((wave) => [wave.id, wave.stage, wave.running])]).toEqual([
+      true,
+      [],
+      [ID_1, ID_2],
+      [[WAVE, "reviewing", true]],
+    ]);
+    setTimeout(() => void appendWaveEvent(WAVE, { kind: "stage", stage: "merged", reason: null }).then(stop), 300);
+    const merged = await wait({ wave: WAVE, timeoutMs: 10_000 });
+    expect([merged.timedOut, merged.attention, merged.waves[0].stage]).toEqual([false, [], "merged"]);
+  });
+
+  test("by wave: rejected is the wave's attention; by tag the wave is watched too", async () => {
+    await writtenWave("/r", ["done"], "reviewing");
+    const stop = await fakeRunner();
+    setTimeout(() => void appendWaveEvent(WAVE, { kind: "stage", stage: "rejected", reason: null }).then(stop), 300);
+    const rejected = await wait({ wave: WAVE, timeoutMs: 10_000 });
+    expect([rejected.timedOut, rejected.attention, rejected.waves[0].stage]).toEqual([false, [WAVE], "rejected"]);
+    const byTag = await wait({ tag: "factory", timeoutMs: 5_000 });
+    expect([byTag.attention, byTag.waves.map((wave) => wave.id)]).toEqual([[WAVE], [WAVE]]);
+    // An ignored wave is not watched.
+    expect((await wait({ tag: "factory", ignore: [WAVE.slice(0, 8)] })).waves).toEqual([]);
+  });
+
+  test("by wave: a task's question needs attention while the wave builds; a cancelled task of it does not", async () => {
+    const [, asking] = await writtenWave("/r", ["cancelled", "starting"]);
+    const stop = await fakeRunner();
+    const quiet = await wait({ wave: WAVE, timeoutMs: 1_000 });
+    expect([quiet.timedOut, quiet.attention]).toEqual([true, []]);
+    setTimeout(() => writeSession(asking, [stateEntry("waiting_answer")]), 300);
+    const asked = await wait({ wave: WAVE, timeoutMs: 10_000 });
+    expect([asked.timedOut, asked.attention, asked.waves[0].stage]).toEqual([false, [ID_2], "building"]);
+    await stop();
+    // Without its runner the building wave is interrupted: attention.
+    expect((await wait({ wave: WAVE })).attention).toEqual([ID_2, WAVE]);
+  });
+
+  test("exactly one of ids, tag and wave", async () => {
+    await writtenWave("/r", ["done"]);
+    for (const params of [{}, { ids: [ID_1], wave: WAVE }, { tag: "factory", wave: WAVE }, { ids: [ID_1], tag: "factory", wave: WAVE }]) {
+      await expectError(wait(params), "invalid", "tasks.wait needs exactly one of ids, tag and wave");
+    }
+    await expectError(wait({ wave: "ffffffff" }), "not_found", "no wave");
+  });
+
+  test("approve only from waiting_approve, retry only blocked or interrupted: refused otherwise; actions say so", async () => {
+    await writtenWave("/r", ["done"], "rejected");
+    expect((await getWave()).actions).toEqual(["waves.add", "waves.cancel", "waves.remove"]);
+    await expectError(callAction("waves.approve", { id: WAVE }), "refused", "is rejected, approve needs waiting_approve");
+    await expectError(callAction("waves.retry", { id: WAVE }), "refused", "is rejected, retry needs blocked or interrupted");
+    await appendWaveEvent(WAVE, { kind: "stage", stage: "waiting_approve", reason: null });
+    expect((await getWave()).actions).toEqual(["waves.add", "waves.approve", "waves.cancel", "waves.remove"]);
+    await expectError(callAction("waves.retry", { id: WAVE }), "refused", "retry needs blocked or interrupted");
+    await appendWaveEvent(WAVE, { kind: "stage", stage: "merged", reason: null });
+    expect((await getWave()).actions).toEqual(["waves.remove"]);
+    await expectError(callAction("waves.approve", { id: WAVE }), "refused", "is merged");
+    await expectError(callAction("waves.cancel", { id: WAVE }), "refused", "is merged already");
+  });
+
+  test("waves.cancel stops the wave's runner and its running tasks, the branch stays; then nothing moves", async () => {
+    process.env.FAKE_PI_HOLD = "1";
+    const repo = makeRepo();
+    await callAction("repos.add", {}, { cwd: repo });
+    const started = ((await callAction("waves.start", { tag: "factory/w1", title: "w", request: "r", tasks: [spec("a"), spec("b")] }, { cwd: repo })) as { wave: WaveView }).wave;
+    await until(async () => (await getWave(started.id)).tasks.every((task) => task.taskId !== null));
+    const records = (await listTasks()).filter((record) => record.wave === started.id);
+    for (const record of records) await until(async () => (await stateOf(record)) === "running");
+    expect((await getWave(started.id)).running).toBe(true);
+    await expectError(callAction("waves.remove", { id: started.id }), "refused", "has a runner, cancel it first");
+    const cancelled = ((await callAction("waves.cancel", { id: started.id })) as { wave: WaveView }).wave;
+    expect([cancelled.stage, cancelled.running, cancelled.actions]).toEqual(["cancelled", false, ["waves.remove"]]);
+    for (const record of records) {
+      await until(async () => (await stateOf(record)) === "cancelled");
+      await until(() => runnerEnded(record));
+    }
+    expect((await getWave(started.id)).tasks.map((task) => task.state)).toEqual(["cancelled", "cancelled"]);
+    expect(git(repo, "branch", "--list", started.branch)).toBe(started.branch);
+    await expectError(callAction("waves.cancel", { id: started.id }), "refused", "is cancelled already");
+    await expectError(callAction("waves.add", { id: started.id, tasks: [spec("c")] }), "refused", "is cancelled");
+    // The cancelled tasks' runners poke the wave: a runner that looks sees it rest and starts nothing.
+    await until(async () => (await liveWaveRunners(started.id)).length === 0);
+    expect((await listTasks()).filter((record) => record.wave === started.id)).toHaveLength(2);
+    // Then remove: the tasks (no work of theirs), the record; the branch of a wave not merged stays.
+    expect(await callAction("waves.remove", { id: started.id })).toEqual({ removed: started.id });
+    expect((await listTasks()).filter((record) => record.wave === started.id)).toEqual([]);
+    for (const record of records) expect(existsSync(record.worktree)).toBe(false);
+    expect(existsSync(join(caseDir, "agent", "factory", "waves", `${started.id}.jsonl`))).toBe(false);
+    expect(git(repo, "branch", "--list", started.branch)).toBe(started.branch);
+    await expectError(callAction("waves.get", { id: started.id }), "not_found", "no wave");
+  }, 60_000);
+
+  test("waves.remove: refused for a waiting question and unmerged work without force; a merged wave's branch is deleted", async () => {
+    const repo = makeRepo();
+    git(repo, "branch", "main-factory-w1");
+    const [a, b] = await writtenWave(repo, ["done", "waiting_answer"], "merged");
+    for (const record of [a, b]) git(repo, "worktree", "add", "--quiet", "-b", record.branch, record.worktree, "main");
+    await expectError(callAction("waves.remove", { id: WAVE, force: true }), "refused", "waits for the answer to its question");
+    expect((await getWave()).actions).toEqual([]);
+    writeSession(b, [stateEntry("cancelled")]);
+    writeFileSync(join(a.worktree, "stray.txt"), "x\n");
+    const refused = await failure(callAction("waves.remove", { id: WAVE }));
+    expect([refused.code, refused.detail, refused.message]).toEqual(["refused", { force: true }, expect.stringContaining("give force: true")]);
+    // Nothing was deleted by the refusal.
+    expect([existsSync(a.worktree), existsSync(b.worktree), (await listTasks()).length, (await listWaves()).length]).toEqual([true, true, 2, 1]);
+    expect(await callAction("waves.remove", { id: WAVE, force: true })).toEqual({ removed: WAVE });
+    expect([existsSync(a.worktree), existsSync(b.worktree), await listTasks(), await listWaves()]).toEqual([false, false, [], []]);
+    expect(git(repo, "branch", "--list", "main-factory-w1")).toBe("");
+    expect(readdirSync(join(caseDir, "agent", "factory", "waves"))).toEqual([]);
+  });
+});
+
+describe("liveRunners", () => {
+  test("a one-letter session id matches no other runner, nor a wave's runner", async () => {
+    const inbox = join(caseDir, "inbox");
+    const env = { ...process.env, FAKE_INBOX: inbox, FAKE_RUNNER_END: inbox };
+    const task = Bun.spawn(["bun", exitingRunner, join(caseDir, "a"), join(caseDir, "a-sessions"), "abc", "a b"], { env });
+    const wave = Bun.spawn(["bun", fakeWaveRunner, "a"], { env });
+    try {
+      await until(async () => (await liveRunners({ sessionId: "abc" })).length === 1);
+      expect(await liveRunners({ sessionId: "a" })).toEqual([]);
+      expect(await liveRunners({ sessionId: "b" })).toEqual([]);
+      expect(await liveRunners({ sessionId: "ab" })).toEqual([]);
+      expect(await liveRunners({ sessionId: "abc" })).toEqual([task.pid]);
+    } finally {
+      writeFileSync(inbox, "");
+      await Promise.all([task.exited, wave.exited]);
+    }
+  });
+});

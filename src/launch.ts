@@ -12,12 +12,13 @@
  *   `messageTask`: a message to the coder in any state but merging (`taskInboxPath` of a live runner, else a new
  *   runner); a state refusal is a `MessageRefusedError`
  * - Provides `defaultBranch`, `localBranchExists` and `startCommand` (the payload `parseStartPayload` accepts)
- * - Provides `liveRunners`/`stopRunners` (a task's runner processes, found with `pgrep -f`), `unmergedWork` and
+ * - Provides `liveRunners`/`stopRunners` (a task's runner processes: `pgrep -f`, then the session id as a whole argument
+ *   of the command line), `unmergedWork` and
  *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another)
  * - The detached spawn itself (`runnerSpawn`, `spawnDetached`) lives in `spawn.ts`, shared with the wave runner's poke
  */
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, rm } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
 import { git, primaryCheckout } from "./git.ts";
@@ -283,14 +284,30 @@ export async function restoreWorktree(record: TaskRecord): Promise<void> {
   else throw new Error(`the worktree ${record.worktree} is gone and the task's target branch is unknown`);
 }
 
-/** The pids of the runners of a task still alive, found by their command line (`runner.ts ... <sessionId> ...`). */
+/**
+ * The pids of the runners of a task still alive, found by their command line (`runner.ts ... <sessionId> ...`): `pgrep`
+ * finds the candidates, then the session id must be a whole argument after `runner.ts` (`/proc/<pid>/cmdline`), so a
+ * short id never matches another task's runner nor a wave's (`wave-runner.ts`).
+ */
 export async function liveRunners(record: Pick<TaskRecord, "sessionId">): Promise<number[]> {
-  const pattern = `runner\\.ts .*${record.sessionId.replace(/[^A-Za-z0-9._-]/g, ".")}`;
+  const pattern = `(^|[ /])runner\\.ts .*${record.sessionId.replace(/[^A-Za-z0-9_-]/g, ".")}`;
   const result = await runCommand(["pgrep", "-f", pattern], { cwd: "/", maxStdoutChars: 10_000 });
   // Exit 1 is "no match"; anything else (pgrep missing or failing) would hide a live runner.
   if (result.exitCode === 1) return [];
   if (result.exitCode !== 0) throw new Error(`pgrep, which finds a task's runner, failed (exit ${result.exitCode}): ${outputTail(result.output)}`);
-  return result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number);
+  const pids = result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number);
+  // Without /proc (not Linux) the pattern's match is all there is.
+  if (!existsSync("/proc/self/cmdline")) return pids;
+  const runs = await Promise.all(pids.map((pid) => runsSession(pid, record.sessionId)));
+  return pids.filter((_, index) => runs[index]);
+}
+
+/** Whether process `pid` is a task runner (`runner.ts`) with `sessionId` as one of its arguments; false once it ended. */
+async function runsSession(pid: number, sessionId: string): Promise<boolean> {
+  const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
+  const args = cmdline.split("\0");
+  const script = args.findIndex((arg) => basename(arg) === "runner.ts");
+  return script >= 0 && args.slice(script + 1).includes(sessionId);
 }
 
 async function runnersEnded(record: Pick<TaskRecord, "sessionId">, waitMs: number): Promise<boolean> {
