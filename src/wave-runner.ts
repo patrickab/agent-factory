@@ -41,7 +41,7 @@ import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, tr
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
 import { INFRA_EXIT } from "./pipeline.ts";
-import { commentReview, publishMerge, publishWave } from "./remote.ts";
+import { commentReview, mergePending, publishMerge, publishWave } from "./remote.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
 import { passed, type GateData, type Task } from "./state.ts";
@@ -126,7 +126,24 @@ async function moveStage(id: string, from: WaveStage, to: WaveStage, reason: Wav
 /** How many paths a `dirty` detail names. */
 const DIRTY_PATHS_SHOWN = 20;
 
-/** Why the worktree at `root` is dirty: its path and what it holds besides its commit (`git status` paths). */
+/**
+ * `detail` as the stage event stores it: no path (invariant 10). The review worktree is named by its wave, a path in
+ * the repository is made relative, any other absolute path is `<path>`; the text with its paths goes to the log.
+ */
+function pathFree(declaration: WaveDeclaration, detail: string): string {
+  const named = detail
+    .split(reviewWorktree(declaration))
+    .join(`the review worktree of wave ${declaration.id.slice(0, 8)}`)
+    .split(`${declaration.repo}/`)
+    .join("")
+    .split(declaration.repo)
+    .join("the repository")
+    .replace(/(^|[\s'"`(=])\/[^\s'"`),;]+/g, "$1<path>");
+  if (named !== detail) log(declaration.id, `with its paths: ${detail}`);
+  return named;
+}
+
+/** Why the worktree at `root` is dirty: what it holds besides its commit (`git status` paths); `pathFree` names it. */
 async function dirtyDetail(root: string): Promise<string> {
   const status = await runner.cleanup(["git", "status", "--porcelain", "--untracked-files=normal"], { cwd: root, maxStdoutChars: 100_000 });
   const paths = status.stdout
@@ -134,7 +151,7 @@ async function dirtyDetail(root: string): Promise<string> {
     .filter((line) => line.trim() !== "")
     .map((line) => line.slice(3));
   const shown = paths.slice(0, DIRTY_PATHS_SHOWN).join(", ") + (paths.length > DIRTY_PATHS_SHOWN ? ` and ${paths.length - DIRTY_PATHS_SHOWN} more` : "");
-  return `the review worktree ${root} holds what its commit does not (${shown || "unknown paths"}): commit or remove it there, then waves.retry`;
+  return `${root} holds what its commit does not (${shown || "unknown paths"}): commit or remove it there, then waves.retry`;
 }
 
 /** Why a gate run failed, for the stage's detail (its output tail is in the `gate` event). */
@@ -253,7 +270,7 @@ async function review(fold: WaveFold): Promise<boolean | void> {
   const { id } = fold;
   const task = waveTask(fold);
   const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []): Promise<boolean> => {
-    const moved = await moveStage(id, "reviewing", to, reason, detail, events);
+    const moved = await moveStage(id, "reviewing", to, reason, detail === null ? null : pathFree(fold, detail), events);
     if (!stopping && (!moved || to !== "merging")) await removeWorktree(fold);
     return moved;
   };
@@ -262,7 +279,7 @@ async function review(fold: WaveFold): Promise<boolean | void> {
   try {
     root = await ensureWorktree(fold);
   } catch (error) {
-    return void (await moveStage(id, "reviewing", "blocked", "infra", `the review worktree: ${oneLine(errorText(error))}`));
+    return void (await moveStage(id, "reviewing", "blocked", "infra", pathFree(fold, `the review worktree: ${oneLine(errorText(error))}`)));
   }
   try {
     const { config, prompts } = await targetConfig(fold, root);
@@ -307,8 +324,8 @@ async function review(fold: WaveFold): Promise<boolean | void> {
       task,
       followUps: [],
       diff,
-      // The wave's reviewer model: its own when it names one, else its big one (an old declaration: over the defaults).
-      model: resolveModels([fold.overrides.models]).reviewer,
+      // The wave's reviewer model: its own when it names one, else its big one, else Pi's session model.
+      model: resolveModels([fold.overrides.models]).reviewer ?? null,
       rolePrompt: prompts.reviewer,
       reviewsDir: waveReviewsDir(id),
       cancelled: () => runner.cancelled,
@@ -347,7 +364,7 @@ async function merge(fold: WaveFold, gated: string | null): Promise<void> {
   const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []) => {
     // The target moved: that is recorded even when the runner stops, the merge is not run twice.
     const landed = to === "merged";
-    await moveStage(id, "merging", to, reason, detail, events, landed);
+    await moveStage(id, "merging", to, reason, detail === null ? null : pathFree(fold, detail), events, landed);
     if (!stopping || landed) await removeWorktree(fold);
   };
   let root: string;
@@ -389,7 +406,8 @@ async function merge(fold: WaveFold, gated: string | null): Promise<void> {
   const { result } = outcome;
   switch (result.kind) {
     case "merged":
-      await leave("merged", null, null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }]);
+      // The push still to come is in the log before the resting stage: a runner that dies in between leaves it said.
+      await leave("merged", null, null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }, ...mergePending(fold)]);
       // The target moved: the forge gets it, the request shows merged (recorded, never blocking).
       return void (await publishMerge(fold));
     case "conflict":

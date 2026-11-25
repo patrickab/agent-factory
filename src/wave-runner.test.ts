@@ -11,11 +11,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { callAction } from "./core.ts";
 import { worktreePath } from "./launch.ts";
-import { defaultModels } from "./settings.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath, waveReviewsDir } from "./wave-poke.ts";
 import { runWave } from "./wave-runner.ts";
-import { appendWaveEvent, createWave, listWaves, lockWave, unlockWave, type WaveView } from "./waves.ts";
+import { appendWaveEvent, createWave, foldWave, listWaves, lockWave, readWave, unlockWave, type WaveView } from "./waves.ts";
+import { MERGE_PUSH_PENDING } from "./remote.ts";
 
 const savedEnv = { ...process.env };
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-wave-runner-test-")));
@@ -184,7 +184,7 @@ describe("the wave runner", () => {
     expect(git(repo, "rev-parse", `refs/heads/${BRANCH}`)).toBe(git(repo, "rev-parse", "main"));
     expect(wave.merge).toEqual({ at: expect.any(String), from: moved, to: git(repo, "rev-parse", "main"), queueMs: expect.any(Number) });
     expect(wave.reviews).toEqual([
-      { at: expect.any(String), round: 1, sessionId: "11111111-2222-4333-8444-555555555555", model: defaultModels().big, verdict: "approved", status: "ok", findings: [], usage: { input: 100, output: 20, cost: 0.5 }, wallMs: expect.any(Number) },
+      { at: expect.any(String), round: 1, sessionId: "11111111-2222-4333-8444-555555555555", model: null, verdict: "approved", status: "ok", findings: [], usage: { input: 100, output: 20, cost: 0.5 }, wallMs: expect.any(Number) },
     ]);
     expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", true]]);
     expect(wave.usage).toEqual({ input: 100, output: 20, cost: 0.5 });
@@ -508,7 +508,10 @@ describe("resuming from the log", () => {
     await runWave(WAVE);
     expect([(await getWave()).stage, (await getWave()).reason]).toEqual(["blocked", "dirty"]);
     const detail = (await timeline()).at(-1)?.detail ?? "";
-    expect(detail).toContain(reviewWorktree(repo));
+    // No path in the event (invariant 10): the worktree is named by its wave; its path is in the runner's log only.
+    expect(detail).not.toContain(reviewWorktree(repo));
+    expect(detail).not.toContain(caseDir);
+    expect(detail).toContain(`the review worktree of wave ${WAVE.slice(0, 8)}`);
     expect(detail).toContain("gate-output.log");
     expect(existsSync(join(reviewWorktree(repo), "gate-output.log"))).toBe(true);
     rmSync(join(reviewWorktree(repo), "gate-output.log"));
@@ -630,7 +633,7 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
     expect(await remoteEvents()).toEqual([]);
   });
 
-  test("on (GitHub): branch and target pushed, the request opened once, a comment per verdict, the target pushed after the merge", async () => {
+  test("on (GitHub): the branch pushed, the request opened once, a comment per verdict, the target pushed only after the merge", async () => {
     process.env.FAKE_VERDICT = "reject";
     const repo = await waveRepo(undefined, "done", { remote: true });
     const bare = origin(repo);
@@ -640,7 +643,8 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
     const head = git(repo, "rev-parse", BRANCH);
     expect(rejected.remote).toEqual({ number: 7, url: "https://github.com/acme/app/pull/7", pushed: head, error: null });
     expect(git(bare, "rev-parse", BRANCH)).toBe(head);
-    expect(git(bare, "rev-parse", "main")).toBe(git(repo, "rev-parse", "main"));
+    // The target is not the review's to publish: only the merge pushes it.
+    expect(refs(bare)).not.toContain("refs/heads/main ");
     const [create, comment] = calls();
     expect(create.slice(0, 7)).toEqual(["gh", "pr", "create", "--base", "main", "--head", BRANCH]);
     expect(create).toContain("Wave one");
@@ -661,6 +665,24 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
     expect(merged.remote).toEqual({ number: 7, url: "https://github.com/acme/app/pull/7", pushed: main, error: null });
     expect(git(bare, "rev-parse", "main")).toBe(main);
     expect(git(bare, "rev-parse", BRANCH)).toBe(main);
+    // The pending push is in the log before the resting stage, the push's own event after it.
+    const kinds = (await timeline()).map((event) => event.stage ?? event.kind);
+    expect(kinds.slice(-4)).toEqual(["merge", "remote", "merged", "remote"]);
+    const [pending, done] = (await remoteEvents()).slice(-2);
+    expect(pending.error).toBe(MERGE_PUSH_PENDING);
+    expect(done.error).toBeNull();
+  });
+
+  test("a runner that dies between the merge and its push leaves the log saying the push is pending", async () => {
+    const repo = await waveRepo(undefined, "done", { remote: true });
+    origin(repo);
+    await runWave(WAVE);
+    // What the log held before the push: everything up to the merged stage.
+    const { declaration, events } = await readWave(WAVE);
+    const before = events.slice(0, events.findIndex((event) => event.kind === "stage" && event.stage === "merged") + 1);
+    const fold = foldWave(declaration, before);
+    expect(fold.stage).toBe("merged");
+    expect(fold.remote?.error).toBe(MERGE_PUSH_PENDING);
   });
 
   test("on (GitLab): glab opens the merge request and notes the verdict", async () => {

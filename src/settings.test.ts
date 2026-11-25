@@ -20,8 +20,7 @@ import {
 
 const REPO = "/home/someone/git/project";
 const REPO_FILE = "%2Fhome%2Fsomeone%2Fgit%2Fproject.yaml";
-const { small: SMALL, big: BIG } = defaultModels();
-const DEFAULTS = { merge: "auto", maxRounds: 2, review: false, models: { small: SMALL, big: BIG, coder: BIG, reviewer: BIG } } as const;
+const DEFAULTS = { merge: "auto", maxRounds: 2, review: false, models: {} } as const;
 let agentDir: string;
 let previousAgentDir: string | undefined;
 
@@ -194,8 +193,9 @@ describe("the defaults", () => {
 });
 
 describe("resolveSettings", () => {
-  test("defaults when nothing is stored or overridden: the models of defaults.yaml under all four names", () => {
+  test("defaults when nothing is stored or overridden: no model (Pi's session model), defaults.yaml is not read", () => {
     expect(resolveSettings({}, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
+    expect(resolveSettings({}, {}, "main", "small").models).toEqual({});
   });
 
   test("defaults < stored < overrides, models merged per name", () => {
@@ -211,14 +211,14 @@ describe("resolveSettings", () => {
       models: { small: "s/small", big: "s/big", coder: "s/big", reviewer: "o/reviewer" },
     });
     expect(resolveSettings(stored, { branch: "release" }, "main").branch).toBe("release");
-    expect(resolveSettings({ models: { big: "s/big" } }, {}, "main").models).toEqual({ small: SMALL, big: "s/big", coder: "s/big", reviewer: "s/big" });
+    expect(resolveSettings({ models: { big: "s/big" } }, {}, "main").models).toEqual({ big: "s/big", coder: "s/big", reviewer: "s/big" });
     expect(stored).toEqual(storedCopy);
     expect(overrides).toEqual(overridesCopy);
   });
 
   test("size small runs the coder on the small model; the reviewer stays big", () => {
     expect(resolveSettings({ models: { small: "s/small", big: "s/big" } }, {}, "main", "small").models).toEqual({ small: "s/small", big: "s/big", coder: "s/small", reviewer: "s/big" });
-    expect(resolveSettings({}, {}, "main", "small").models).toEqual({ small: SMALL, big: BIG, coder: SMALL, reviewer: BIG });
+    expect(resolveSettings({ models: { big: "s/big" } }, {}, "main", "small").models).toEqual({ big: "s/big", reviewer: "s/big" });
   });
 
   test("preview is stored and passed through, false by default; resolveSettings leaves it out", async () => {

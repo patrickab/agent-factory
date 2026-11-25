@@ -30,4 +30,20 @@ describe("remote", () => {
     expect(await publishMerge(wave, exec)).toBeNull();
     expect(ran).toEqual([]);
   });
+
+  test("publishWave pushes only the wave's branch; publishMerge pushes the target too", async () => {
+    const ran: string[][] = [];
+    const exec: Exec = async (argv) => {
+      ran.push(argv);
+      const stdout = argv[1] === "config" ? "/srv/elsewhere.git\n" : argv[1] === "rev-parse" ? "abc\n" : "";
+      return { exitCode: 0, killed: false, timedOut: false, durationMs: 0, stdout, stdoutTruncated: false, output: "" };
+    };
+    const wave = { id: "ffffffff-0000-4000-8000-000000000000", repo: "/r", title: "t", request: "r", tag: "a/b", branch: "main-a-b", target: "main", overrides: { remote: true }, remote: null };
+    const pushes = () => ran.filter((argv) => argv[1] === "push").map((argv) => argv.at(-1));
+    await publishWave(wave, exec);
+    expect(pushes()).toEqual(["refs/heads/main-a-b:refs/heads/main-a-b"]);
+    ran.length = 0;
+    await publishMerge(wave, exec);
+    expect(pushes()).toEqual(["refs/heads/main-a-b:refs/heads/main-a-b", "refs/heads/main:refs/heads/main"]);
+  });
 });

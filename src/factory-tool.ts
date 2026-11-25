@@ -7,7 +7,9 @@
  *   log, programs replay it through the core or the CLI); in a task session only those with `mutates: false`
  * - `factoryToolParameters`: `action` (one of them) plus the union of their params
  * - `callFactoryTool`: one tool call, `{action, ...params}`, refusing an action the agent is not offered. Answers the
- *   agent view as `text` and the full view as `result`; a failure throws (`factoryToolError` renders it)
+ *   agent view as `text` and the full view as `result`; a failure throws (`factoryToolError` renders it). A view that
+ *   fails to render after the action succeeded is a one-line receipt (`renderFailed`), never a failure: the agent must
+ *   not retry what already happened
  */
 import { agentError, agentView } from "./agent-view.ts";
 import { ACTIONS, callAction, FactoryError, type ActionName, type CallOptions } from "./core.ts";
@@ -58,16 +60,38 @@ export function factoryToolParameters(taskSession = false): { type: "object"; re
   return { type: "object", required: ["action"], properties };
 }
 
+/** The id an answer names (`{wave}`, `{task}`, a task view, `{removed}`), for a receipt. */
+function answerId(result: unknown): string | null {
+  if (!isRecord(result)) return null;
+  for (const inner of [result.wave, result.task, result]) {
+    if (isRecord(inner) && typeof inner.id === "string") return inner.id.slice(0, 8);
+  }
+  return typeof result.removed === "string" ? result.removed.slice(0, 8) : null;
+}
+
+/** The one line an agent gets when the view of a succeeded action fails to render. */
+function renderFailed(name: string, result: unknown, error: unknown): string {
+  const id = answerId(result);
+  return `${name} done${id === null ? "" : ` (${id})`}; its answer could not be shown (${errorText(error).split("\n")[0]}), do not repeat it: look with tasks.get, waves.get or the lists`;
+}
+
 /**
  * Runs one `factory` tool call: `text` is the agent view, `result` the full view. An action the agent is not offered
- * (host-only, a timeline, a mutating one in a task session) is as unknown as a made-up one.
+ * (host-only, a timeline, a mutating one in a task session) is as unknown as a made-up one. `render` is the agent view
+ * (tests swap it).
  */
-export async function callFactoryTool(params: unknown, taskSession: boolean, options: CallOptions): Promise<{ text: string; result: unknown }> {
+export async function callFactoryTool(params: unknown, taskSession: boolean, options: CallOptions, render = agentView): Promise<{ text: string; result: unknown }> {
   const { action, ...rest } = isRecord(params) ? params : {};
   const name = String(action);
   if (!(agentActions(taskSession) as string[]).includes(name)) throw new FactoryError("invalid", `unknown action "${name}"`);
   const result = await callAction(name, rest, options);
-  return { text: agentView(name, rest, result), result };
+  let text: string;
+  try {
+    text = render(name, rest, result);
+  } catch (error) {
+    text = renderFailed(name, result, error);
+  }
+  return { text, result };
 }
 
 /** A failed tool call as the agent's one line (`agentError`); an error that is not a `FactoryError` is `failed`. */

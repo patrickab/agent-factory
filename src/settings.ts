@@ -9,9 +9,10 @@
  *   repository is shown on its forge (`remote.ts`; `waves.start` stores it resolved in the wave's declaration). The
  *   file is the repository's registration (`registeredRepos`, `unregisterRepo`)
  * - Provides the default models, `defaults.yaml` at the package root (`loadDefaults`, `defaultModels`): a broken or
- *   missing file throws naming its path
- * - Provides `resolveSettings`: defaults < stored < overrides, models merged per name, answered with all four names
- *   (`small`, `big`, and the roles' `coder`, `reviewer`)
+ *   missing file throws naming its path. Only a wave's task that asks for `small` where nothing names one reads it
+ *   (`core.ts`); no setting resolves over it, so nothing stored still means Pi's session model
+ * - Provides `resolveSettings`: defaults < stored < overrides, models merged per name, answered with the names that
+ *   are set of `small`, `big`, and the roles' `coder`, `reviewer`
  */
 import { readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -26,11 +27,11 @@ import { errorText, isRecord } from "./util.ts";
  */
 export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: ModelChoice; preview?: boolean; remote?: boolean };
 
-/** Every model name filled in: the project's `small` and `big`, the task's `coder` and `reviewer`. */
-export type ResolvedModels = Required<Settings["models"]>;
+/** The project's `small` and `big` and the task's `coder` and `reviewer`, each only when set: an absent role runs with Pi's session model. */
+export type ResolvedModels = Settings["models"];
 
-/** The settings a task gets: every model named. */
-export type TaskSettings = Settings & { models: ResolvedModels };
+/** The settings a task gets. */
+export type TaskSettings = Settings;
 
 /** The settings a repository's task gets, with `preview` (absent = `false`), which only clients read, and `remote` (absent = `false`). */
 export type ResolvedSettings = TaskSettings & { preview: boolean; remote: boolean };
@@ -176,7 +177,7 @@ export function resolveRepoSettings(stored: StoredSettings, overrides: StoredSet
 }
 
 /**
- * Defaults < stored < overrides; models merged per name over `defaults.yaml`. `branch` is used when neither sets one.
+ * Defaults < stored < overrides; models merged per name (`resolveModels`). `branch` is used when neither sets one.
  * `size` picks the coder's model (default `big`); the reviewer's is the explicit one, else `big`. Mutates nothing.
  */
 export function resolveSettings(stored: StoredSettings, overrides: StoredSettings, branch: string, size: ModelSize = "big"): TaskSettings {
@@ -189,18 +190,24 @@ export function resolveSettings(stored: StoredSettings, overrides: StoredSetting
   };
 }
 
-/** `layers` over `defaults.yaml`, lowest first, as all four names; `coder` = the model of `size`. */
+/**
+ * `layers` merged per name, lowest first; `coder` = the model of `size`, `reviewer` = its own, else `big`. A name no
+ * layer sets stays absent (Pi's session model): `defaults.yaml` is never read here.
+ */
 export function resolveModels(layers: readonly (ModelChoice | undefined)[], size: ModelSize = "big"): ResolvedModels {
-  const merged: ModelChoice = { ...defaultModels() };
+  const merged: ModelChoice = {};
   for (const layer of layers) {
     for (const name of ["small", "big", "reviewer"] as const) {
       const model = layer?.[name];
       if (model !== undefined) merged[name] = model;
     }
   }
-  const small = merged.small as string;
-  const big = merged.big as string;
-  return { small, big, coder: size === "small" ? small : big, reviewer: merged.reviewer ?? big };
+  const resolved: ResolvedModels = { ...merged };
+  const coder = size === "small" ? merged.small : merged.big;
+  if (coder !== undefined) resolved.coder = coder;
+  const reviewer = merged.reviewer ?? merged.big;
+  if (reviewer !== undefined) resolved.reviewer = reviewer;
+  return resolved;
 }
 
 /** The stored form of resolved models: the sizes, and the reviewer only when it is not `big`. */

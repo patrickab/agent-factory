@@ -167,7 +167,9 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
       throw new Error(`${input.repo} is not inside a git repository`);
     },
   );
-  const stored = await loadSettings(repo);
+  const loaded = await loadSettings(repo);
+  // A wave's task runs with the wave's models only (its declaration's, passed as overrides), never the stored ones.
+  const stored = input.wave === undefined ? loaded : { ...loaded, models: undefined };
   const overrides = input.overrides ?? {};
   const explicit = overrides.branch ?? stored.branch;
   const fallback =

@@ -52,6 +52,7 @@ import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
 import {
   DEFAULT_SETTINGS,
+  defaultModels,
   factoryHome,
   loadSettings,
   modelChoice,
@@ -195,7 +196,7 @@ const WAVE_TASK_ITEM: Schema = {
     title: { type: "string" },
     request: { type: "string" },
     after: { type: "array", items: { type: "string" } },
-    model: { type: "string", description: "This task's coder model (provider/model on the factory models list); default the wave's coder model" },
+    model: { type: "string", enum: ["small", "big"], description: "Which of the wave's two models this task's coder runs with: small for easy tasks; default big" },
   },
 };
 const TAG: Schema = { type: "string", description: "A task tag: segments of A-Z a-z 0-9 . _ @ + - joined by /" };
@@ -208,7 +209,12 @@ const SETTINGS_PROPERTIES: Record<string, Schema> = {
   branch: { type: "string", description: "The branch the task starts from and merges into" },
   models: {
     type: "object",
-    properties: { coder: { type: "string", description: "provider/model" }, reviewer: { type: "string", description: "provider/model" } },
+    properties: {
+      small: { type: "string", description: "provider/model for easy tasks (a wave's task with model small)" },
+      big: { type: "string", description: "provider/model: the coder's default and the reviewer's" },
+      coder: { type: "string", description: "provider/model; the old name of big" },
+      reviewer: { type: "string", description: "provider/model; default big" },
+    },
   },
 };
 
@@ -327,7 +333,7 @@ export const ACTIONS = {
       tasks: {
         type: "array",
         description:
-          "The wave's tasks: key unique in the wave (A-Z a-z 0-9 . _ -), title, request (full and self-contained for the coder), after: keys this task waits for, model: this task's coder model (provider/model on the factory models list; default the wave's coder model, the reviewer's stays the wave's)",
+          "The wave's tasks: key unique in the wave (A-Z a-z 0-9 . _ -), title, request (full and self-contained for the coder), after: keys this task waits for, model: \"small\" or \"big\", which of the wave's models this task's coder runs with (default big; the reviewer's stays the wave's)",
         items: WAVE_TASK_ITEM,
       },
       plan: { type: "string", description: "The memory_store path of the plan the wave works from (only stored)" },
@@ -340,7 +346,7 @@ export const ACTIONS = {
     "Add tasks to a wave (after may name its existing keys); a rejected, blocked, reviewing or waiting_approve wave builds again. Pending tasks that can never start (a task they wait for was cancelled or removed) are dropped: they count as cancelled. Answers {wave}",
     {
       id: WAVE_ID,
-      tasks: { type: "array", description: "Tasks as for waves.start: key, title, request, after?, model? (this task's coder model, on the factory models list)", items: WAVE_TASK_ITEM },
+      tasks: { type: "array", description: "Tasks as for waves.start: key, title, request, after?, model? (\"small\" or \"big\", default big)", items: WAVE_TASK_ITEM },
     },
     ["id", "tasks"],
     true,
@@ -1103,13 +1109,22 @@ async function settingsOf(repo: string): Promise<{ stored: StoredSettings; resol
   const fallback = await defaultBranch(repo).catch(() => undefined);
   const branch = stored.branch ?? fallback;
   if (branch === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
-  return { stored, resolved: resolveRepoSettings(stored, {}, branch), defaults: { ...DEFAULT_SETTINGS, models: resolveModels([]), branch: fallback ?? branch } };
+  return { stored, resolved: resolveRepoSettings(stored, {}, branch), defaults: { ...DEFAULT_SETTINGS, models: {}, branch: fallback ?? branch } };
 }
 
-/** The models a wave's `specs` run with: `big` for coders and the reviewer, `small` only when a task asks for it. */
-function wantedModels(models: ResolvedModels, specs: readonly WaveTaskEntry[]): Record<string, string> {
+/** The models a wave's `specs` run with that a setting names: `big` for coders and the reviewer, `small` only when a task asks for it. */
+function wantedModels(models: ResolvedModels, specs: readonly WaveTaskEntry[]): Record<string, string | undefined> {
   const { coder, reviewer, small } = models;
   return specs.some((spec) => spec.model === "small") ? { coder, reviewer, small } : { coder, reviewer };
+}
+
+/**
+ * The `small` model a wave's task runs with where no setting names one: `defaults.yaml`'s, when it is on the factory
+ * models list; else none (Pi's session model). Never a refusal.
+ */
+async function defaultSmallModel(): Promise<string | undefined> {
+  const { small } = defaultModels();
+  return (await loadModels()).includes(small) ? small : undefined;
 }
 
 /** `requireModels` as a `refused` error. */
@@ -1335,11 +1350,16 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
   if (fold.stage !== "building") return [];
   const { states } = await waveTaskViews(fold);
   const { maxRounds, review } = declaration.overrides;
-  // The wave's models only (a declaration before `small` existed: over the defaults), the reviewer named, so the
-  // repository's stored settings never reach a task the wave starts.
-  const { small, big, reviewer } = resolveModels([declaration.overrides.models]);
+  // The wave's models only (`launchTask` reads no stored models for a wave's task); a name the wave sets none for runs
+  // with Pi's session model, except `small`, which a task asking for it takes from `defaults.yaml` when listed.
+  const models = { ...resolveModels([declaration.overrides.models]) };
+  delete models.coder;
+  if (models.small === undefined && fold.tasks.some((task) => task.model === "small")) {
+    const small = await defaultSmallModel();
+    if (small !== undefined) models.small = small;
+  }
   // A wave's task always merges into the wave branch by itself; `merge` of the overrides is the wave's.
-  const overrides: StoredSettings = { models: { small, big, reviewer }, maxRounds, review, merge: "auto", branch: declaration.branch };
+  const overrides: StoredSettings = { models, maxRounds, review, merge: "auto", branch: declaration.branch };
   const named = new Set(fold.tasks.map((task) => task.taskId));
   const orphans = (await listTasks()).filter((record) => record.wave === id && !named.has(record.id));
   const started: string[] = [];
@@ -1702,9 +1722,9 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const current = foldWave(file.declaration, file.events);
     const { states } = await waveTaskViews(current);
     // The models list is read before the log lock; the specs are checked again under it. `waves.start` checked the big
-    // model; the small one only when an added task is the first to ask for it.
+    // model; the small one the wave names only when an added task is the first to ask for it.
     if (validateTaskSpecs(params.tasks, current.tasks).some((spec) => spec.model === "small")) {
-      await requireFactoryModels({ small: resolveModels([file.declaration.overrides.models]).small });
+      await requireFactoryModels({ small: file.declaration.overrides.models?.small });
     }
     // Checked and appended under the log lock: a runner's stage change after it loses, never the added tasks.
     await busyAsFactoryError(() =>

@@ -85,8 +85,9 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   | `task_gates` | the tests a wave's task's change reaches; env `FACTORY_BASE` = the commit its rebased change sits on. Default: none | a wave's task at its merge, after `gates` |
   | `merge_gates` | the full suite. Default: `gates` | a task outside a wave at its merge; a wave once before its reviewer (a failure blocks it, `gates`), again at its merge only when the target moved since |
 
-  This repo's `task_gates`: `scripts/changed-tests.ts` runs the test files the change since `$FACTORY_BASE` reaches
-  (a changed `*.test.ts`, the test next to a changed source, the tests importing it, transitively over relative imports)
+  `scripts/changed-tests.ts` is a command for `task_gates`: it runs the test files the change since `$FACTORY_BASE`
+  reaches (a changed `*.test.ts`, the test next to a changed source, the tests importing it, transitively over relative
+  imports)
 - `protected`: globs the coder must not change. Default: `factory.yaml`, `.factory/**`
 - `lockfiles`: file names that trigger `after_merge` and go last in the review patch. Default:
   `uv.lock`, `package-lock.json`, `bun.lock`, `bun.lockb`
@@ -162,7 +163,14 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   version wrote with a `kind` loads; an old `merge_request` keeps its limits: its `branch` is the source it merged,
   which removing it keeps (its commits count as no unmerged work), and approve, retry, cancel and message are refused
 - `overrides` and stored settings: `merge` (`auto` | `review`), `maxRounds` (1..20), `review` (bool), `branch`,
-  `models.coder`, `models.reviewer` (`provider/model`)
+  `models.small`, `models.big`, `models.reviewer` (`provider/model`). `big` is the coder's model and the reviewer's
+  (unless `reviewer` names its own), `small` the coder's of a wave's task that asks for it. The old `models.coder` is
+  read as `big`, an old `models.reviewer` equal to it as none of its own; resolved settings answer `small`, `big`,
+  `coder` (= `big`) and `reviewer`, each only when set. A model no setting names runs with Pi's session model
+- `defaults.yaml` at the package root names `models: {small, big}`. It is only what `small` means for a wave's task
+  that asks for it where no setting names one, and then only when that model is on the factory models list (else Pi's
+  session model). It never makes a model mandatory: with nothing stored and no override a task runs with Pi's session
+  model, and nothing is refused for a default that is not on the list
 - Commands the factory runs for a task or a wave (hooks, gates, merge gates, git, the reviewer) never inherit the
   runners' `FACTORY_TASK_SESSION`, `FACTORY_TASK_LOCK`, `FACTORY_TASK_WAVE` and `FACTORY_WAVE_LOCK`
 
@@ -170,16 +178,16 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 
 - A wave is a declared set of tasks on one branch: `waves.start {repo, tag, title, request, tasks, plan?, overrides?}`
   (`mutates: true`) checks the specs (`tasks: [{key, title, request, after?, model?}]`, `key` unique of
-  `[A-Za-z0-9._-]`, `after` keys of the wave, no cycle, `model` on the factory models list, else `invalid` naming the
-  list), refuses an unregistered repo, a target (`overrides.branch`, else the repo's
+  `[A-Za-z0-9._-]`, `after` keys of the wave, no cycle, `model` `"small"` or `"big"`, else `invalid`), refuses an unregistered repo, a target (`overrides.branch`, else the repo's
   branch) without a committed `factory.yaml` and an existing wave branch `<target>-<tag with "/" as "-">`, creates that
   branch off the target's tip (`base`), writes the record and pokes the wave's runner, which starts every task whose
   `after` are all `done`. `origin` is the declaring Pi session. Answers `{wave}`
 - `overrides` are stored with the wave: its tasks start with their `models`, `maxRounds`, `review`, target = the wave
   branch and `merge: auto` (a task merges into the wave branch by itself); `merge` is the wave's own
-- A task's `model` (`provider/model`) is its coder's model, stored in the `tasks` event and shown as
-  `WaveView.tasks[].model` (null: the wave's coder model, also for logs written before the field). The reviewer's model
-  stays the wave's: a chain of easy tasks runs on a cheaper model without a wave of its own
+- A task's `model` (`"small"` | `"big"`, default `big`) picks which of the wave's two models its coder runs with,
+  resolved against the wave's stored settings when the task starts. It is stored in the `tasks` event (absent: `big`)
+  and shown as `WaveView.tasks[].model`, never null (`big` also for logs written before the field). The reviewer's
+  model stays the wave's: a chain of easy tasks runs on a cheaper model without a wave of its own
 - The wave's tasks carry its `tag`, `plan` and `wave` id; `tasks.start` cannot set `wave` (a task joins a wave only
   through `waves.start`/`waves.add`)
 - `waves.add {id, tasks}`: more tasks (specs as for `waves.start`, `model` too; `after` may name existing keys); a `rejected`, `blocked`, `reviewing` or
@@ -203,7 +211,8 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   change is a compare-and-append on the stage it leaves (a `waves.add` that came first wins). `waves.timeline` replays it
 - A wave never waits silently: whenever it cannot move without the supervisor it rests in a stage or state
   `tasks.wait` reports as attention, and a `stage` event's `detail` says why (a block's cause: the conflicting paths,
-  the failing gate, the dirty worktree and its paths, the error; the tasks that can never start)
+  the failing gate, the dirty worktree (named by its wave, never by its path: that is in the runner's log) and the
+  files it holds, the error; the tasks that can never start)
 
 #### The supervisor's loop
 
@@ -381,7 +390,7 @@ Commands (inside a task's own Pi session):
   messages for the live runner (`<inbox>.read`: how far it sent them)
 - `sessions/<repo dir name>/` (`/a/b` -> `--a-b--`): the Pi session files of a repository's tasks, apart from
   Pi's own sessions (`pi -r` does not list them). The task's truth is its `factory-*` session entries
-- `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models`, `preview`); the file registers the repo
+- `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models` (`small`, `big`, `reviewer`), `preview`, `remote`); the file registers the repo
 - `models.yaml`: the factory models, a YAML list of `provider/model` ids
 - `waves/<id>.jsonl`: a wave, append-only: line 1 its declaration, every later line one event; `waves/<id>.lock` its
   runner's lock, `.log.lock` the append lock, `.poke` an unseen poke, `.log` the runner's output, `.reviews/` its reviewer's

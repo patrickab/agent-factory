@@ -39,7 +39,7 @@ event. The current state is the fold of the events, as a task's state is the fol
 
 | Kind | Carries |
 |---|---|
-| `tasks` | tasks added: `[{key, title, request, after: [keys], model?}]` (`model`: the task's coder model, on the factory models list; absent: the wave's) |
+| `tasks` | tasks added: `[{key, title, request, after: [keys], model?}]` (`model`: `"small"` or `"big"`, which of the wave's models the task's coder runs with; absent: `big`) |
 | `task` | a task started: `key`, `taskId`, `sessionId` |
 | `stage` | the new stage, a reason for `blocked` |
 | `gate` | which gates, result, duration, log path |
@@ -54,9 +54,9 @@ event. The current state is the fold of the events, as a task's state is the fol
 
 | Action | Does |
 |---|---|
-| `waves.start {repo, tag, title, request, tasks, plan?, overrides?}` | declares the wave, creates the branch, starts what can start; a task's `model` runs its coder (the reviewer's stays the wave's). `overrides` as for tasks (`branch` = the target, `models`, `maxRounds`, `merge`) |
+| `waves.start {repo, tag, title, request, tasks, plan?, overrides?}` | declares the wave, creates the branch, starts what can start; a task's `model` (`"small"` or `"big"`, default `big`) picks its coder's model of the wave's two (the reviewer's stays the wave's). `overrides` as for tasks (`branch` = the target, `models`, `maxRounds`, `merge`) |
 | `waves.add {id, tasks}` | adds tasks (fixes, or work found late). A `rejected`, `blocked` or `reviewing` wave goes back to `building` |
-| `waves.get {id}` · `waves.list {repo?, tag?}` | a `WaveView`: declaration, stage, tasks with their state and session ids, counts, reviews, merge, usage, remote |
+| `waves.get {id}` · `waves.list {repo?, tag?}` | a `WaveView`: declaration, stage, tasks with their state, session ids and `model` (`"small"` or `"big"`, never null), counts, reviews, merge, usage, remote |
 | `waves.timeline {id, since?}` | the events |
 | `waves.retry {id}` | runs review and merge again from the rebase (after `blocked`) |
 | `waves.approve {id}` | with `merge: review`: the wave waits after an approved review until this |
@@ -82,8 +82,9 @@ event. The current state is the fold of the events, as a task's state is the fol
 
 - Off: nothing is pushed. Merging the target (the plan's central branch) into the default branch stays the user's
 - On: the wave's branch is pushed when the review starts (force-with-lease after a rebase) and a pull/merge request is
-  opened against the target, which is pushed once so it can be the base. The review's verdict is posted as a comment.
-  After the fast-forward the target is pushed and the forge shows the request as merged with its commits
+  opened against the target (the local target is not pushed before the merge). The review's verdict is posted as a
+  comment. After the fast-forward the target is pushed and the forge shows the request as merged with its commits; the
+  merge's own append records a `remote` event that the push is pending, so a runner that dies before it leaves that said
 - The forge is the origin's: `gh` for GitHub, `glab` for GitLab. A missing CLI or a refused push blocks nothing: the
   wave records the failure and continues locally
 - Merging the target into the default branch stays the user's here too

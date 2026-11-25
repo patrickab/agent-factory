@@ -134,8 +134,8 @@ beforeEach(() => {
   rmSync(piLog, { force: true });
   // Starting a task needs a factory models list; a test that wants none removes it.
   mkdirSync(join(caseDir, "agent", "factory"), { recursive: true });
-  // The defaults of defaults.yaml are on it: a task without models of its own runs with them.
-  writeFileSync(modelsFile(), `- a/b\n- c/d\n- ${defaultModels().small}\n- ${defaultModels().big}\n`);
+  // Without the models of defaults.yaml: a task without models of its own runs with Pi's session model.
+  writeFileSync(modelsFile(), "- a/b\n- c/d\n");
 });
 
 function modelsFile(): string {
@@ -287,6 +287,14 @@ describe("callAction", () => {
     expect(ACTIONS["tasks.start"].params.required).toEqual(["repo", "title", "request"]);
   });
 
+  test("a wave task's model in the schema of waves.start and waves.add: small or big, never a provider/model", () => {
+    for (const action of ["waves.start", "waves.add"] as const) {
+      const tasks = ACTIONS[action].params.properties.tasks as { description?: string; items: { properties: Record<string, { enum?: string[]; description?: string }> } };
+      expect(tasks.items.properties.model.enum).toEqual(["small", "big"]);
+      expect(`${tasks.description} ${tasks.items.properties.model.description}`).not.toContain("models list");
+    }
+  });
+
   test("invalid: an unknown action, a missing or mistyped param, an ambiguous id", async () => {
     await expectError(callAction("tasks.fly", {}), "invalid", 'unknown action "tasks.fly"');
     await expectError(callAction("tasks.get", {}), "invalid", "tasks.get needs id");
@@ -352,7 +360,7 @@ describe("repos", () => {
 
 describe("models", () => {
   test("models.get reads the list, models.set replaces it deduplicated; an empty list reads as []", async () => {
-    expect(await callAction("models.get", {})).toEqual({ models: ["a/b", "c/d", defaultModels().small, defaultModels().big] });
+    expect(await callAction("models.get", {})).toEqual({ models: ["a/b", "c/d"] });
     expect(await callAction("models.set", { models: ["x/y", "a/b", "x/y"] })).toEqual({ models: ["x/y", "a/b"] });
     expect(await callAction("models.get", {})).toEqual({ models: ["x/y", "a/b"] });
     expect(await callAction("models.set", { models: [] })).toEqual({ models: [] });
@@ -367,7 +375,7 @@ describe("models", () => {
     await expectError(callAction("models.set", { models: "a/b" }), "invalid", "models.set: models must be an array");
     await expectError(callAction("models.set", { models: ["sonnet"] }), "invalid", 'models.set: "sonnet" is not a provider/model id');
     await expectError(callAction("models.set", { models: [4] }), "invalid", "models.set: 4 is not a provider/model id");
-    expect(await callAction("models.get", {})).toEqual({ models: ["a/b", "c/d", defaultModels().small, defaultModels().big] });
+    expect(await callAction("models.get", {})).toEqual({ models: ["a/b", "c/d"] });
   });
 
   test("an empty list: settings.set and tasks.start are refused naming /factory models, reads still work", async () => {
@@ -395,6 +403,17 @@ describe("models", () => {
     await expectError(callAction("tasks.start", { title: "t", request: "r" }, { cwd: repo }), "refused", "the coder model c/d is not a factory model");
     expect(await listTasks()).toEqual([]);
   });
+
+  test("nothing stored and no override: a task outside a wave starts without a model, though defaults.yaml names models off the list", async () => {
+    const repo = makeRepo();
+    const { small, big } = defaultModels();
+    expect(readFileSync(modelsFile(), "utf8")).not.toContain(big);
+    expect(readFileSync(modelsFile(), "utf8")).not.toContain(small);
+    const view = (await callAction("tasks.start", { title: "t", request: "r" }, { cwd: repo })) as TaskView;
+    const settings = async () => ((await callAction("tasks.get", { id: view.id })) as TaskView).settings;
+    await until(async () => (await settings()) !== null && (await settings()) !== undefined);
+    expect((await settings())?.models).toEqual({});
+  });
 });
 
 describe("branches, settings, config", () => {
@@ -414,19 +433,19 @@ describe("branches, settings, config", () => {
 
   test("settings.get and settings.set: stored, resolved, defaults; preview passes through; invalid values refused", async () => {
     const repo = makeRepo();
-    const { small, big } = defaultModels();
-    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: { small, big, coder: big, reviewer: big }, preview: false, remote: false };
+    // Nothing stored: no model (Pi's session model), not the ones of defaults.yaml.
+    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, remote: false };
     expect(await callAction("settings.get", { repo })).toEqual({ stored: {}, resolved: defaults, defaults });
     // The old names, as the settings panel sends them: coder is big, a reviewer equal to it is none of its own.
     const set = await callAction("settings.set", { repo, settings: { merge: "review", preview: true, models: { coder: "a/b", reviewer: "a/b" } } });
     expect(set).toEqual({
       stored: { merge: "review", preview: true, models: { big: "a/b" } },
-      resolved: { ...defaults, merge: "review", preview: true, models: { small, big: "a/b", coder: "a/b", reviewer: "a/b" } },
+      resolved: { ...defaults, merge: "review", preview: true, models: { big: "a/b", coder: "a/b", reviewer: "a/b" } },
       defaults,
     });
     // An old reviewer of its own stays one; the new names are taken as they are.
     const old = (await callAction("settings.set", { repo, settings: { models: { coder: "a/b", reviewer: "c/d" } } })) as { resolved: { models: object } };
-    expect(old.resolved.models).toEqual({ small, big: "a/b", coder: "a/b", reviewer: "c/d" });
+    expect(old.resolved.models).toEqual({ big: "a/b", coder: "a/b", reviewer: "c/d" });
     const sized = (await callAction("settings.set", { repo, settings: { merge: "review", preview: true, models: { small: "c/d", big: "a/b" } } })) as { resolved: { models: object } };
     expect(sized.resolved.models).toEqual({ small: "c/d", big: "a/b", coder: "a/b", reviewer: "a/b" });
     await expectError(callAction("settings.set", { repo, settings: { preview: "yes" } }), "invalid", "settings.preview must be a boolean");
@@ -1175,7 +1194,7 @@ describe("waves", () => {
     // Its runner's launch ends before the test does: a runner stopped mid-launch outlasts the test's time.
     await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null);
     // The old names: coder is big, a reviewer equal to big is no reviewer of its own.
-    const resolved = { merge: "review" as const, maxRounds: 1, review: false, models: { small: defaultModels().small, big: "c/d" }, remote: false };
+    const resolved = { merge: "review" as const, maxRounds: 1, review: false, models: { big: "c/d" }, remote: false };
     expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
     await callAction("settings.set", { repo, settings: { merge: "auto", models: { reviewer: "a/b" } } });
     expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
@@ -1242,6 +1261,26 @@ describe("waves", () => {
     expect(tasks.kind === "tasks" && "model" in tasks.tasks[1]).toBe(false);
     expect((await readWave(wave.id)).declaration.overrides.models).toEqual(models);
   });
+
+  test("a wave that names no model: a small task takes defaults.yaml's small when it is listed, else none; big and the reviewer none", async () => {
+    const repo = await registeredRepo();
+    const { small, big } = defaultModels();
+    const settingsOf = async (id: string, key: string) => ((await callAction("tasks.get", { id: taskOf(await getWave(id), key).taskId })) as TaskView).settings?.models;
+    // Off the list: skipped (Pi's session model), never refused.
+    const off = await startWave(repo, [{ ...spec("cheap"), model: "small" }, spec("other")]);
+    await until(async () => (await getWave(off.id)).tasks.every((task) => task.taskId !== null));
+    expect(await settingsOf(off.id, "cheap")).toEqual({});
+    expect(await settingsOf(off.id, "other")).toEqual({});
+    expect((await readWave(off.id)).declaration.overrides.models).toEqual({});
+    await stopWaveRunners(off.id);
+    // Listed: the small task's coder runs on it; the big default still never applies.
+    writeFileSync(modelsFile(), `- a/b\n- ${small}\n- ${big}\n`);
+    const on = await startWave(repo, [{ ...spec("cheap"), model: "small" }, spec("other")], { tag: `${TAG}-on` });
+    await until(async () => (await getWave(on.id)).tasks.every((task) => task.taskId !== null));
+    expect(await settingsOf(on.id, "cheap")).toEqual({ small, coder: small });
+    expect(await settingsOf(on.id, "other")).toEqual({ small });
+    await stopWaveRunners(on.id);
+  }, 30_000);
 
   test("a concrete model id in a wave's task is invalid before anything is created; a small model off the list is refused; waves.add takes small too", async () => {
     const repo = await registeredRepo();
