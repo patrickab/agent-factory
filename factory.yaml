@@ -1,7 +1,9 @@
 # What the agent factory needs to know about this repo (it builds itself with the installed version).
 # Task worktrees come from `agent-worktree`, which copies node_modules: nothing to install.
 hooks:
-  after_create: []
+  # A worktree the factory adds itself (a merge request) has no node_modules.
+  after_create:
+    - [bun, install, --frozen-lockfile]
   after_code: []
   after_merge:
     - [bun, install, --frozen-lockfile]
