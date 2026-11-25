@@ -5,6 +5,9 @@
   "exports": {
     ".": "./src/core.ts"
   },
+  "bin": {
+    "factory": "./src/cli.ts"
+  },
   "scripts": {
     "test": "bun test",
     "types": "tsc --noEmit"
