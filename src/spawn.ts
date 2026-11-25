@@ -104,9 +104,10 @@ function stillRuns(pid: number, systemdRun: string): { readable: boolean; still:
 async function scopeFails(child: ChildProcess, systemdRun: string): Promise<boolean> {
   const deadline = Date.now() + SCOPE_GRACE_MS;
   for (;;) {
-    if (child.exitCode !== null || child.signalCode !== null) return child.exitCode !== 0;
     const { readable, still } = stillRuns(child.pid ?? 0, systemdRun);
-    if ((readable && !still) || Date.now() >= deadline) return false;
+    if (readable && !still) return false;
+    if (child.exitCode !== null || child.signalCode !== null) return child.exitCode !== 0;
+    if (Date.now() >= deadline) return false;
     await new Promise((resolveTick) => setTimeout(resolveTick, SCOPE_POLL_MS));
   }
 }

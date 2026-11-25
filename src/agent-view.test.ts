@@ -557,6 +557,10 @@ describe("tasks.wait", () => {
 });
 
 describe("agentError", () => {
+  test("keeps slash commands", () => {
+    expect(agentError({ code: "refused", message: "no models (set them with /factory models)" })).toContain("/factory models)");
+  });
+
   test("one line with the way out, no path and no full id", () => {
     expect(agentError({ code: "refused", message: "wave 3f2a91c0 is merged, nothing can be added" })).toBe(
       "refused: wave 3f2a91c0 is merged, nothing can be added · next: waves.get shows the actions valid now",

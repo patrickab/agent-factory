@@ -25,7 +25,7 @@ const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
 /** Every absolute path in free text as `<path>` (one rule for the agent view and a wave's stage details). */
 export function withoutPaths(text: string): string {
-  return text.replace(/(^|[\s'"`(=])\/[^\s'"`),;]+/g, "$1<path>");
+  return text.replace(/(^|[\s'"`(=])\/[^\s'"`),;/]+\/[^\s'"`),;]*/g, "$1<path>");
 }
 
 /**
