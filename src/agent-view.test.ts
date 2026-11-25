@@ -491,6 +491,29 @@ describe("waveBlock per stage", () => {
       ],
     ],
     [
+      "merged with two minors",
+      {
+        stage: "merged",
+        running: false,
+        counts: { total: 3, done: 3 },
+        reviews: [
+          review("approved", [
+            { severity: "minor", file: "src/a.ts", line: 3, text: "rename x" },
+            { severity: "minor", file: "src/b.ts", line: null, text: "doc it" },
+          ]),
+        ],
+        actions: ["waves.remove"],
+      },
+      [
+        "wave 3f2a91c0  merged  3/3 done  factory/w1  $18.40",
+        head,
+        "  review 2: approved · 2 minor",
+        "    minor  src/a.ts:3  rename x",
+        "    minor  src/b.ts  doc it",
+        "  next: waves.remove",
+      ],
+    ],
+    [
       "interrupted",
       { stage: "reviewing", running: false, interrupted: true, tasks: [waveTask("record", "done")], actions: ["waves.retry", "waves.cancel"] },
       [

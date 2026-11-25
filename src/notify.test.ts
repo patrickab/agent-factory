@@ -144,6 +144,20 @@ describe("pendingNotices: waves", () => {
     }
   });
 
+  test("a merged wave carries the minors of its last review, with the same key", () => {
+    const minors = [
+      { severity: "minor" as const, file: "src/a.ts", line: 3, text: "rename x" },
+      { severity: "minor" as const, file: "src/b.ts", line: null, text: "doc it" },
+    ];
+    const approved = { ...rejectedReview, verdict: "approved" as const, findings: minors };
+    const [plain] = pendingNotices([], [wave({ stage: "merged" })], none);
+    const [notice] = pendingNotices([], [wave({ stage: "merged", reviews: [approved] })], none);
+    expect(notice.key).toBe(plain.key);
+    expect(notice.text).toContain("minor  src/a.ts:3  rename x");
+    expect(notice.text).toContain("minor  src/b.ts  doc it");
+    expect(plain.text).not.toContain("minor");
+  });
+
   test("a rejection carries its findings", () => {
     const [notice] = pendingNotices([], [wave({ stage: "rejected", reviews: [rejectedReview] })], none);
     expect(notice.text).toContain("major  src/a.ts:12  the lock leaks");

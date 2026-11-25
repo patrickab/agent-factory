@@ -272,7 +272,11 @@ function waveStageLines(view: WaveView): string[] {
       return lines;
     }
     case "merged":
-      return [...(view.merge ? [`  merged ${short(view.merge.from)}..${short(view.merge.to)} into ${view.target}`] : []), ...remoteLines(view)];
+      return [
+        ...(view.merge ? [`  merged ${short(view.merge.from)}..${short(view.merge.to)} into ${view.target}`] : []),
+        ...(lastReview && lastReview.findings.length > 0 ? reviewLines(lastReview, true) : []),
+        ...remoteLines(view),
+      ];
     case "cancelled":
       return [];
   }
