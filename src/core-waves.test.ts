@@ -239,6 +239,26 @@ describe("waves", () => {
     await expectError(list({ tag: "a//" }), "invalid", "tag");
   });
 
+  test("cost in cents: rounded in the view, the wave's from the unrounded sum", async () => {
+    const repo = makeRepo();
+    const id = `20000000-${RUN}-4000-8000-000000000002`;
+    await writtenWave(id, repo, "factory/w10");
+    const usage = (total: number) => ({ type: "message", message: { role: "assistant", usage: { input: 1, output: 1, cacheRead: 0, cost: { total } } } });
+    const a = { ...fakeRecord(ID_1, repo), wave: id };
+    const b = { ...fakeRecord(ID_2, repo), wave: id };
+    for (const record of [a, b]) await writeTask(record);
+    writeSession(a, [usage(41.3753614)]);
+    writeSession(b, [usage(0.004), usage(0.004)]);
+    await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a"), spec("b")] });
+    await appendWaveEvent(id, { kind: "task", key: "a", taskId: a.id, sessionId: a.sessionId });
+    await appendWaveEvent(id, { kind: "task", key: "b", taskId: b.id, sessionId: b.sessionId });
+    await appendWaveEvent(id, { kind: "review", round: 1, sessionId: "rev", model: "a/b", verdict: "approved", status: "ok", findings: [], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.004 }, wallMs: 5 });
+    const wave = await getWave(id);
+    expect(wave.tasks.map((task) => task.usage?.cost)).toEqual([41.38, 0.01]);
+    expect(wave.reviews[0]?.usage?.cost).toBe(0);
+    expect(wave.usage?.cost).toBe(41.39);
+  });
+
   test("the view: task states and usage, counts without cancelled tasks, usage of tasks and reviews, timeline", async () => {
     const repo = makeRepo();
     const id = `20000000-${RUN}-4000-8000-000000000001`;

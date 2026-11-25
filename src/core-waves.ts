@@ -14,7 +14,7 @@ import { join, resolve, sep } from "node:path";
 import type { ActionName } from "./core.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, requireFactoryModels, wantedModels } from "./core-settings.ts";
-import { cancelTask, droppedWork, FINAL_STATES, removable, requireRemovable, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
+import { cancelTask, cents, droppedWork, FINAL_STATES, rawUsage, removable, requireRemovable, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
 import { git, uncommittedFiles } from "./git.ts";
 import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchExists, type RunnerEnv, worktreePath } from "./launch.ts";
 import type { NoticeWave } from "./notify.ts";
@@ -183,8 +183,9 @@ export async function waveLook(file: WaveFile): Promise<WaveLook> {
   const interrupted = !RESTING_WAVE_STAGES.includes(fold.stage) && !running && !stuck;
   let usage: WaveView["usage"] = null;
   const tasks = fold.tasks.map((task) => {
-    const taskUsage = views.get(task.key)?.usage ?? null;
-    usage = addUsage(usage, taskUsage);
+    const taskView = views.get(task.key);
+    const taskUsage = taskView?.usage ?? null;
+    usage = addUsage(usage, taskView ? rawUsage(taskView) : null);
     return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: taskUsage };
   });
   for (const review of fold.reviews) usage = addUsage(usage, review.usage);
@@ -198,7 +199,9 @@ export async function waveLook(file: WaveFile): Promise<WaveLook> {
     "waves.remove": !running && [...views.values()].every(removable),
   };
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
-  return { view: { ...fold, running, interrupted, tasks, counts: waveCounts(full, states), usage, actions }, stuck };
+  const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
+  const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
+  return { view: { ...fold, reviews, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, actions }, stuck };
 }
 
 /**

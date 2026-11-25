@@ -13,7 +13,7 @@ import { callAction } from "./core.ts";
 import { worktreePath } from "./launch.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath, waveReviewsDir } from "./wave-poke.ts";
-import { runWave } from "./wave-runner.ts";
+import { pathFree, runWave } from "./wave-runner.ts";
 import { appendWaveEvent, createWave, foldWave, listWaves, lockWave, readWave, unlockWave, type WaveView } from "./waves.ts";
 import { MERGE_PUSH_PENDING } from "./remote.ts";
 
@@ -775,5 +775,13 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
     expect((await remoteEvents()).some((event) => typeof event.error === "string" && event.error.startsWith("unsupported:"))).toBe(true);
     expect(calls()).toEqual([]);
     expect(git(bare, "rev-parse", "main")).toBe(git(repo, "rev-parse", "main"));
+  });
+});
+
+describe("pathFree", () => {
+  test("a single-segment absolute path goes too", () => {
+    const declaration = { id: "20000000-aaaa-4000-8000-000000000003", repo: "/srv/repo" } as Parameters<typeof pathFree>[0];
+    expect(pathFree(declaration, "cannot open /workspace")).toBe("cannot open <path>");
+    expect(pathFree(declaration, "cannot open /workspace/x/y.ts")).toBe("cannot open <path>");
   });
 });

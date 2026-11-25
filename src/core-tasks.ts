@@ -208,6 +208,17 @@ function taskOutcome(entries: Record<string, unknown>[], blocked: boolean): Pick
   return { lastMessage, failure: blocked ? (failedGate ?? mergeError) : null, review, merged };
 }
 
+/** The unrounded usage of a task view, for sums (the view itself shows cost in cents). */
+const unroundedUsage = new WeakMap<object, NonNullable<TaskView["usage"]>>();
+export function rawUsage(view: TaskView): TaskView["usage"] {
+  return unroundedUsage.get(view) ?? view.usage;
+}
+
+/** Cost in cents. */
+export function cents(cost: number): number {
+  return Math.round(cost * 100) / 100;
+}
+
 export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise<TaskView> {
   const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
   const entries = sessionPath === null ? [] : parseEntries(await readFile(sessionPath, "utf8"));
@@ -265,12 +276,14 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
     running,
     interrupted: last !== null && !RESTING_STATES.includes(last.state) && !running,
     settings,
-    usage,
+    usage: usage === null ? null : { ...(usage as NonNullable<TaskView["usage"]>), cost: cents((usage as NonNullable<TaskView["usage"]>).cost) },
     ...taskOutcome(entries, last?.state === "blocked"),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
   const continuable = waveStage === null || waveStage === "building";
-  return { ...view, actions: taskActions(view, record.kind === "merge_request", continuable, keptByWave(view, waveStage)) };
+  const result = { ...view, actions: taskActions(view, record.kind === "merge_request", continuable, keptByWave(view, waveStage)) };
+  if (usage !== null) unroundedUsage.set(result, usage);
+  return result;
 }
 
 /**
