@@ -46,12 +46,15 @@ export function reviewRequest(task: Pick<Task, "title" | "request">, followUps: 
   return `${request}\n## Follow-up messages from the user\n\n${messages.join("\n")}`;
 }
 
-/** The prompt of a wave's reviewer: the wave's branch, the patch file and the supervisor's instructions. */
-export function wavePrompt(task: Pick<Task, "title" | "request" | "branch" | "mainBranch">, patchFile: string): string {
+/** The prompt of a wave's reviewer: the wave's branch, the patch file and the supervisor's instructions in a request file. */
+async function wavePrompt({ reviewsDir, round, task }: ReviewInput, patchFile: string): Promise<string> {
+  // The request goes into a file, as a task's does: as an argument a long one would exceed the argv limit.
+  const requestFile = join(reviewsDir, `round-${round}.request.md`);
+  await writeFile(requestFile, `# ${task.title}\n\n## Instructions from the supervisor\n\n${task.request}\n`);
   return (
     `Review the wave "${task.title}": the branch ${task.branch}, rebased onto ${task.mainBranch}, merges into it. ` +
-    `Its whole diff against ${task.mainBranch} is the patch file ${patchFile}: read it with the read tool, look at the surrounding code ` +
-    `where the diff alone is not enough, then finish with ${VERDICT_TOOL}.\n\n## Instructions from the supervisor\n\n${task.request}\n`
+    `The supervisor's instructions are in ${requestFile}, the wave's whole diff against ${task.mainBranch} is the patch file ${patchFile}: ` +
+    `read both with the read tool, look at the surrounding code where the diff alone is not enough, then finish with ${VERDICT_TOOL}.`
   );
 }
 
@@ -156,7 +159,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewData> {
   await mkdir(reviewsDir, { recursive: true });
   const patchFile = join(reviewsDir, `round-${round}.patch`);
   await writeFile(patchFile, reviewPatch(input.diff, PATCH_MAX_CHARS));
-  const prompt = input.wave ? wavePrompt(task, patchFile) : await taskPrompt(input, patchFile);
+  const prompt = input.wave ? await wavePrompt(input, patchFile) : await taskPrompt(input, patchFile);
   const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
   argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", reviewsDir);
   if (model) argv.push("--model", model);

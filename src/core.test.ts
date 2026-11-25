@@ -1118,11 +1118,23 @@ describe("waves", () => {
       expect(view.settings).toEqual({ branch: "main-factory-w1", merge: "auto", maxRounds: 3, review: false, models: { coder: "a/b" } });
     }
     const file = await readWave(wave.id);
-    expect(file.declaration.overrides).toEqual(overrides);
+    // Stored resolved: the overrides over the repository's stored settings (none here) over the defaults.
+    expect(file.declaration.overrides).toEqual({ ...overrides, review: false });
     expect(file.events.map((event) => event.kind)).toEqual(["tasks", "task", "task"]);
     expect(prompts().filter((line) => line === "prompt /factory start")).toHaveLength(2);
     // The same tag on the same target: its branch exists.
     await expectError(startWave(repo, [spec("x")]), "refused", "main-factory-w1 exists already");
+  });
+
+  test("waves.start stores the repository's stored settings with the overrides over them, resolved; a later change does not reach the wave", async () => {
+    const repo = await registeredRepo();
+    await callAction("settings.set", { repo, settings: { merge: "review", maxRounds: 4, models: { coder: "a/b", reviewer: "c/d" } } });
+    const wave = await startWave(repo, [spec("a")], { overrides: { maxRounds: 1, models: { coder: "c/d" } } });
+    await stopWaveRunners(wave.id);
+    const resolved = { merge: "review" as const, maxRounds: 1, review: false, models: { coder: "c/d", reviewer: "c/d" } };
+    expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
+    await callAction("settings.set", { repo, settings: { merge: "auto", models: { reviewer: "a/b" } } });
+    expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
   });
 
   test("a task with after starts once its predecessor is done (its runner pokes the wave); a wave without changes ends merged", async () => {

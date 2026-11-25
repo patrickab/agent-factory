@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseFindings, readReviewerOutput, reviewPatch, runReview } from "./review.ts";
@@ -163,7 +163,7 @@ describe("runReview", () => {
     expect(calls[0].argv.at(-1)).toContain("Follow-up messages from the user in the task file are part of the task");
   });
 
-  test("a wave's prompt names the branch and holds the request verbatim under its own heading, no request file", async () => {
+  test("a wave's prompt names the branch, its request file holds the request verbatim under its own heading", async () => {
     const calls: { argv: string[]; options: CommandOptions }[] = [];
     const wave: Task = { ...task, title: "Wave 1", request: "Read plan/w1.md.\nThe wave adds a greeting.", branch: "wave" };
     rmSync(join(reviewsDir, "round-3.request.md"), { force: true });
@@ -171,8 +171,9 @@ describe("runReview", () => {
     const prompt = calls[0].argv.at(-1)!;
     expect(prompt).toContain('Review the wave "Wave 1": the branch wave, rebased onto main, merges into it.');
     expect(prompt).toContain(join(reviewsDir, "round-3.patch"));
-    expect(prompt.endsWith("## Instructions from the supervisor\n\nRead plan/w1.md.\nThe wave adds a greeting.\n")).toBe(true);
-    expect(existsSync(join(reviewsDir, "round-3.request.md"))).toBe(false);
+    expect(prompt).toContain(join(reviewsDir, "round-3.request.md"));
+    expect(prompt).not.toContain("Read plan/w1.md.");
+    expect(readFileSync(join(reviewsDir, "round-3.request.md"), "utf8")).toBe("# Wave 1\n\n## Instructions from the supervisor\n\nRead plan/w1.md.\nThe wave adds a greeting.\n");
     // A wave's reviewer has no time limit either.
     expect(calls[0].options.timeoutMs).toBeUndefined();
   });

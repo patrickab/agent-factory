@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { callAction } from "./core.ts";
 import { worktreePath } from "./launch.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
-import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath } from "./wave-poke.ts";
+import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath, waveReviewsDir } from "./wave-poke.ts";
 import { runWave } from "./wave-runner.ts";
 import { appendWaveEvent, createWave, listWaves, lockWave, unlockWave, type WaveView } from "./waves.ts";
 
@@ -19,6 +19,7 @@ const savedEnv = { ...process.env };
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-wave-runner-test-")));
 const fakeBin = join(scratch, "bin");
 const promptLog = join(scratch, "reviewer-prompt.txt");
+const argvLog = join(scratch, "reviewer-argv.txt");
 
 /** The fake reviewer: a session file in `--session-dir`, the verdict call and one assistant message's usage. */
 mkdirSync(fakeBin);
@@ -34,6 +35,7 @@ const id = "11111111-2222-4333-8444-555555555555";
 mkdirSync(dir, { recursive: true });
 writeFileSync(join(dir, "2026-01-01T00-00-00-000Z_" + id + ".jsonl"), JSON.stringify({ type: "session", id }) + "\\n");
 writeFileSync(process.env.FAKE_PROMPT_LOG, args.at(-1));
+writeFileSync(process.env.FAKE_ARGV_LOG, args.join("\\n"));
 if (process.env.FAKE_REVIEW_SLEEP) await Bun.sleep(Number(process.env.FAKE_REVIEW_SLEEP));
 const findings = process.env.FAKE_VERDICT === "reject" ? [{ file: "b.txt", line: 1, severity: "major", text: "b is wrong" }] : [];
 const emit = (record) => console.log(JSON.stringify(record));
@@ -55,6 +57,7 @@ beforeEach(() => {
     HOME: scratch,
     PI_CODING_AGENT_DIR: join(caseDir, "agent"),
     FAKE_PROMPT_LOG: promptLog,
+    FAKE_ARGV_LOG: argvLog,
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_AUTHOR_NAME: "test",
@@ -185,7 +188,9 @@ describe("the wave runner", () => {
     // The reviewer got the wave's whole diff and its request verbatim.
     const prompt = readFileSync(promptLog, "utf8");
     expect(prompt).toContain(`Review the wave "Wave one": the branch ${BRANCH}, rebased onto main, merges into it.`);
-    expect(prompt.endsWith("## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n")).toBe(true);
+    const requestFile = join(waveReviewsDir(WAVE), "round-1.request.md");
+    expect(prompt).toContain(requestFile);
+    expect(readFileSync(requestFile, "utf8").endsWith("## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n")).toBe(true);
     expect(existsSync(reviewWorktree(repo))).toBe(false);
   });
 
@@ -195,6 +200,17 @@ describe("the wave runner", () => {
     expect((await getWave()).stage).toBe("waiting_approve");
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
+  });
+
+  test("a wave resolved from stored settings (merge review, a reviewer model) waits for approve; its reviewer runs on that model", async () => {
+    // waves.start stores the repository's settings resolved in the declaration (core.test.ts); the runner reads only it.
+    const repo = await waveRepo(undefined, "done", { merge: "review", maxRounds: 2, review: false, models: { reviewer: "x/y" } });
+    await runWave(WAVE);
+    const wave = await getWave();
+    expect([wave.stage, wave.reviews.map((review) => review.model)]).toEqual(["waiting_approve", ["x/y"]]);
+    const argv = readFileSync(argvLog, "utf8").split("\n");
+    expect(argv[argv.indexOf("--model") + 1]).toBe("x/y");
+    expect(git(repo, "log", "--format=%s", "main")).toBe("init");
   });
 
   test("a rejected review rests rejected with its findings; waves.add moves the wave again and pokes the runner", async () => {

@@ -1094,6 +1094,15 @@ async function pokeWaveRunner(id: string, env?: RunnerEnv): Promise<void> {
 }
 
 /**
+ * After a task of a wave runs again (`tasks.retry`, `tasks.message`, `tasks.approve`): a runner that rested sees it run,
+ * so a stuck wave is not taken for interrupted meanwhile. Best effort: the task's action has happened already, and a
+ * failed poke leaves only what `waves.retry` sets right.
+ */
+async function pokeWaveOf(record: TaskRecord, env?: RunnerEnv): Promise<void> {
+  if (record.wave) await pokeWave(record.wave, env).catch(() => undefined);
+}
+
+/**
  * The views of the wave's started tasks by key. A started task whose record is gone (removed) counts as `cancelled`:
  * it never finishes.
  */
@@ -1346,7 +1355,8 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     if (target === undefined) throw new FactoryError("refused", `task ${shortId(record)} has not started yet, so it has no diff`);
     if (!existsSync(record.worktree)) throw new FactoryError("refused", `the worktree of task ${shortId(record)} is gone (${record.worktree})`);
     const base = await git(runCommand, record.worktree, ["merge-base", "HEAD", `refs/heads/${target}`]);
-    const tree = await snapshotTree(runCommand, record.worktree);
+    // An old merge request's reviewer saw, and its target got, the committed tree only.
+    const tree = record.kind === "merge_request" ? await git(runCommand, record.worktree, ["rev-parse", "HEAD^{tree}"]) : await snapshotTree(runCommand, record.worktree);
     const diff = await treeDiff(runCommand, record.worktree, base, tree);
     const files: FileCounts[] = await diffFileCounts(runCommand, record.worktree, base, tree);
     return { base, diff: diff.patch, files };
@@ -1384,6 +1394,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
       await requireContinuable(record, "approve");
     };
     await withTaskLock(record, check, () => sendToRestingTask(record, "/factory approve", env));
+    await pokeWaveOf(record, env);
     return taskView(record);
   },
 
@@ -1401,6 +1412,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
       return { interrupted: view.interrupted, statesBefore };
     });
     if (sent.interrupted) await requireRunnerStarted(record, sent.statesBefore);
+    await pokeWaveOf(record, env);
     return taskView(record);
   },
 
@@ -1449,6 +1461,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     await deliver();
     // A runner that ended as the line was appended never sends it: take it back and start a runner with it.
     if ((await liveRunners(record)).length === 0 && (await withdrawUnsentLine(record, text))) await deliver();
+    await pokeWaveOf(record, env);
     return taskView(record);
   },
 
@@ -1473,7 +1486,10 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const repo = await primaryOf(params.repo as string, cwd);
     if (!(await registeredRepos()).includes(repo)) throw new FactoryError("not_found", `${repo} is not registered, add it with repos.add first`);
     const stored = await loadSettings(repo);
-    await requireFactoryModels(resolveSettings(stored, overrides, "").models);
+    // Resolved once, here: the wave's tasks, review and merge read only the declaration.
+    const { merge, maxRounds, review, models } = resolveSettings(stored, overrides, "");
+    overrides = { merge, maxRounds, review, models };
+    await requireFactoryModels(models);
     target ??= stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
     if (!(await localBranchExists(repo, target))) throw new FactoryError("not_found", `${repo} has no local branch ${target}`);
