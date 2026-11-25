@@ -13,6 +13,9 @@
  *   unsquashed, the merge gates (the full suite, once per wave), the reviewer on the whole diff since the target; then `merging` (`waiting_approve` with the wave's `merge: review`), `rejected` or `blocked`.
  *   `merging`: the merge queue, merge gates (only when the target moved since the review's run) and the fast-forward
  *   (`mergeTask` `asIs`), then `merged` or `blocked`
+ * - With the wave's `remote` on (`remote.ts`, every step a `remote` event, a failure never blocks): after the rebase
+ *   the branch and target are pushed and the request opened (once), each recorded verdict is commented, and after
+ *   the fast-forward both are pushed again. Off: no call
  * - Every step appends its event (`gate`, `review`, `merge`, `stage`). A stage change is a compare-and-append on the
  *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there.
  *   While it reviews, the runner watches the log: once the stage left `reviewing` it kills the gates and the reviewer
@@ -38,6 +41,7 @@ import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, tr
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
 import { INFRA_EXIT } from "./pipeline.ts";
+import { commentReview, publishMerge, publishWave } from "./remote.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
 import { passed, type GateData, type Task } from "./state.ts";
@@ -243,13 +247,16 @@ function sessionIdOf(sessionFile: string | null): string | null {
  * blocks, `gates`, before any reviewer starts), reviewer, then the stage the verdict asks for. The gate event names
  * the commit they passed on: the merge runs them again only on another one.
  */
-async function review(fold: WaveFold): Promise<void> {
+/** Resolves when the step ended (with whether its last stage change was recorded, where it says). */
+async function review(fold: WaveFold): Promise<boolean | void> {
   const { id } = fold;
   const task = waveTask(fold);
-  const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []) => {
+  const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []): Promise<boolean> => {
     const moved = await moveStage(id, "reviewing", to, reason, detail, events);
     if (!stopping && (!moved || to !== "merging")) await removeWorktree(fold);
+    return moved;
   };
+  let remote = fold.remote;
   let root: string;
   try {
     root = await ensureWorktree(fold);
@@ -264,6 +271,8 @@ async function review(fold: WaveFold): Promise<void> {
     if (conflicts) return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${conflicts.join(", ")}`);
     // The rebase brings the target's .gitignore: a file it stopped ignoring is no gate output.
     if (await uncommittedFiles(runner.run, root)) return leave("blocked", "dirty", await dirtyDetail(root));
+    // The rebased branch on the forge, its request opened (once): recorded, never blocking.
+    if (!stopping) remote = await publishWave(fold);
     const gated = await git(runner.run, root, ["rev-parse", "HEAD"]);
     const gates: { argv: string[]; result: CommandResult; passed: boolean }[] = [];
     try {
@@ -315,9 +324,12 @@ async function review(fold: WaveFold): Promise<void> {
       usage: { input: data.usage.input, output: data.usage.output, cost: data.usage.cost },
       wallMs: data.wallMs,
     };
-    if (verdict === "failed") return leave("blocked", "review_failed", `the reviewer gave no verdict (${data.status})`, [event]);
-    if (verdict === "rejected") return leave("rejected", null, null, [event]);
-    return leave(fold.overrides.merge === "review" ? "waiting_approve" : "merging", null, null, [event]);
+    let moved: boolean;
+    if (verdict === "failed") moved = await leave("blocked", "review_failed", `the reviewer gave no verdict (${data.status})`, [event]);
+    else if (verdict === "rejected") moved = await leave("rejected", null, null, [event]);
+    else moved = await leave(fold.overrides.merge === "review" ? "waiting_approve" : "merging", null, null, [event]);
+    // Only a recorded verdict reaches the forge.
+    if (moved) await commentReview({ ...fold, remote }, { round, verdict, status: data.status, findings: event.findings });
   } catch (error) {
     return leave("blocked", "infra", `review: ${oneLine(errorText(error))}`);
   }
@@ -375,7 +387,9 @@ async function merge(fold: WaveFold, gated: string | null): Promise<void> {
   const { result } = outcome;
   switch (result.kind) {
     case "merged":
-      return leave("merged", null, null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }]);
+      await leave("merged", null, null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }]);
+      // The target moved: the forge gets it, the request shows merged (recorded, never blocking).
+      return void (await publishMerge(fold));
     case "conflict":
       return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${result.files.join(", ")}`, gate);
     case "gate_failed":

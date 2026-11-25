@@ -47,9 +47,10 @@ const WAVE_REASONS: readonly WaveReason[] = ["conflict", "gates", "dirty", "infr
 
 /**
  * The settings `waves.start` got, stored with the wave. Its tasks start with `models`, `maxRounds` and `review` from
- * them, `branch` = the wave's branch and `merge: "auto"`; `merge` is the wave's own (`review`: wait for approve).
+ * them, `branch` = the wave's branch and `merge: "auto"`; `merge` is the wave's own (`review`: wait for approve), so is
+ * `remote` (the wave is shown on the origin's forge, `remote.ts`; absent = off).
  */
-export type WaveOverrides = { models?: Settings["models"]; maxRounds?: number; merge?: Settings["merge"]; review?: boolean };
+export type WaveOverrides = { models?: Settings["models"]; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; remote?: boolean };
 
 /** Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. */
 export interface WaveDeclaration {
@@ -220,7 +221,9 @@ export function parseWaveOverrides(raw: unknown, prefix = "overrides."): WaveOve
   if (raw === null || raw === undefined) return {};
   if (!isRecord(raw)) throw new Error(`${prefix.slice(0, -1)} must be an object`);
   const { branch: _branch, ...fields } = parseSettingsFields(raw, prefix);
-  return fields;
+  if (raw.remote === undefined) return fields;
+  if (typeof raw.remote !== "boolean") throw new Error(`${prefix}remote must be a boolean`);
+  return { ...fields, remote: raw.remote };
 }
 
 export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration {

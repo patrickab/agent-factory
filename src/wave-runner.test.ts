@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { callAction } from "./core.ts";
 import { worktreePath } from "./launch.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
@@ -28,7 +28,7 @@ writeFileSync(
   join(fakeBin, "pi"),
   `#!/usr/bin/env bun
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 const args = process.argv.slice(2);
 if (!args.includes("json")) process.exit(3);
 const dir = args[args.indexOf("--session-dir") + 1];
@@ -579,4 +579,135 @@ describe("a runner stopped from outside", () => {
     expect((await getWave()).stage).toBe("merged");
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
   }, 30_000);
+});
+
+describe("the wave on its forge (setting remote)", () => {
+  const forgeLog = () => join(caseDir, "forge.log");
+  const forgeBin = () => join(caseDir, "forge-bin");
+  /** The fake `gh`/`glab`: each call's argv, as `[name, ...args]` JSON lines; `create` prints the request's URL. */
+  const FAKE_FORGE = `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
+import { basename } from "node:path";
+const name = basename(process.argv[1]);
+const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_FORGE_LOG, JSON.stringify([name, ...args]) + "\\n");
+if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/app/pull/7" : "Creating merge request\\nhttps://gitlab.com/acme/app/-/merge_requests/7");
+`;
+
+  beforeEach(() => {
+    mkdirSync(forgeBin());
+    for (const name of ["gh", "glab"]) {
+      writeFileSync(join(forgeBin(), name), FAKE_FORGE);
+      chmodSync(join(forgeBin(), name), 0o755);
+    }
+    // No real gh or glab is reachable: a directory holding one is left out of PATH (bun's own is kept).
+    const system = (savedEnv.PATH ?? "").split(":").filter((dir) => dir !== "" && !existsSync(join(dir, "gh")) && !existsSync(join(dir, "glab")));
+    process.env.PATH = [forgeBin(), fakeBin, dirname(process.execPath), ...system].join(":");
+    process.env.FAKE_FORGE_LOG = forgeLog();
+  });
+
+  const calls = (): string[][] => (existsSync(forgeLog()) ? readFileSync(forgeLog(), "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]) : []);
+  /** A bare repo as `origin`, reached through `insteadOf` from `url`, so the forge is the URL's. Returns its path. */
+  function origin(repo: string, url = "https://github.com/acme/app.git"): string {
+    const bare = join(caseDir, "origin.git");
+    git(caseDir, "init", "--quiet", "--bare", bare);
+    git(repo, "remote", "add", "origin", url);
+    git(repo, "config", `url.${bare}.insteadOf`, url);
+    return bare;
+  }
+  const refs = (bare: string) => git(bare, "for-each-ref", "--format=%(refname) %(objectname)");
+  const remoteEvents = async () => (await timeline()).filter((event) => event.kind === "remote") as unknown as Record<string, unknown>[];
+
+  test("off: no push, no forge call, no remote event; the wave merges", async () => {
+    const repo = await waveRepo();
+    const bare = origin(repo);
+    expect(await runWave(WAVE)).toBe(0);
+    const wave = await getWave();
+    expect([wave.stage, wave.remote]).toEqual(["merged", null]);
+    expect(refs(bare)).toBe("");
+    expect(calls()).toEqual([]);
+    expect(await remoteEvents()).toEqual([]);
+  });
+
+  test("on (GitHub): branch and target pushed, the request opened once, a comment per verdict, the target pushed after the merge", async () => {
+    process.env.FAKE_VERDICT = "reject";
+    const repo = await waveRepo(undefined, "done", { remote: true });
+    const bare = origin(repo);
+    await runWave(WAVE);
+    const rejected = await getWave();
+    expect(rejected.stage).toBe("rejected");
+    const head = git(repo, "rev-parse", BRANCH);
+    expect(rejected.remote).toEqual({ number: 7, url: "https://github.com/acme/app/pull/7", pushed: head, error: null });
+    expect(git(bare, "rev-parse", BRANCH)).toBe(head);
+    expect(git(bare, "rev-parse", "main")).toBe(git(repo, "rev-parse", "main"));
+    const [create, comment] = calls();
+    expect(create.slice(0, 7)).toEqual(["gh", "pr", "create", "--base", "main", "--head", BRANCH]);
+    expect(create).toContain("Wave one");
+    expect(comment.slice(0, 4)).toEqual(["gh", "pr", "comment", "7"]);
+    expect(comment[5]).toContain("round 1: rejected");
+    expect(comment[5]).toContain("`b.txt:1`: b is wrong");
+    expect((await timeline()).map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "remote", "remote", "gate", "review", "rejected", "remote"]);
+
+    // A second review (the supervisor's fixes are in): the request is reused, its verdict commented, the merge pushed.
+    delete process.env.FAKE_VERDICT;
+    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
+    expect(await runWave(WAVE)).toBe(0);
+    const merged = await getWave();
+    expect(merged.stage).toBe("merged");
+    expect(calls().map((call) => call.slice(0, 3).join(" "))).toEqual(["gh pr create", "gh pr comment", "gh pr comment"]);
+    expect(calls()[2][5]).toContain("round 2: approved");
+    const main = git(repo, "rev-parse", "main");
+    expect(merged.remote).toEqual({ number: 7, url: "https://github.com/acme/app/pull/7", pushed: main, error: null });
+    expect(git(bare, "rev-parse", "main")).toBe(main);
+    expect(git(bare, "rev-parse", BRANCH)).toBe(main);
+  });
+
+  test("on (GitLab): glab opens the merge request and notes the verdict", async () => {
+    const repo = await waveRepo(undefined, "done", { remote: true });
+    origin(repo, "git@gitlab.example.com:acme/app.git");
+    await runWave(WAVE);
+    const wave = await getWave();
+    expect([wave.stage, wave.remote?.number, wave.remote?.url]).toEqual(["merged", 7, "https://gitlab.com/acme/app/-/merge_requests/7"]);
+    const [create, note] = calls();
+    expect(create.slice(0, 7)).toEqual(["glab", "mr", "create", "--source-branch", BRANCH, "--target-branch", "main"]);
+    expect(note.slice(0, 4)).toEqual(["glab", "mr", "note", "7"]);
+  });
+
+  test("a refused push is recorded and the wave still merges; no request without the branch", async () => {
+    const repo = await waveRepo(undefined, "done", { remote: true });
+    const bare = origin(repo);
+    writeFileSync(join(bare, "hooks", "pre-receive"), "#!/bin/sh\necho refused by policy >&2\nexit 1\n");
+    chmodSync(join(bare, "hooks", "pre-receive"), 0o755);
+    expect(await runWave(WAVE)).toBe(0);
+    const wave = await getWave();
+    expect(wave.stage).toBe("merged");
+    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
+    expect(wave.remote?.error).toContain("git push exited 1");
+    expect(wave.remote?.error).toContain("refused by policy");
+    expect(calls()).toEqual([]);
+    expect(refs(bare)).toBe("");
+  });
+
+  test("a missing CLI is recorded and the wave still merges; the target is pushed all the same", async () => {
+    rmSync(join(forgeBin(), "gh"));
+    const repo = await waveRepo(undefined, "done", { remote: true });
+    const bare = origin(repo);
+    expect(await runWave(WAVE)).toBe(0);
+    const wave = await getWave();
+    expect(wave.stage).toBe("merged");
+    const events = await remoteEvents();
+    expect(events.some((event) => typeof event.error === "string" && event.error.startsWith("gh pr could not run"))).toBe(true);
+    expect([wave.remote?.number, wave.remote?.url, wave.remote?.pushed]).toEqual([null, null, git(repo, "rev-parse", "main")]);
+    expect(git(bare, "rev-parse", "main")).toBe(git(repo, "rev-parse", "main"));
+  });
+
+  test("an origin that is no GitHub or GitLab: pushed, the request recorded unsupported", async () => {
+    const repo = await waveRepo(undefined, "done", { remote: true });
+    const bare = origin(repo, "https://git.example.com/acme/app.git");
+    await runWave(WAVE);
+    expect((await getWave()).stage).toBe("merged");
+    expect((await remoteEvents()).some((event) => typeof event.error === "string" && event.error.startsWith("unsupported:"))).toBe(true);
+    expect(calls()).toEqual([]);
+    expect(git(bare, "rev-parse", "main")).toBe(git(repo, "rev-parse", "main"));
+  });
 });

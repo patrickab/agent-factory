@@ -5,8 +5,9 @@
  *   else `~/.pi/agent`, as Pi's `getAgentDir` does)
  * - Provides the settings of a repository, one YAML file per repository named after its URI-encoded path, read and
  *   written (`loadSettings`, `saveSettings`) with the checks a `/factory start` payload has (`parseSettingsFields`)
- *   plus `preview`, a boolean the plugin stores for its clients and never acts on. The file is the repository's
- *   registration (`registeredRepos`, `unregisterRepo`)
+ *   plus `preview`, a boolean the plugin stores for its clients and never acts on, and `remote`, whether a wave of the
+ *   repository is shown on its forge (`remote.ts`; `waves.start` stores it resolved in the wave's declaration). The
+ *   file is the repository's registration (`registeredRepos`, `unregisterRepo`)
  * - Provides `resolveSettings`: defaults < stored < overrides, models merged per role
  */
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -16,12 +17,12 @@ import { parseSettingsFields, ROLES, type Settings } from "./state.ts";
 import { errorText, isRecord } from "./util.ts";
 
 /** `Settings` as stored: every key optional, `branch` absent = the repository's default branch. */
-export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: Partial<Settings["models"]>; preview?: boolean };
+export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: Partial<Settings["models"]>; preview?: boolean; remote?: boolean };
 
-/** The settings a repository's task gets, with `preview` (absent = `false`), which only clients read. */
-export type ResolvedSettings = Settings & { preview: boolean };
+/** The settings a repository's task gets, with `preview` (absent = `false`), which only clients read, and `remote` (absent = `false`). */
+export type ResolvedSettings = Settings & { preview: boolean; remote: boolean };
 
-export const DEFAULT_SETTINGS: Readonly<Omit<ResolvedSettings, "branch">> = { merge: "auto", maxRounds: 2, review: false, models: {}, preview: false };
+export const DEFAULT_SETTINGS: Readonly<Omit<ResolvedSettings, "branch">> = { merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, remote: false };
 
 /** Pi's agent dir: `PI_CODING_AGENT_DIR` (a leading `~` expanded), else `~/.pi/agent`. Read on every call. */
 export function agentDir(): string {
@@ -49,9 +50,10 @@ export function parseStoredSettings(raw: unknown): StoredSettings {
   if (raw === null || raw === undefined) return {};
   if (!isRecord(raw)) throw new Error("settings must be a mapping");
   const settings: StoredSettings = parseSettingsFields(raw);
-  if (raw.preview !== undefined) {
-    if (typeof raw.preview !== "boolean") throw new Error("preview must be a boolean");
-    settings.preview = raw.preview;
+  for (const key of ["preview", "remote"] as const) {
+    if (raw[key] === undefined) continue;
+    if (typeof raw[key] !== "boolean") throw new Error(`${key} must be a boolean`);
+    settings[key] = raw[key];
   }
   return settings;
 }
@@ -119,9 +121,13 @@ export async function saveSettings(repo: string, settings: StoredSettings): Prom
   }
 }
 
-/** `resolveSettings` with the stored `preview`. */
+/** `resolveSettings` with the stored `preview` and `remote`. */
 export function resolveRepoSettings(stored: StoredSettings, overrides: StoredSettings, branch: string): ResolvedSettings {
-  return { ...resolveSettings(stored, overrides, branch), preview: stored.preview ?? DEFAULT_SETTINGS.preview };
+  return {
+    ...resolveSettings(stored, overrides, branch),
+    preview: stored.preview ?? DEFAULT_SETTINGS.preview,
+    remote: overrides.remote ?? stored.remote ?? DEFAULT_SETTINGS.remote,
+  };
 }
 
 /** Defaults < stored < overrides, models merged per role. `branch` is used when neither sets one. Mutates nothing. */

@@ -209,6 +209,8 @@ const SETTINGS_PROPERTIES: Record<string, Schema> = {
   },
 };
 
+const REMOTE: Schema = { type: "boolean", description: "Push a wave's branch, open its pull/merge request on the origin's forge (gh, glab), comment the reviews, push the target after the merge" };
+
 function spec(summary: string, properties: Record<string, Schema>, required: string[], mutates: boolean, hostOnly = false): ActionSpec {
   return { summary, params: { type: "object", required, properties }, mutates, hostOnly };
 }
@@ -228,7 +230,7 @@ export const ACTIONS = {
   "settings.get": spec("The repository's stored settings, them resolved over the defaults, and the defaults", { repo: REPO }, ["repo"], false),
   "settings.set": spec(
     "Replace the repository's stored settings",
-    { repo: REPO, settings: { type: "object", description: "The stored settings", properties: { ...SETTINGS_PROPERTIES, preview: { type: "boolean" } } } },
+    { repo: REPO, settings: { type: "object", description: "The stored settings", properties: { ...SETTINGS_PROPERTIES, preview: { type: "boolean" }, remote: REMOTE } } },
     ["repo", "settings"],
     true,
   ),
@@ -326,7 +328,7 @@ export const ACTIONS = {
         items: WAVE_TASK_ITEM,
       },
       plan: { type: "string", description: "The memory_store path of the plan the wave works from (only stored)" },
-      overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: SETTINGS_PROPERTIES },
+      overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, remote: REMOTE } },
     },
     ["repo", "tag", "title", "request", "tasks"],
     true,
@@ -1638,7 +1640,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const stored = await loadSettings(repo);
     // Resolved once, here: the wave's tasks, review and merge read only the declaration.
     const { merge, maxRounds, review, models } = resolveSettings(stored, overrides, "");
-    overrides = { merge, maxRounds, review, models };
+    overrides = { merge, maxRounds, review, models, remote: overrides.remote ?? stored.remote ?? DEFAULT_SETTINGS.remote };
     await requireFactoryModels(models);
     target ??= stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);

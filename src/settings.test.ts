@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { factoryHome, loadSettings, registeredRepos, resolveRepoSettings, resolveSettings, saveSettings, unregisterRepo, type StoredSettings } from "./settings.ts";
+import { factoryHome, loadSettings, parseStoredSettings, registeredRepos, resolveRepoSettings, resolveSettings, saveSettings, unregisterRepo, type StoredSettings } from "./settings.ts";
 
 const REPO = "/home/someone/git/project";
 const REPO_FILE = "%2Fhome%2Fsomeone%2Fgit%2Fproject.yaml";
@@ -166,9 +166,19 @@ describe("resolveSettings", () => {
   test("preview is stored and passed through, false by default; resolveSettings leaves it out", async () => {
     await saveSettings(REPO, { preview: true });
     expect(await loadSettings(REPO)).toEqual({ preview: true });
-    expect(resolveRepoSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main", preview: true });
+    expect(resolveRepoSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main", preview: true, remote: false });
     expect(resolveRepoSettings({}, {}, "main").preview).toBe(false);
     expect(resolveSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
+  });
+
+  test("remote is stored, false by default, an override wins; resolveSettings leaves it out", async () => {
+    await saveSettings(REPO, { remote: true });
+    expect(await loadSettings(REPO)).toEqual({ remote: true });
+    expect(resolveRepoSettings({ remote: true }, {}, "main").remote).toBe(true);
+    expect(resolveRepoSettings({ remote: true }, { remote: false }, "main").remote).toBe(false);
+    expect(resolveRepoSettings({}, {}, "main").remote).toBe(false);
+    expect(resolveSettings({ remote: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
+    expect(() => parseStoredSettings({ remote: "yes" })).toThrow("remote must be a boolean");
   });
 
   test("the result does not share the models object of an input", () => {

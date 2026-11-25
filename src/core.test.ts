@@ -412,7 +412,7 @@ describe("branches, settings, config", () => {
 
   test("settings.get and settings.set: stored, resolved, defaults; preview passes through; invalid values refused", async () => {
     const repo = makeRepo();
-    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: {}, preview: false };
+    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, remote: false };
     expect(await callAction("settings.get", { repo })).toEqual({ stored: {}, resolved: defaults, defaults });
     const set = await callAction("settings.set", { repo, settings: { merge: "review", preview: true, models: { coder: "a/b" } } });
     expect(set).toEqual({
@@ -1152,7 +1152,7 @@ describe("waves", () => {
     }
     const file = await readWave(wave.id);
     // Stored resolved: the overrides over the repository's stored settings (none here) over the defaults.
-    expect(file.declaration.overrides).toEqual({ ...overrides, review: false });
+    expect(file.declaration.overrides).toEqual({ ...overrides, review: false, remote: false });
     expect(file.events.map((event) => event.kind)).toEqual(["tasks", "task", "task"]);
     expect(prompts().filter((line) => line === "prompt /factory start")).toHaveLength(2);
     // The same tag on the same target: its branch exists.
@@ -1165,7 +1165,7 @@ describe("waves", () => {
     const wave = await startWave(repo, [spec("a")], { overrides: { maxRounds: 1, models: { coder: "c/d" } } });
     // Its runner's launch ends before the test does: a runner stopped mid-launch outlasts the test's time.
     await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null);
-    const resolved = { merge: "review" as const, maxRounds: 1, review: false, models: { coder: "c/d", reviewer: "c/d" } };
+    const resolved = { merge: "review" as const, maxRounds: 1, review: false, models: { coder: "c/d", reviewer: "c/d" }, remote: false };
     expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
     await callAction("settings.set", { repo, settings: { merge: "auto", models: { reviewer: "a/b" } } });
     expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
