@@ -77,4 +77,11 @@ describe("changedTests", () => {
     write("src/e.test.ts", 'import "./e.ts";\n');
     expect(changedTests(root, base)).toEqual(["src/d.test.ts", "src/e.test.ts", "src/lib/c.test.ts"]);
   });
+
+  test("a renamed source reaches the tests of its old path too", () => {
+    const base = commit();
+    gitIn("mv", "src/no-test.ts", "src/moved.ts");
+    commit();
+    expect(changedTests(root, base)).toEqual(["src/uses-no-test.test.ts"]);
+  });
 });

@@ -11,8 +11,8 @@
  * - Provides the default models, `defaults.yaml` at the package root (`loadDefaults`, `defaultModels`): a broken or
  *   missing file throws naming its path. Only a wave's task that asks for `small` where nothing names one reads it
  *   (`core.ts`); no setting resolves over it, so nothing stored still means Pi's session model
- * - Provides `resolveSettings`: defaults < stored < overrides, models merged per name, answered with the names that
- *   are set of `small`, `big`, and the roles' `coder`, `reviewer`
+ * - Provides `resolveSettings`: defaults < stored < overrides, models merged per name: `coder` and `reviewer` as
+ *   before, `big` the alias of `coder`, `small` added
  */
 import { readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -21,13 +21,10 @@ import { dirname, join } from "node:path";
 import { MODEL_SIZES, normalizeModels, parseSettingsFields, type ModelChoice, type ModelSize, type Settings } from "./state.ts";
 import { errorText, isRecord } from "./util.ts";
 
-/**
- * `Settings` as stored or passed: every key optional, `branch` absent = the repository's default branch; `models` in
- * the new names only (`normalizeModels` reads the old ones).
- */
+/** `Settings` as stored or passed: every key optional, `branch` absent = the repository's default branch; `models` normalized (`normalizeModels`). */
 export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: ModelChoice; preview?: boolean; remote?: boolean };
 
-/** The project's `small` and `big` and the task's `coder` and `reviewer`, each only when set: an absent role runs with Pi's session model. */
+/** The task's `coder` (with its alias `big`) and `reviewer`, and the project's `small`, each only when set: an absent role runs with Pi's session model. */
 export type ResolvedModels = Settings["models"];
 
 /** The settings a task gets. */
@@ -178,7 +175,7 @@ export function resolveRepoSettings(stored: StoredSettings, overrides: StoredSet
 
 /**
  * Defaults < stored < overrides; models merged per name (`resolveModels`). `branch` is used when neither sets one.
- * `size` picks the coder's model (default `big`); the reviewer's is the explicit one, else `big`. Mutates nothing.
+ * `size` `small` (a wave's easy task) makes the coder's model `small`. Mutates nothing.
  */
 export function resolveSettings(stored: StoredSettings, overrides: StoredSettings, branch: string, size: ModelSize = "big"): TaskSettings {
   return {
@@ -191,26 +188,30 @@ export function resolveSettings(stored: StoredSettings, overrides: StoredSetting
 }
 
 /**
- * `layers` merged per name, lowest first; `coder` = the model of `size`, `reviewer` = its own, else `big`. A name no
- * layer sets stays absent (Pi's session model): `defaults.yaml` is never read here.
+ * `layers` merged per name, lowest first (`big` read as `coder`). `coder` and `reviewer` as before: each the layers'
+ * own, else absent (Pi's session model); `big` = `coder`. `size` `small`: `coder` = `small` (absent when no layer names
+ * one) and no `big`. A name no layer sets stays absent: `defaults.yaml` is never read here.
  */
 export function resolveModels(layers: readonly (ModelChoice | undefined)[], size: ModelSize = "big"): ResolvedModels {
   const merged: ModelChoice = {};
   for (const layer of layers) {
-    for (const name of ["small", "big", "reviewer"] as const) {
-      const model = layer?.[name];
+    const normalized = normalizeModels(layer ?? {});
+    for (const name of ["small", "coder", "reviewer"] as const) {
+      const model = normalized[name];
       if (model !== undefined) merged[name] = model;
     }
   }
-  const resolved: ResolvedModels = { ...merged };
-  const coder = size === "small" ? merged.small : merged.big;
-  if (coder !== undefined) resolved.coder = coder;
-  const reviewer = merged.reviewer ?? merged.big;
-  if (reviewer !== undefined) resolved.reviewer = reviewer;
+  if (size === "big") return normalizeModels(merged);
+  const resolved: ResolvedModels = {};
+  if (merged.small !== undefined) {
+    resolved.small = merged.small;
+    resolved.coder = merged.small;
+  }
+  if (merged.reviewer !== undefined) resolved.reviewer = merged.reviewer;
   return resolved;
 }
 
-/** The stored form of resolved models: the sizes, and the reviewer only when it is not `big`. */
+/** The stored form of models resolved for `big`: `coder` (= `big`), `small` and `reviewer` as set. */
 export function modelChoice(models: ResolvedModels): ModelChoice {
-  return normalizeModels({ small: models.small, big: models.big, reviewer: models.reviewer });
+  return normalizeModels({ small: models.small, coder: models.coder, reviewer: models.reviewer });
 }

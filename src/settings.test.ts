@@ -91,17 +91,19 @@ describe("loadSettings", () => {
 
   test("drops unknown keys and unknown model names", async () => {
     await writeSettingsFile("merge: review\nextra: 1\nmodels:\n  small: a/s\n  big: a/b\n  planner: c/d\n");
-    expect(await loadSettings(REPO)).toEqual({ merge: "review", models: { small: "a/s", big: "a/b" } });
+    expect(await loadSettings(REPO)).toEqual({ merge: "review", models: { small: "a/s", coder: "a/b", big: "a/b" } });
   });
 
-  test("old names: coder is read as big, a reviewer equal to it is dropped, another one is kept as the reviewer's own", async () => {
+  test("models as before: coder and reviewer kept as they are; big is coder's alias, coder wins over a different big", async () => {
     await writeSettingsFile("models:\n  coder: a/b\n  reviewer: a/b\n");
-    expect(await loadSettings(REPO)).toEqual({ models: { big: "a/b" } });
-    await writeSettingsFile("models:\n  coder: a/b\n  reviewer: c/d\n");
-    expect(await loadSettings(REPO)).toEqual({ models: { big: "a/b", reviewer: "c/d" } });
+    expect(await loadSettings(REPO)).toEqual({ models: { coder: "a/b", big: "a/b", reviewer: "a/b" } });
+    await writeSettingsFile("models:\n  coder: a/b\n");
+    expect(await loadSettings(REPO)).toEqual({ models: { coder: "a/b", big: "a/b" } });
     // An old client edits only coder, sending back the big it read: coder wins.
-    await writeSettingsFile("models:\n  big: a/b\n  coder: e/f\n  reviewer: e/f\n");
-    expect(await loadSettings(REPO)).toEqual({ models: { big: "e/f" } });
+    await writeSettingsFile("models:\n  big: a/b\n  coder: e/f\n");
+    expect(await loadSettings(REPO)).toEqual({ models: { coder: "e/f", big: "e/f" } });
+    await writeSettingsFile("models:\n  big: a/b\n");
+    expect(await loadSettings(REPO)).toEqual({ models: { coder: "a/b", big: "a/b" } });
     await writeSettingsFile("models:\n  reviewer: c/d\n");
     expect(await loadSettings(REPO)).toEqual({ models: { reviewer: "c/d" } });
   });
@@ -141,7 +143,7 @@ describe("loadSettings", () => {
 
 describe("saveSettings", () => {
   test("round trips, creating directories and leaving no temp file", async () => {
-    const settings: StoredSettings = { branch: "develop", merge: "review", maxRounds: 5, review: true, models: { small: "anthropic/s", big: "anthropic/x", reviewer: "openai/y" } };
+    const settings: StoredSettings = { branch: "develop", merge: "review", maxRounds: 5, review: true, models: { small: "anthropic/s", coder: "anthropic/x", big: "anthropic/x", reviewer: "openai/y" } };
     await saveSettings(REPO, settings);
     expect(await loadSettings(REPO)).toEqual(settings);
     expect(await readdir(dirname(settingsPath()))).toEqual([REPO_FILE]);
@@ -160,7 +162,7 @@ describe("saveSettings", () => {
   });
 
   test("two concurrent saves leave one valid file", async () => {
-    const first: StoredSettings = { merge: "review", maxRounds: 3, models: { big: "a/one" } };
+    const first: StoredSettings = { merge: "review", maxRounds: 3, models: { coder: "a/one", big: "a/one" } };
     const second: StoredSettings = { merge: "auto", maxRounds: 7, review: true, models: { reviewer: "b/two" } };
     await Promise.all([saveSettings(REPO, first), saveSettings(REPO, second)]);
     expect([first, second]).toContainEqual(await loadSettings(REPO));
@@ -199,7 +201,7 @@ describe("resolveSettings", () => {
   });
 
   test("defaults < stored < overrides, models merged per name", () => {
-    const stored: StoredSettings = { branch: "develop", merge: "review", maxRounds: 4, models: { small: "s/small", big: "s/big", reviewer: "s/reviewer" } };
+    const stored: StoredSettings = { branch: "develop", merge: "review", maxRounds: 4, models: { small: "s/small", coder: "s/big", reviewer: "s/reviewer" } };
     const overrides: StoredSettings = { maxRounds: 9, review: true, models: { reviewer: "o/reviewer", big: undefined } };
     const storedCopy = structuredClone(stored);
     const overridesCopy = structuredClone(overrides);
@@ -211,14 +213,21 @@ describe("resolveSettings", () => {
       models: { small: "s/small", big: "s/big", coder: "s/big", reviewer: "o/reviewer" },
     });
     expect(resolveSettings(stored, { branch: "release" }, "main").branch).toBe("release");
-    expect(resolveSettings({ models: { big: "s/big" } }, {}, "main").models).toEqual({ big: "s/big", coder: "s/big", reviewer: "s/big" });
+    // An override's big is its coder.
+    expect(resolveSettings(stored, { models: { big: "o/big" } }, "main").models).toMatchObject({ coder: "o/big", big: "o/big" });
     expect(stored).toEqual(storedCopy);
     expect(overrides).toEqual(overridesCopy);
   });
 
-  test("size small runs the coder on the small model; the reviewer stays big", () => {
-    expect(resolveSettings({ models: { small: "s/small", big: "s/big" } }, {}, "main", "small").models).toEqual({ small: "s/small", big: "s/big", coder: "s/small", reviewer: "s/big" });
-    expect(resolveSettings({ models: { big: "s/big" } }, {}, "main", "small").models).toEqual({ big: "s/big", reviewer: "s/big" });
+  test("only coder set: the reviewer stays absent (Pi's session model), as before", () => {
+    expect(resolveSettings({ models: { coder: "s/big" } }, {}, "main").models).toEqual({ coder: "s/big", big: "s/big" });
+    expect(resolveSettings({ models: { big: "s/big" } }, {}, "main").models).toEqual({ coder: "s/big", big: "s/big" });
+  });
+
+  test("size small runs the coder on the small model; the reviewer is its own or absent", () => {
+    expect(resolveSettings({ models: { small: "s/small", coder: "s/big" } }, {}, "main", "small").models).toEqual({ small: "s/small", coder: "s/small" });
+    expect(resolveSettings({ models: { small: "s/small", coder: "s/big", reviewer: "s/rev" } }, {}, "main", "small").models).toEqual({ small: "s/small", coder: "s/small", reviewer: "s/rev" });
+    expect(resolveSettings({ models: { coder: "s/big" } }, {}, "main", "small").models).toEqual({});
   });
 
   test("preview is stored and passed through, false by default; resolveSettings leaves it out", async () => {

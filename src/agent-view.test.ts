@@ -117,7 +117,7 @@ const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "settings.get": {
     params: { repo: "." },
     result: {
-      stored: { merge: "review", models: { big: "anthropic/opus" } },
+      stored: { merge: "review", models: { coder: "anthropic/opus", big: "anthropic/opus" } },
       resolved: {
         branch: "master",
         merge: "review",
@@ -264,14 +264,14 @@ describe("agentView", () => {
         "maxRounds: 3 (default)",
         "review: true (default)",
         "models.small: anthropic/sonnet (default)",
-        "models.big: anthropic/opus",
+        "models.coder: anthropic/opus",
         "models.reviewer: openai/gpt (default)",
         "preview: false (default)",
       ].join("\n"),
     );
-    // coder only repeats big, and so does a reviewer equal to it: neither is shown.
+    // big only repeats coder (its alias): not shown; a reviewer equal to coder is its own setting and shown.
     const same = { stored: {}, resolved: { models: { small: "a/s", big: "a/b", coder: "a/b", reviewer: "a/b" } }, defaults: {} };
-    expect(agentView("settings.get", {}, same)).toBe("models.small: a/s (default)\nmodels.big: a/b (default)");
+    expect(agentView("settings.get", {}, same)).toBe("models.small: a/s (default)\nmodels.coder: a/b (default)\nmodels.reviewer: a/b (default)");
     expect(agentView("settings.set", FIXTURES["settings.set"].params, FIXTURES["settings.set"].result)).toBe("settings set:\n  merge: review");
     expect(agentView("config.get", { branch: "waves" }, FIXTURES["config.get"].result)).toBe("factory.yaml (committed on waves)\ngates:\n  - [bun, run, types]");
     expect(agentView("config.get", {}, { exists: false, text: null, draft: "gates: []\n", source: ["package.json"] })).toBe("no factory.yaml, a draft from package.json:\ngates: []");

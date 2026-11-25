@@ -324,7 +324,7 @@ async function review(fold: WaveFold): Promise<boolean | void> {
       task,
       followUps: [],
       diff,
-      // The wave's reviewer model: its own when it names one, else its big one, else Pi's session model.
+      // The wave's reviewer model: its own when it names one, else Pi's session model.
       model: resolveModels([fold.overrides.models]).reviewer ?? null,
       rolePrompt: prompts.reviewer,
       reviewsDir: waveReviewsDir(id),

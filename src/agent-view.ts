@@ -363,7 +363,7 @@ function timelineView(entries: { kind: string; data?: object }[], next: number, 
 
 type SettingsAnswer = { stored: Record<string, unknown>; resolved: Record<string, unknown>; defaults: Record<string, unknown> };
 
-/** `key: value`, `models.big: x`; `(default)` after a value not stored. */
+/** `key: value`, `models.coder: x`; `(default)` after a value not stored. */
 function settingsLines(answer: SettingsAnswer, only?: Set<string>): string[] {
   const lines: string[] = [];
   for (const [key, value] of Object.entries(answer.resolved)) {
@@ -373,8 +373,8 @@ function settingsLines(answer: SettingsAnswer, only?: Set<string>): string[] {
       const entries = Object.entries(value as Record<string, unknown>);
       if (entries.length === 0) lines.push(`${key}: none${key in answer.stored ? "" : " (default)"}`);
       for (const [inner, innerValue] of entries) {
-        // `coder` and a `reviewer` equal to `big` only repeat `big` (old names answered for old clients).
-        if (key === "models" && (inner === "coder" || (inner === "reviewer" && !(inner in stored) && innerValue === (value as Record<string, unknown>).big))) continue;
+        // `big` only repeats `coder` (its alias).
+        if (key === "models" && inner === "big") continue;
         lines.push(`${key}.${inner}: ${String(innerValue)}${inner in stored ? "" : " (default)"}`);
       }
       continue;

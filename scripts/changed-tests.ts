@@ -63,10 +63,10 @@ function git(root: string, args: string[]): string[] {
   return result.stdout.toString().split("\0").filter((path) => path !== "");
 }
 
-/** The test files the change since `base` reaches in the checkout at `root`. */
+/** The test files the change since `base` reaches in the checkout at `root`. A rename counts as both its paths. */
 export function changedTests(root: string, base: string): string[] {
   const untracked = git(root, ["ls-files", "-z", "--others", "--exclude-standard"]);
-  const changed = [...git(root, ["diff", "--name-only", "-z", base]), ...untracked];
+  const changed = [...git(root, ["diff", "--name-only", "--no-renames", "-z", base]), ...untracked];
   const sources = new Map<string, string>();
   for (const path of [...git(root, ["ls-files", "-z"]), ...untracked]) {
     if (SOURCE.test(path) && existsSync(join(root, path))) sources.set(path, readFileSync(join(root, path), "utf8"));

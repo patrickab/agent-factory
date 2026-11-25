@@ -27,9 +27,9 @@ export interface Settings {
   maxRounds: number;
   review: boolean;
   /**
-   * The project's two models (`small`, `big`) and the models this task's roles run with (`coder`: the size the task
-   * asked for, `reviewer`: an explicit override or `big`). Old task records carry only `coder` and `reviewer`, and a
-   * role without a model runs with the session's.
+   * The models this task's roles run with (`coder`, `reviewer`), as before; a role without a model runs with the
+   * session's. Added names: `big`, an alias of `coder` (always equal; a wave's `small` task carries none), and `small`,
+   * the project's model for a wave's easy tasks. Old task records carry only `coder` and `reviewer`.
    */
   models: { small?: string; big?: string; coder?: string; reviewer?: string };
 }
@@ -375,25 +375,28 @@ export function reviewFeedback(round: number, findings: Finding[]): string {
 export const MAX_ROUNDS_LIMIT = 20;
 /** The roles a task runs a model for. */
 export const ROLES = ["coder", "reviewer"] as const;
-/** The two models a project names: `big` is the coder's default and the reviewer's model, `small` for easy tasks. */
+/** The two models a project names: `big` is the alias of `coder`, `small` for a wave's easy tasks. */
 export const MODEL_SIZES = ["small", "big"] as const;
 export type ModelSize = (typeof MODEL_SIZES)[number];
 /** Every name `Settings.models` reads: the sizes and the roles. */
 const MODEL_NAMES = [...MODEL_SIZES, ...ROLES] as const;
 
-/** A project's models as stored or passed (`settings.set`, overrides): the sizes, and a reviewer that differs from `big`. */
-export type ModelChoice = { small?: string; big?: string; reviewer?: string };
+/** A project's models as stored or passed (`settings.set`, overrides): `coder` and `big` equal, both or neither. */
+export type ModelChoice = Settings["models"];
 
 /**
- * Old names read as the contract says: `coder` is `big` (it wins over a `big` given with it: an old client edits only
- * `coder`), `reviewer` is dropped when equal to that layer's `big`, else kept as the reviewer's own model.
+ * `big` and `coder` made equal (`coder` wins when both are given and differ: an old client edits only `coder`);
+ * `small` and `reviewer` as given. Nothing else is implied: no reviewer from `big`.
  */
 export function normalizeModels(models: Settings["models"]): ModelChoice {
-  const big = models.coder ?? models.big;
+  const coder = models.coder ?? models.big;
   const choice: ModelChoice = {};
   if (models.small !== undefined) choice.small = models.small;
-  if (big !== undefined) choice.big = big;
-  if (models.reviewer !== undefined && models.reviewer !== big) choice.reviewer = models.reviewer;
+  if (coder !== undefined) {
+    choice.coder = coder;
+    choice.big = coder;
+  }
+  if (models.reviewer !== undefined) choice.reviewer = models.reviewer;
   return choice;
 }
 

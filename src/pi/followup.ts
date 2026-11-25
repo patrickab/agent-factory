@@ -6,7 +6,8 @@
  *   commit message (the coder is asked for it, `commitmsg.ts`). No history is rewritten
  * - `followUpPrompt`: the system prompt section of such a run
  * - `registerNewTaskTool`: the tool `factory_new_task {title, handoff}`, which starts a task for a part of the request
- *   outside the task's scope through `tasks.start`, on the parent's target branch and merge mode
+ *   outside the task's scope through `tasks.start`, on the parent's target branch and merge mode, with the parent's
+ *   `origin` (the session told when the new task needs attention, invariant 9)
  * - `registerAskSupervisorTool`: the tool `factory_ask_supervisor {question}`, which records the question, rests the
  *   task in `waiting_answer` and ends the coder's turn; the next message to the task is the answer
  */
@@ -16,6 +17,7 @@ import { callAction } from "../core.ts";
 import { primaryCheckout } from "../git.ts";
 import { runCommand } from "../run.ts";
 import type { StoredSettings } from "../settings.ts";
+import { listTasks } from "../tasks.ts";
 import type { SpawnData } from "../state.ts";
 import { errorText, isRecord } from "../util.ts";
 
@@ -39,8 +41,13 @@ export interface NewTaskToolGate {
 
 export const NEW_TASK_TOOL = "factory_new_task";
 
-/** How the tool starts a task: a test swaps it for a fake. */
-export const newTaskDeps = { callAction };
+/** The `origin` of the task held by the Pi session `sessionId`, null when none or no such task. */
+async function parentOrigin(sessionId: string): Promise<string | null> {
+  return (await listTasks()).find((task) => task.sessionId === sessionId)?.origin ?? null;
+}
+
+/** How the tool starts a task and finds its parent's origin: a test swaps them for fakes. */
+export const newTaskDeps = { callAction, parentOrigin };
 
 /** Registers `factory_new_task {title, handoff}`: starts a task in the session's repository through `tasks.start`. */
 export function registerNewTaskTool(pi: ExtensionAPI, gate: NewTaskToolGate): void {
@@ -66,7 +73,9 @@ export function registerNewTaskTool(pi: ExtensionAPI, gate: NewTaskToolGate): vo
       if (typeof handoff !== "string" || handoff.trim() === "") return fail("handoff must be the new task's request, not empty");
       try {
         const { primary } = await primaryCheckout(runCommand, ctx.cwd);
-        const view = await newTaskDeps.callAction("tasks.start", { repo: primary, title, request: handoff, overrides: gate.overrides() }, { cwd: ctx.cwd, signal });
+        // The new task reports to whoever the parent reports to: its origin, not this task session.
+        const origin = (await newTaskDeps.parentOrigin(ctx.sessionManager.getSessionId())) ?? undefined;
+        const view = await newTaskDeps.callAction("tasks.start", { repo: primary, title, request: handoff, overrides: gate.overrides() }, { cwd: ctx.cwd, signal, origin });
         const id = isRecord(view) && typeof view.id === "string" ? view.id : "";
         gate.spawned({ id, title });
         return { content: [{ type: "text" as const, text: `started task ${id.slice(0, 8)}: ${title}` }], details: { id, title } };

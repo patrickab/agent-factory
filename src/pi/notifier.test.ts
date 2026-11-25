@@ -3,7 +3,7 @@
  * holding their state, a fake `pi` that notes `sendMessage`. No runner, no model.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -135,6 +135,23 @@ describe("the extension delivers notices", () => {
     stops.push(one.stop, two.stop);
     await Promise.all([one.look(), two.look(), one.look(), two.look()]);
     expect(sent).toHaveLength(1);
+  });
+
+  test("a finished, delivered task is not read again while its session file is unchanged", async () => {
+    const { file } = await taskOf(1, "sess-A", "done");
+    const errors: unknown[] = [];
+    const notifier = startNotifier({ origin: "sess-A", send: () => undefined, isTaskSession: () => false, onError: (error) => errors.push(error) });
+    stops.push(notifier.stop);
+    await notifier.look();
+    // Unreadable, same size and mtime: a look that read it again would fail.
+    chmodSync(file, 0o000);
+    try {
+      await notifier.look();
+      await notifier.look();
+      expect(errors).toEqual([]);
+    } finally {
+      chmodSync(file, 0o644);
+    }
   });
 
   test("no notice for a task without origin", async () => {

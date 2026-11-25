@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { writeTask } from "../tasks.ts";
 import { ASK_SUPERVISOR_TOOL, newTaskDeps } from "./followup.ts";
 
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
@@ -17,12 +18,14 @@ process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const started: { name: string; params: unknown }[] = [];
+const origins: (string | undefined)[] = [];
 const realStart = newTaskDeps.callAction;
 afterAll(() => {
   newTaskDeps.callAction = realStart;
 });
-newTaskDeps.callAction = (async (name: string, params: unknown) => {
+newTaskDeps.callAction = (async (name: string, params: unknown, options?: { origin?: string }) => {
   started.push({ name, params });
+  origins.push(options?.origin);
   return { id: `0000000${started.length}-0000-0000-0000-000000000000` };
 }) as typeof realStart;
 const { default: factory } = await import("./index.ts");
@@ -159,6 +162,33 @@ describe("factory_new_task", () => {
     await pi.message();
     expect((await pi.newTask({ title: "feat: z", handoff: "do z" })).isError).toBeUndefined();
     expect(started.at(-1)).toEqual({ name: "tasks.start", params: { repo, title: "feat: z", request: "do z", overrides: { branch: "dev", merge: "review" } } });
+  });
+
+  test("the new task carries the parent task's origin (invariant 9)", async () => {
+    const { worktree, merged } = repoWithTask();
+    const pi = mergedSession(worktree, merged);
+    await pi.emit("session_start");
+    await pi.message();
+    // No record holds this session yet: no origin.
+    expect((await pi.newTask({ title: "feat: o", handoff: "do o" })).isError).toBeUndefined();
+    expect(origins.at(-1)).toBeUndefined();
+    await writeTask({
+      id: "00000000-0000-0000-0000-0000000000aa",
+      repo: worktree,
+      worktree,
+      branch: "task",
+      title: "Add a",
+      sessionId: "tool-session",
+      sessionDir: join(scratch, "sessions"),
+      createdAt: new Date(0).toISOString(),
+      tag: "test",
+      plan: null,
+      wave: null,
+      origin: "supervisor-session",
+    });
+    await pi.emit("input", { text: "and p", source: "rpc" });
+    expect((await pi.newTask({ title: "feat: p", handoff: "do p" })).isError).toBeUndefined();
+    expect(origins.at(-1)).toBe("supervisor-session");
   });
 
   test("is refused in a run on a task that is not merged", async () => {

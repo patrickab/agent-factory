@@ -163,10 +163,11 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   version wrote with a `kind` loads; an old `merge_request` keeps its limits: its `branch` is the source it merged,
   which removing it keeps (its commits count as no unmerged work), and approve, retry, cancel and message are refused
 - `overrides` and stored settings: `merge` (`auto` | `review`), `maxRounds` (1..20), `review` (bool), `branch`,
-  `models.small`, `models.big`, `models.reviewer` (`provider/model`). `big` is the coder's model and the reviewer's
-  (unless `reviewer` names its own), `small` the coder's of a wave's task that asks for it. The old `models.coder` is
-  read as `big`, an old `models.reviewer` equal to it as none of its own; resolved settings answer `small`, `big`,
-  `coder` (= `big`) and `reviewer`, each only when set. A model no setting names runs with Pi's session model
+  `models.coder`, `models.reviewer`, `models.big`, `models.small` (`provider/model`). `coder` and `reviewer` mean
+  what they always did: each the stored or overridden one, else Pi's session model (no reviewer is implied by the
+  coder's). `big` is an alias of `coder`, accepted and answered alongside it, always equal (`coder` wins when both are
+  given and differ); `small` is the coder's of a wave's task that asks for it. Stored and resolved settings answer
+  the names that are set
 - `defaults.yaml` at the package root names `models: {small, big}`. It is only what `small` means for a wave's task
   that asks for it where no setting names one, and then only when that model is on the factory models list (else Pi's
   session model). It never makes a model mandatory: with nothing stored and no override a task runs with Pi's session
@@ -390,7 +391,7 @@ Commands (inside a task's own Pi session):
   messages for the live runner (`<inbox>.read`: how far it sent them)
 - `sessions/<repo dir name>/` (`/a/b` -> `--a-b--`): the Pi session files of a repository's tasks, apart from
   Pi's own sessions (`pi -r` does not list them). The task's truth is its `factory-*` session entries
-- `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models` (`small`, `big`, `reviewer`), `preview`, `remote`); the file registers the repo
+- `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models` (`coder` with its alias `big`, `reviewer`, `small`), `preview`, `remote`); the file registers the repo
 - `models.yaml`: the factory models, a YAML list of `provider/model` ids
 - `waves/<id>.jsonl`: a wave, append-only: line 1 its declaration, every later line one event; `waves/<id>.lock` its
   runner's lock, `.log.lock` the append lock, `.poke` an unseen poke, `.log` the runner's output, `.reviews/` its reviewer's

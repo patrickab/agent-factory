@@ -59,7 +59,6 @@ import {
   parseStoredSettings,
   registeredRepos,
   resolveRepoSettings,
-  resolveModels,
   resolveSettings,
   saveSettings,
   unregisterRepo,
@@ -210,10 +209,10 @@ const SETTINGS_PROPERTIES: Record<string, Schema> = {
   models: {
     type: "object",
     properties: {
-      small: { type: "string", description: "provider/model for easy tasks (a wave's task with model small)" },
-      big: { type: "string", description: "provider/model: the coder's default and the reviewer's" },
-      coder: { type: "string", description: "provider/model; the old name of big" },
-      reviewer: { type: "string", description: "provider/model; default big" },
+      coder: { type: "string", description: "provider/model; absent: Pi's session model" },
+      big: { type: "string", description: "provider/model; the same as coder (either name sets both)" },
+      small: { type: "string", description: "provider/model for a wave's easy tasks (model small)" },
+      reviewer: { type: "string", description: "provider/model; absent: Pi's session model" },
     },
   },
 };
@@ -1325,11 +1324,15 @@ async function waveLook(file: WaveFile): Promise<WaveLook> {
 
 /**
  * What notifications (`notify.ts`) judge for the Pi session `origin`: the views of the tasks it started and of the
- * waves it declared, a wave with whether it builds stuck and its log. Only those records are read.
+ * waves it declared, a wave with whether it builds stuck and its log. Only those records are read; the ids in `skip`
+ * not even those (the notifier's finished, delivered ones).
  */
-export async function noticeInputs(origin: string): Promise<{ tasks: TaskView[]; waves: NoticeWave[] }> {
-  const records = (await listTasks()).filter((record) => record.origin === origin);
-  const files = (await listWaves()).filter((file) => file.declaration.origin === origin);
+export async function noticeInputs(
+  origin: string,
+  skip: { tasks?: ReadonlySet<string>; waves?: ReadonlySet<string> } = {},
+): Promise<{ tasks: TaskView[]; waves: NoticeWave[] }> {
+  const records = (await listTasks()).filter((record) => record.origin === origin && !skip.tasks?.has(record.id));
+  const files = (await listWaves()).filter((file) => file.declaration.origin === origin && !skip.waves?.has(file.declaration.id));
   const tasks = await Promise.all(records.map((record) => taskView(record)));
   const waves = await Promise.all(files.map(async (file) => ({ ...(await waveLook(file)), events: file.events })));
   return { tasks, waves };
@@ -1352,8 +1355,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
   const { maxRounds, review } = declaration.overrides;
   // The wave's models only (`launchTask` reads no stored models for a wave's task); a name the wave sets none for runs
   // with Pi's session model, except `small`, which a task asking for it takes from `defaults.yaml` when listed.
-  const models = { ...resolveModels([declaration.overrides.models]) };
-  delete models.coder;
+  const models = normalizeModels(declaration.overrides.models ?? {});
   if (models.small === undefined && fold.tasks.some((task) => task.model === "small")) {
     const small = await defaultSmallModel();
     if (small !== undefined) models.small = small;
@@ -1561,8 +1563,10 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     // The target as `launchTask` resolves it; a missing default branch is its refusal.
     const target = overrides.branch ?? stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target !== undefined) await requireNoOpenWaveBranch(repo, target);
+    // Again once the worktree exists: a wave declared on the branch meanwhile (a racing `waves.start`) wins.
+    const beforeRecord = (branch: string) => requireNoOpenWaveBranch(repo, branch);
     try {
-      return taskView(await launchTask({ repo, title, request, overrides, tag, plan, origin: origin ?? null, signal, env }));
+      return taskView(await launchTask({ repo, title, request, overrides, tag, plan, origin: origin ?? null, signal, env, beforeRecord }));
     } catch (error) {
       if (error instanceof LaunchRefusedError) throw new FactoryError("refused", error.message);
       throw error;

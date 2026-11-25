@@ -149,7 +149,7 @@ describe("startCommand", () => {
     expect(parseStartPayload(command.slice("/factory start ".length))).toEqual({
       request: "Please add x",
       title: "Add x",
-      settings: { branch: "main", merge: "auto", maxRounds: 3, review: true, models: { small: "a/s", big: "a/b", coder: "a/b", reviewer: "a/b" } },
+      settings: { branch: "main", merge: "auto", maxRounds: 3, review: true, models: { small: "a/s", big: "a/b", coder: "a/b" } },
     });
   });
 });
@@ -252,6 +252,25 @@ describe("launchTask failures", () => {
     }
     expect(await listTasks()).toEqual([]);
   }
+
+  test("beforeRecord runs once the worktree on the target exists; its throw undoes the start", async () => {
+    process.env.PATH = pathWithoutAgentWorktree;
+    const repo = makeRepo("repo", "main");
+    const seen: string[] = [];
+    const refusal = launchTask({
+      repo,
+      title: "Raced",
+      request: "r",
+      beforeRecord: async (branch) => {
+        seen.push(branch);
+        expect(git(repo, "branch", "--list", "raced-*")).not.toBe("");
+        throw new Error("main is the branch of a wave");
+      },
+    });
+    await expect(refusal).rejects.toThrow("main is the branch of a wave");
+    expect(seen).toEqual(["main"]);
+    await nothingLeft(repo, "raced");
+  });
 
   test("agent-worktree create failing after its git worktree add: the worktree and branch it left are removed", async () => {
     process.env.FAKE_AW_FAIL = "1";
