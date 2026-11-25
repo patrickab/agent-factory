@@ -14,14 +14,19 @@ import { isTaskSession, registerFactoryTool } from "./tool.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tool-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+// The gates may run inside a factory task, whose runner sets TASK_SESSION_ENV: the tests start outside one.
+const savedTaskSession = process.env[TASK_SESSION_ENV];
 
 beforeEach(() => {
   process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
+  delete process.env[TASK_SESSION_ENV];
 });
 
 afterEach(() => {
   if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+  if (savedTaskSession === undefined) delete process.env[TASK_SESSION_ENV];
+  else process.env[TASK_SESSION_ENV] = savedTaskSession;
 });
 
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));

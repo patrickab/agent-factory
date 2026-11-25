@@ -1,0 +1,63 @@
+import json
+import stat
+
+import pytest
+
+from factory_tui.client import FactoryClient, FactoryCliError, parse_error
+
+
+def fake_cli(tmp_path, script: str):
+    """A fake `factory` executable: a python script that sees argv and writes its answer."""
+    path = tmp_path / "factory"
+    path.write_text(
+        f"#!/usr/bin/env python3\nimport json, sys\naction, params = sys.argv[1], json.loads(sys.argv[2])\n{script}\n"
+    )
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return str(path)
+
+
+def test_call_passes_action_and_json_and_reads_stdout(tmp_path):
+    binary = fake_cli(tmp_path, "print(json.dumps({'action': action, 'params': params}))")
+    assert FactoryClient(binary).call("tasks.timeline", {"id": "abc"}) == {
+        "action": "tasks.timeline",
+        "params": {"id": "abc"},
+    }
+
+
+def test_error_line_becomes_code_and_message(tmp_path):
+    binary = fake_cli(tmp_path, "sys.stderr.write('factory: not_found: no task abc\\n'); sys.exit(1)")
+    with pytest.raises(FactoryCliError) as raised:
+        FactoryClient(binary).call("tasks.get", {"id": "abc"})
+    assert (raised.value.code, raised.value.message) == ("not_found", "no task abc")
+    assert not raised.value.unknown_action
+
+
+def test_unknown_waves_list_means_no_waves(tmp_path):
+    binary = fake_cli(tmp_path, "sys.stderr.write('factory: invalid: unknown action \"waves.list\"\\n'); sys.exit(2)")
+    assert FactoryClient(binary).waves() == []
+
+
+def test_other_waves_list_errors_are_raised(tmp_path):
+    binary = fake_cli(tmp_path, "sys.stderr.write('factory: failed: disk on fire\\n'); sys.exit(1)")
+    with pytest.raises(FactoryCliError, match="disk on fire"):
+        FactoryClient(binary).waves()
+
+
+def test_stderr_without_error_line_is_failed():
+    error = parse_error("Traceback\nboom\n", 3)
+    assert (error.code, error.message) == ("failed", "Traceback\nboom")
+    assert parse_error("", 3).message == "factory exited with 3"
+
+
+def test_non_json_output_and_missing_binary(tmp_path):
+    with pytest.raises(FactoryCliError, match="not JSON"):
+        FactoryClient(fake_cli(tmp_path, "print('hello')")).call("repos.list")
+    with pytest.raises(FactoryCliError, match="not found"):
+        FactoryClient(str(tmp_path / "missing")).call("repos.list")
+
+
+def test_binary_from_env(monkeypatch, tmp_path):
+    binary = fake_cli(tmp_path, "print(json.dumps({'repos': ['/r']}))")
+    monkeypatch.setenv("FACTORY_CLI", binary)
+    assert FactoryClient().repos() == ["/r"]
+    assert json.loads(json.dumps(FactoryClient().binary)) == binary

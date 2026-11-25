@@ -20,6 +20,12 @@ const agent = join(scratch, "agent");
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
+function withoutTaskSession(): Record<string, string> {
+  const env = { ...(process.env as Record<string, string>) };
+  delete env.FACTORY_TASK_SESSION;
+  return env;
+}
+
 beforeEach(() => {
   rmSync(agent, { recursive: true, force: true });
   mkdirSync(join(agent, "factory"), { recursive: true });
@@ -109,7 +115,8 @@ describe("factory-mcp", () => {
       command: "bun",
       args: [join(import.meta.dirname, "mcp.ts")],
       cwd: repo,
-      env: { ...(process.env as Record<string, string>), PI_CODING_AGENT_DIR: agent, GIT_CONFIG_GLOBAL: "/dev/null" },
+      // Not a task session, even when the gates run inside a factory task's runner.
+      env: { ...withoutTaskSession(), PI_CODING_AGENT_DIR: agent, GIT_CONFIG_GLOBAL: "/dev/null" },
       stderr: "pipe",
     });
     const client = new Client({ name: "test", version: "0.0.0" });
