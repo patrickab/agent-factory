@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import factory from "./index.ts";
+import { coderRequest } from "../ops.ts";
 import { modelsCommand } from "../models.ts";
 import type { Draft, Settings } from "../state.ts";
 
@@ -198,7 +199,7 @@ describe("/factory start", () => {
     await pi.start();
     expect(pi.entries.map((entry) => entry.customType)).toEqual(["factory-task", "factory-round", "factory-state"]);
     expect(pi.of("factory-task")[0]).toMatchObject({ branch: "task", mainBranch: "main", baseSha: gitIn(repo, "rev-parse", "HEAD"), protocol: 2 });
-    expect(pi.messages).toEqual(["Add task.txt"]);
+    expect(pi.messages).toEqual([coderRequest("Add task.txt")]);
     expect(pi.notes).toEqual(["error: factory: this session already holds a task"]);
   });
 });
@@ -509,7 +510,7 @@ describe("a task and its target branch (B7)", () => {
     await pi.command("retry");
     expect(pi.states().at(-1)).toBe("running/conflict");
     expect(pi.sent.at(-1)!.options).toEqual({ triggerTurn: true });
-    expect(pi.messages).toEqual(["Add task.txt"]);
+    expect(pi.messages).toEqual([coderRequest("Add task.txt")]);
   });
 });
 

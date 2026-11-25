@@ -12,6 +12,8 @@ import {
   approveTask,
   askSupervisor,
   cancelTask,
+  CODER_REQUEST_LINE,
+  coderRequest,
   initConfig,
   newTaskSession,
   pipelineSteps,
@@ -136,7 +138,11 @@ describe("startTask", () => {
     const pi = fake(addTaskWorktree());
     expect(await startTask(pi.deps, payload())).toEqual({ ok: true });
     expect(pi.entries.map((entry) => entry.customType)).toEqual(["factory-task", "factory-round", "factory-state"]);
-    expect(pi.userMessages).toEqual(["Add task.txt"]);
+    expect(pi.userMessages).toEqual([coderRequest("Add task.txt")]);
+    expect(pi.userMessages[0]!.startsWith("Add task.txt\n")).toBe(true);
+    expect(pi.userMessages[0]!.split(CODER_REQUEST_LINE).length - 1).toBe(1);
+    // The task records the request as the supervisor wrote it: the reviewer reads it without the line.
+    expect(pi.deps.session.snapshot?.task.request).toBe("Add task.txt");
     expect(pi.deps.session.snapshot?.state).toBe("running");
   });
 });

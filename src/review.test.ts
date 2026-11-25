@@ -178,6 +178,22 @@ describe("runReview", () => {
     expect(calls[0].options.timeoutMs).toBeUndefined();
   });
 
+  test("a wave's request file lists its done tasks after the instructions: title, request, the coder's last message", async () => {
+    const calls: { argv: string[]; options: CommandOptions }[] = [];
+    const wave: Task = { ...task, title: "Wave 1", request: "Check it.", branch: "wave" };
+    const waveTasks = [
+      { title: "Add a", request: "add a", lastMessage: "Open risk: a is untested." },
+      { title: "Add b", request: "add b", lastMessage: null },
+    ];
+    await runReview({ exec: async (argv, options) => (calls.push({ argv, options }), child()), root: "/repo", round: 4, task: wave, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => false, wave: true, waveTasks });
+    expect(readFileSync(join(reviewsDir, "round-4.request.md"), "utf8")).toBe(
+      "# Wave 1\n\n## Instructions from the supervisor\n\nCheck it.\n\n## Tasks of the wave\n\n" +
+        "### Add a\n\n#### Request\n\nadd a\n\n#### The coder's last message\n\nOpen risk: a is untested.\n\n" +
+        "### Add b\n\n#### Request\n\nadd b\n\n#### The coder's last message\n\n(none)\n",
+    );
+    expect(calls[0].argv.at(-1)).not.toContain("Open risk");
+  });
+
   test.each([false, true])("a review longer than the old limits is not cut (wave: %p): its verdict counts", async (wave) => {
     // The fake child reports a run of an hour (past the old 5 and 20 minutes): no limit may have stopped it.
     const calls: { argv: string[]; options: CommandOptions }[] = [];

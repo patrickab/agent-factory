@@ -318,6 +318,11 @@ async function review(fold: WaveFold): Promise<boolean | void> {
     if (diff.paths.length === 0) return leave("merged", null);
     const round = fold.reviews.length + 1;
     log(id, `review round ${round}`);
+    // What each done task was asked and its coder's last message (the risks it named): the reviewer may have no shell.
+    const { states, views } = await waveTaskViews(fold);
+    const waveTasks = fold.tasks
+      .filter((spec) => states.get(spec.key) === "done")
+      .map((spec) => ({ title: spec.title, request: spec.request, lastMessage: views.get(spec.key)?.lastMessage ?? null }));
     const data = await runReview({
       exec: runner.run,
       root,
@@ -331,6 +336,7 @@ async function review(fold: WaveFold): Promise<boolean | void> {
       reviewsDir: waveReviewsDir(id),
       cancelled: () => runner.cancelled,
       wave: true,
+      waveTasks,
     });
     const verdict = data.status !== "ok" ? "failed" : data.approved ? "approved" : "rejected";
     const event: NewWaveEvent = {

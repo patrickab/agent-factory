@@ -52,6 +52,14 @@ export const STATUS_KEY = "factory";
 /** pi-host keeps a session with this status from idle eviction. A merge sets it: `/factory approve` starts no agent run. */
 export const LIVENESS_KEY = "session-liveness";
 
+/** The line every request reaches the coder with, after it (`coderRequest`). The task records the request without it. */
+export const CODER_REQUEST_LINE = "This request names what to read; read no other documentation. Ignore diagnostics about lines you did not change.";
+
+/** The request as the coder's first prompt: the request, then `CODER_REQUEST_LINE`. */
+export function coderRequest(request: string): string {
+  return `${request}\n\n${CODER_REQUEST_LINE}`;
+}
+
 export type OpResult = { ok: true; message?: string } | { ok: false; error: string };
 
 /** What a run opens with: `conflict`, the feedback of a rebase that conflicts (the run opens with a `conflict` round), or `failed`, why none opens. */
@@ -316,7 +324,7 @@ export function startTask(deps: OpsDeps, json: string): Promise<OpResult> {
       record(deps, "factory-round", { round: 1, trigger: "start" });
       record(deps, "factory-state", { state: "running", round: 1, reason: "start" });
       // Everything that can fail from here on runs after this prompt: entries reach the file only once a message exists.
-      deps.sendUserMessage(task.request);
+      deps.sendUserMessage(coderRequest(task.request));
       return { ok: true };
     } finally {
       session.starting = false;

@@ -46,11 +46,29 @@ export function reviewRequest(task: Pick<Task, "title" | "request">, followUps: 
   return `${request}\n## Follow-up messages from the user\n\n${messages.join("\n")}`;
 }
 
+/** A task of a wave as its reviewer reads it: what the task was asked, and the coder's last message (its named risks). */
+export interface WaveTaskNote {
+  title: string;
+  request: string;
+  /** Null when the coder left no message. */
+  lastMessage: string | null;
+}
+
+/** The request file of a wave's reviewer: the supervisor's instructions, then every done task (`WaveTaskNote`). */
+export function waveReviewRequest(wave: Pick<Task, "title" | "request">, tasks: WaveTaskNote[]): string {
+  const request = `# ${wave.title}\n\n## Instructions from the supervisor\n\n${wave.request}\n`;
+  if (tasks.length === 0) return request;
+  const notes = tasks.map(
+    (task) => `### ${task.title}\n\n#### Request\n\n${task.request}\n\n#### The coder's last message\n\n${task.lastMessage ?? "(none)"}\n`,
+  );
+  return `${request}\n## Tasks of the wave\n\n${notes.join("\n")}`;
+}
+
 /** The prompt of a wave's reviewer: the wave's branch, the patch file and the supervisor's instructions in a request file. */
-async function wavePrompt({ reviewsDir, round, task }: ReviewInput, patchFile: string): Promise<string> {
+async function wavePrompt({ reviewsDir, round, task, waveTasks }: ReviewInput, patchFile: string): Promise<string> {
   // The request goes into a file, as a task's does: as an argument a long one would exceed the argv limit.
   const requestFile = join(reviewsDir, `round-${round}.request.md`);
-  await writeFile(requestFile, `# ${task.title}\n\n## Instructions from the supervisor\n\n${task.request}\n`);
+  await writeFile(requestFile, waveReviewRequest(task, waveTasks ?? []));
   return (
     `Review the wave "${task.title}": the branch ${task.branch}, rebased onto ${task.mainBranch}, merges into it. ` +
     `The supervisor's instructions are in ${requestFile}, the wave's whole diff against ${task.mainBranch} is the patch file ${patchFile}: ` +
@@ -126,6 +144,8 @@ export interface ReviewInput {
   cancelled: () => boolean;
   /** A wave's review: `task` is the wave (its title, request, branch and target), the prompt `wavePrompt`. */
   wave?: boolean;
+  /** A wave's review: its done tasks, after the instructions in the request file. */
+  waveTasks?: WaveTaskNote[];
 }
 
 async function taskPrompt({ reviewsDir, round, task, followUps }: ReviewInput, patchFile: string): Promise<string> {

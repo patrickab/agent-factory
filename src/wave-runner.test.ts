@@ -195,8 +195,28 @@ describe("the wave runner", () => {
     expect(prompt).toContain(`Review the wave "Wave one": the branch ${BRANCH}, rebased onto main, merges into it.`);
     const requestFile = join(waveReviewsDir(WAVE), "round-1.request.md");
     expect(prompt).toContain(requestFile);
-    expect(readFileSync(requestFile, "utf8").endsWith("## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n")).toBe(true);
+    expect(readFileSync(requestFile, "utf8")).toContain("## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n\n## Tasks of the wave\n");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
+  });
+
+  test("the reviewer's request file holds each done task's title, request and coder's last message, no cancelled task", async () => {
+    await waveRepo();
+    // Task a's coder said what it left open; a third task was cancelled (its record removed).
+    const say = (text: string) => JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
+    writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-a.jsonl`), [JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "done", round: 1, reason: "r" } }), say("Risk: b.txt has no newline check.")].join("\n") + "\n");
+    await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "c", title: "Add nothing", request: "a cancelled request", after: [] }] });
+    await appendWaveEvent(WAVE, { kind: "task", key: "c", taskId: taskId(9), sessionId: `session-${RUN}-c` });
+    expect(await runWave(WAVE)).toBe(0);
+    expect((await getWave()).stage).toBe("merged");
+    const request = readFileSync(join(waveReviewsDir(WAVE), "round-1.request.md"), "utf8");
+    expect(request).toBe(
+      "# Wave one\n\n## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n\n## Tasks of the wave\n\n" +
+        "### Add b\n\n#### Request\n\nadd b\n\n#### The coder's last message\n\nRisk: b.txt has no newline check.\n\n" +
+        "### Add c\n\n#### Request\n\nadd c\n\n#### The coder's last message\n\n(none)\n",
+    );
+    expect(request).not.toContain("a cancelled request");
+    // Large text stays in the file: the prompt only names it.
+    expect(readFileSync(promptLog, "utf8")).not.toContain("add b");
   });
 
   test("merge review: an approved wave waits for approve, its worktree removed", async () => {
