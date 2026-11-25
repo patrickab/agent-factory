@@ -312,6 +312,11 @@ factory --core-path                                     # absolute path of src/c
 - In a task's own session (Pi started by the runner, `FACTORY_TASK_SESSION=1`, or a session holding a `factory-task`
   entry) the tool offers only the actions with `mutates: false`; a mutating one (`tasks.start`, `models.set`, ...)
   answers as unknown. A task's coder starts a task only through `factory_new_task` (below)
+- In a session that declared waves (their `origin`), the interactive terminal UI shows them above the editor
+  (`src/session-widget.ts`): a header with the active count, how many need the supervisor and their cost, then the
+  active waves (those that need the supervisor first, then newest first) and a `<n> finished` line.
+  `/factory waves` opens or closes the finished ones. The notifier's looks refresh it; RPC, JSON and print mode and
+  a task's own session show nothing
 
 Commands (inside a task's own Pi session):
 

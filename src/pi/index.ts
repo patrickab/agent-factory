@@ -7,6 +7,7 @@
  *   /factory retry                                    another coder turn on a blocked or cancelled task
  *   /factory cancel                                   kill the running command group, end `cancelled`
  *   /factory models [add|remove|set ...]              the user's factory model list (`models.ts`, any session)
+ *   /factory waves                                    show or hide the finished waves in this session's widget
  *
  * - After every coder turn (`agent_before_settle`) it runs `hooks.after_code`, `gates`, the protected-path check and
  *   the review. A problem goes back to the coder as a `factory-feedback` message and starts the next round, up to
@@ -37,11 +38,15 @@
  *   task's target branch and merge mode
  * - Notifications (`notifier.ts`): in a session that is not a task's own, the notices of the tasks it started and the
  *   waves it declared arrive as a message that starts a turn (`factory-notice`)
+ * - The waves a session declared show above its editor (`session-widget.ts`), refreshed by the notifier's looks; only
+ *   in the interactive terminal UI (`ctx.mode === "tui"`), never in a task's own session
  * - A task of a wave merges into the wave's branch only until the wave's review began (`waveMergeRefusal`, invariant
  *   2): a merge after that ends the task `blocked`, `merge_failed`, its work stays in its worktree. Its merge gates
  *   are `gates` and `task_gates` (`taskWave`), not `merge_gates`: the wave runs those
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { sessionWidget } from "../session-widget.ts";
+import type { WaveView } from "../waves.ts";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
 import { taskWave, waveMergeRefusal } from "../core.ts";
 import { snapshotTree } from "../git.ts";
@@ -79,6 +84,8 @@ import { errorText } from "../util.ts";
 const ROLE_SECTION = "factory_role";
 /** Tag of the system prompt section that tells the coder how a follow-up on a merged task is carried out. */
 const FOLLOW_UP_SECTION = "factory_followup";
+/** Key of the widget above the editor that lists the session's waves. */
+const WAVES_WIDGET = "factory-waves";
 
 /** The text of the last assistant message of a session branch, empty when there is none. */
 function lastAssistantText(entries: Iterable<{ type: string }>): string {
@@ -181,11 +188,16 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand("factory", {
-    description: "Agent factory: init (draft factory.yaml) | models [add|remove|set ...] | task: start <json> | approve | retry | cancel",
+    description: "Agent factory: init (draft factory.yaml) | models [add|remove|set ...] | waves (show/hide finished waves) | task: start <json> | approve | retry | cancel",
     handler: async (args, ctx) => {
       const [verb = ""] = args.trim().split(/\s+/, 1);
       if (verb === "models") {
         await modelsCommand(args.trim().slice(verb.length).trim(), ctx).catch((error) => ctx.ui.notify(`factory: ${errorText(error)}`, "error"));
+        return;
+      }
+      if (verb === "waves") {
+        widget.showFinished = !widget.showFinished;
+        showWidget();
         return;
       }
       const result = await command(args, deps(ctx)).catch((error): OpResult => ({ ok: false, error: errorText(error) }));
@@ -194,16 +206,45 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  /** The session's waves widget: the views of the notifier's last look, the context of the session it shows in. */
+  const widget: { waves: WaveView[]; showFinished: boolean; ctx: ExtensionContext | undefined } = { waves: [], showFinished: false, ctx: undefined };
+  const showWidget = () => {
+    const { ctx, waves, showFinished } = widget;
+    if (ctx === undefined) return;
+    if (sessionWidget(waves, { showFinished, width: 80 }).length === 0) {
+      ctx.ui.setWidget(WAVES_WIDGET, undefined);
+      return;
+    }
+    ctx.ui.setWidget(WAVES_WIDGET, () => ({ render: (width: number) => sessionWidget(waves, { showFinished, width }), invalidate: () => undefined }));
+  };
+
   let notifier: Notifier | undefined;
   pi.on("session_start", async (_event, ctx) => {
     notifier?.stop();
     notifier = undefined;
+    widget.ctx?.ui.setWidget(WAVES_WIDGET, undefined);
+    widget.ctx = undefined;
+    widget.waves = [];
     // A runner's Pi is a task's own session from the start; a session that gets its task later is checked per look.
     if (process.env[TASK_SESSION_ENV] !== "1") {
+      const taskSession = () => session.snapshot !== undefined || isTaskSession(ctx.sessionManager.getBranch());
+      // The widget only in the interactive terminal UI: not in RPC, JSON or print mode.
+      if (ctx.mode === "tui") widget.ctx = ctx;
       notifier = startNotifier({
         origin: ctx.sessionManager.getSessionId(),
         send: (text) => pi.sendMessage({ customType: "factory-notice", content: text, display: true }, { triggerTurn: true }),
-        isTaskSession: () => session.snapshot !== undefined || isTaskSession(ctx.sessionManager.getBranch()),
+        isTaskSession: () => {
+          const task = taskSession();
+          if (task && widget.ctx !== undefined) {
+            widget.ctx.ui.setWidget(WAVES_WIDGET, undefined);
+            widget.ctx = undefined;
+          }
+          return task;
+        },
+        onWaves: (waves) => {
+          widget.waves = waves;
+          showWidget();
+        },
       });
     }
     session.snapshot = rebuild(ctx.sessionManager.getBranch());
@@ -220,6 +261,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     notifier?.stop();
     notifier = undefined;
+    widget.ctx = undefined;
     session.disposed = true;
     session.runner.cancel();
   });

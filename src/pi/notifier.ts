@@ -8,16 +8,18 @@
  *   them delivered under the lock before `send` hands each to Pi: a notice reaches one session once, also after a
  *   restart and when two sessions race. Looks never overlap: a change during one makes another follow. What is
  *   finished and delivered is not read again: a `done`/`cancelled` task while its session file is unchanged (a
- *   follow-up changes it), a `merged`/`cancelled` wave never (both final)
+ *   follow-up changes it), a `merged`/`cancelled` wave never (both final; its last view is kept for `onWaves`, until
+ *   its file is gone)
  * - `send` is `pi.sendMessage` with `triggerTurn` (public Pi API): the message starts a turn
+ * - `onWaves`: after every look, the views of every wave this origin declared (the session's widget, `session-widget.ts`)
  */
 import { mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { noticeInputs } from "../core.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
 import { pendingNotices } from "../notify.ts";
 import { tasksDir } from "../tasks.ts";
-import { wavesDir } from "../waves.ts";
+import { wavesDir, type WaveView } from "../waves.ts";
 
 export interface NotifierOptions {
   /** This Pi session's id: notices of this origin only. */
@@ -28,6 +30,8 @@ export interface NotifierOptions {
   debounceMs?: number;
   fallbackMs?: number;
   onError?: (error: unknown) => void;
+  /** After every look: the views of all of this origin's waves, the finished ones not read again included. */
+  onWaves?: (waves: WaveView[]) => void;
 }
 
 export interface Notifier {
@@ -65,8 +69,8 @@ export function startNotifier(options: NotifierOptions): Notifier {
   let sessionIds = new Set<string>();
   /** This origin's finished tasks whose notices are delivered, by id: their session file as last read. */
   const finishedTasks = new Map<string, { sessionId: string; path: string; stamp: string | null }>();
-  /** This origin's waves that are final and delivered: never read again. */
-  const finishedWaves = new Set<string>();
+  /** This origin's waves that are final and delivered, by id: never read again, their view as last read. */
+  const finishedWaves = new Map<string, WaveView>();
 
   const watchDir = (dir: string, filter: (name: string | Buffer | null) => boolean) => {
     if (stopped || watchers.has(dir)) return;
@@ -90,7 +94,8 @@ export function startNotifier(options: NotifierOptions): Notifier {
       if (fileStamp(seen.path) === seen.stamp) skip.add(id);
       else finishedTasks.delete(id);
     }
-    const { tasks, waves } = await noticeInputs(origin, { tasks: skip, waves: finishedWaves });
+    for (const id of finishedWaves.keys()) if (fileStamp(join(wavesDir(), `${id}.jsonl`)) === null) finishedWaves.delete(id);
+    const { tasks, waves } = await noticeInputs(origin, { tasks: skip, waves: new Set(finishedWaves.keys()) });
     sessionIds = new Set([...tasks.map((task) => task.sessionId), ...[...finishedTasks.values()].map((seen) => seen.sessionId)]);
     for (const task of tasks) {
       if (task.sessionPath !== null) watchDir(dirname(task.sessionPath), (name) => name === null || [...sessionIds].some((id) => basename(String(name)).includes(id)));
@@ -104,7 +109,8 @@ export function startNotifier(options: NotifierOptions): Notifier {
         finishedTasks.set(task.id, { sessionId: task.sessionId, path: task.sessionPath, stamp: fileStamp(task.sessionPath) });
       }
     }
-    for (const wave of waves) if (FINAL_WAVE_STAGES.includes(wave.view.stage)) finishedWaves.add(wave.view.id);
+    for (const wave of waves) if (FINAL_WAVE_STAGES.includes(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);
+    if (!stopped) options.onWaves?.([...waves.map((wave) => wave.view).filter((view) => !finishedWaves.has(view.id)), ...finishedWaves.values()]);
   };
 
   const look = (): Promise<void> => {

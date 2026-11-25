@@ -11,6 +11,7 @@ import factory from "./index.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { writeTask, type TaskRecord } from "../tasks.ts";
+import { createWave } from "../waves.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-notifier-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -60,7 +61,8 @@ async function taskOf(n: number, origin: string | null, state: string): Promise<
 }
 
 /** The extension in a session `sessionId`; `branch` = the session's entries. */
-function piSession(sessionId: string, branch: { type: string; customType?: string; data?: unknown }[] = []) {
+function piSession(sessionId: string, branch: { type: string; customType?: string; data?: unknown }[] = [], mode?: string) {
+  const widgets: (string[] | undefined)[] = [];
   const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
   const sent: { message: { customType: string; content: string }; options: unknown }[] = [];
   const pi = {
@@ -74,13 +76,20 @@ function piSession(sessionId: string, branch: { type: string; customType?: strin
   };
   const ctx = {
     cwd: scratch,
-    ui: { setStatus: () => undefined, notify: () => undefined },
+    mode,
+    ui: {
+      setStatus: () => undefined,
+      notify: () => undefined,
+      // The widget as rendered 60 columns wide; undefined when removed.
+      setWidget: (_key: string, content: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined) =>
+        widgets.push(content?.(undefined, undefined).render(60)),
+    },
     sessionManager: { getSessionId: () => sessionId, getBranch: () => branch },
   };
   factory(pi as unknown as ExtensionAPI);
   const emit = (name: string) => handlers.get(name)?.({}, ctx);
   stops.push(() => void emit("session_shutdown"));
-  return { sent, emit };
+  return { sent, emit, widgets };
 }
 
 async function until(check: () => boolean, ms = 5_000): Promise<void> {
@@ -174,5 +183,32 @@ describe("the extension delivers notices", () => {
     await Bun.sleep(300);
     expect(runner.sent).toEqual([]);
     expect(own.sent).toEqual([]);
+  });
+});
+
+describe("the session's waves widget", () => {
+  const declare = (n: number, origin: string) =>
+    createWave({ id: ID(n), repo: join(scratch, "repo"), tag: `ui/w${n}`, plan: null, title: `wave ${n}`, request: "r", branch: `main-ui-w${n}`, target: "main", base: "abc", origin, createdAt: `2026-01-01T00:00:0${n}.000Z`, overrides: {} });
+
+  test("in the terminal UI: the waves this session declared, above the editor", async () => {
+    await declare(1, "sess-A");
+    await declare(2, "sess-B");
+    const a = piSession("sess-A", [], "tui");
+    await a.emit("session_start");
+    await until(() => a.widgets.some((lines) => lines !== undefined));
+    const lines = a.widgets.findLast((shown) => shown !== undefined)!;
+    expect(lines[0]).toStartWith("Factory · 1 active");
+    expect(lines.slice(1).map((line) => line.trim().split(/\s+/)[1])).toEqual(["ui/w1"]);
+  });
+
+  test("no widget in RPC or print mode, nor in a task's own session; none without waves", async () => {
+    await declare(1, "sess-A");
+    const rpc = piSession("sess-A", [], "rpc");
+    const print = piSession("sess-A", [], "print");
+    const own = piSession("sess-A", [{ type: "custom", customType: "factory-task", data: {} }], "tui");
+    const none = piSession("sess-C", [], "tui");
+    for (const session of [rpc, print, own, none]) await session.emit("session_start");
+    await Bun.sleep(300);
+    for (const session of [rpc, print, own, none]) expect(session.widgets.filter((lines) => lines !== undefined)).toEqual([]);
   });
 });
