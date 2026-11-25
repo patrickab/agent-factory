@@ -9,7 +9,8 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ACTIONS } from "../core.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
-import { agentActions, factoryToolParameters, isTaskSession, registerFactoryTool } from "./tool.ts";
+import { agentActions, factoryToolParameters } from "../factory-tool.ts";
+import { isTaskSession, registerFactoryTool } from "./tool.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tool-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;

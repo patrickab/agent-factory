@@ -6,7 +6,8 @@
     ".": "./src/core.ts"
   },
   "bin": {
-    "factory": "./src/cli.ts"
+    "factory": "./src/cli.ts",
+    "factory-mcp": "./src/mcp.ts"
   },
   "scripts": {
     "test": "bun test",
@@ -19,5 +20,8 @@
   },
   "pi": {
     "extensions": ["./src/pi/index.ts"]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2"
   }
 }
