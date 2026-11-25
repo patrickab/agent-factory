@@ -81,6 +81,7 @@ import {
   stuckKeys,
   unreachableKeys,
   unlockWave,
+  requireTaskModels,
   validateTaskSpecs,
   waveCounts,
   waveTaskState,
@@ -168,6 +169,18 @@ const SHORT_ID_CHARS = 8;
 const REPO: Schema = { type: "string", description: "A path inside the git repository. Default: the current directory" };
 const ID: Schema = { type: "string", description: "The task id or a unique prefix of it" };
 const WAVE_ID: Schema = { type: "string", description: "The wave id or a unique prefix of it" };
+/** One task of `waves.start` / `waves.add`. */
+const WAVE_TASK_ITEM: Schema = {
+  type: "object",
+  required: ["key", "title", "request"],
+  properties: {
+    key: { type: "string" },
+    title: { type: "string" },
+    request: { type: "string" },
+    after: { type: "array", items: { type: "string" } },
+    model: { type: "string", description: "This task's coder model (provider/model on the factory models list); default the wave's coder model" },
+  },
+};
 const TAG: Schema = { type: "string", description: "A task tag: segments of A-Z a-z 0-9 . _ @ + - joined by /" };
 const TAG_FILTER: Schema = { type: "string", description: "Only the tasks whose tag is this one or lies under it (a holds a/b, not ab)" };
 const WAIT_TIMEOUT_MS = { default: 600_000, minimum: 1_000, maximum: 3_600_000 };
@@ -294,12 +307,9 @@ export const ACTIONS = {
       request: { type: "string", description: "The reviewer's instructions for the wave's whole diff" },
       tasks: {
         type: "array",
-        description: "The wave's tasks: key unique in the wave (A-Z a-z 0-9 . _ -), title, request (full and self-contained for the coder), after: keys this task waits for",
-        items: {
-          type: "object",
-          required: ["key", "title", "request"],
-          properties: { key: { type: "string" }, title: { type: "string" }, request: { type: "string" }, after: { type: "array", items: { type: "string" } } },
-        },
+        description:
+          "The wave's tasks: key unique in the wave (A-Z a-z 0-9 . _ -), title, request (full and self-contained for the coder), after: keys this task waits for, model: this task's coder model (provider/model on the factory models list; default the wave's coder model, the reviewer's stays the wave's)",
+        items: WAVE_TASK_ITEM,
       },
       plan: { type: "string", description: "The memory_store path of the plan the wave works from (only stored)" },
       overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: SETTINGS_PROPERTIES },
@@ -311,7 +321,7 @@ export const ACTIONS = {
     "Add tasks to a wave (after may name its existing keys); a rejected, blocked, reviewing or waiting_approve wave builds again. Pending tasks that can never start (a task they wait for was cancelled or removed) are dropped: they count as cancelled. Answers {wave}",
     {
       id: WAVE_ID,
-      tasks: { type: "array", description: "Tasks as for waves.start", items: { type: "object" } },
+      tasks: { type: "array", description: "Tasks as for waves.start: key, title, request, after?, model? (this task's coder model, on the factory models list)", items: WAVE_TASK_ITEM },
     },
     ["id", "tasks"],
     true,
@@ -1194,7 +1204,7 @@ async function waveLook(file: WaveFile): Promise<WaveLook> {
   const tasks = fold.tasks.map((task) => {
     const taskUsage = views.get(task.key)?.usage ?? null;
     usage = addUsage(usage, taskUsage);
-    return { key: task.key, title: task.title, after: task.after, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: taskUsage };
+    return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: taskUsage };
   });
   for (const review of fold.reviews) usage = addUsage(usage, review.usage);
   // The predicates of the wave actions' own checks, as one list for clients.
@@ -1240,7 +1250,9 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
       [record] = orphans.splice(orphan, 1);
     } else {
       try {
-        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, tag: declaration.tag, plan: declaration.plan, wave: id, env, signal });
+        // The task's own model is its coder's; the reviewer's stays the wave's.
+        const taskOverrides: StoredSettings = task.model === null ? overrides : { ...overrides, models: { ...models, coder: task.model } };
+        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides: taskOverrides, tag: declaration.tag, plan: declaration.plan, wave: id, env, signal });
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
@@ -1522,6 +1534,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     if (request === undefined) throw new FactoryError("invalid", "waves.start needs a request (the reviewer's instructions) that is not empty");
     if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "waves.start: plan must not be empty");
     const specs = validateTaskSpecs(params.tasks);
+    await requireTaskModels(specs);
     let target: string | undefined;
     let overrides: WaveOverrides;
     try {
@@ -1581,7 +1594,10 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const file = await findWave(params.id);
     const { id } = file.declaration;
     // Task states only move on: pending tasks that can never start now never will (a cancel is final).
-    const { states } = await waveTaskViews(foldWave(file.declaration, file.events));
+    const current = foldWave(file.declaration, file.events);
+    const { states } = await waveTaskViews(current);
+    // The models list is read before the log lock; the specs are checked again under it.
+    await requireTaskModels(validateTaskSpecs(params.tasks, current.tasks));
     // Checked and appended under the log lock: a runner's stage change after it loses, never the added tasks.
     await busyAsFactoryError(() =>
       appendWaveEvents(id, (fold) => {

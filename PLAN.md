@@ -39,7 +39,7 @@ event. The current state is the fold of the events, as a task's state is the fol
 
 | Kind | Carries |
 |---|---|
-| `tasks` | tasks added: `[{key, title, request, after: [keys]}]` |
+| `tasks` | tasks added: `[{key, title, request, after: [keys], model?}]` (`model`: the task's coder model, on the factory models list; absent: the wave's) |
 | `task` | a task started: `key`, `taskId`, `sessionId` |
 | `stage` | the new stage, a reason for `blocked` |
 | `gate` | which gates, result, duration, log path |
@@ -54,7 +54,7 @@ event. The current state is the fold of the events, as a task's state is the fol
 
 | Action | Does |
 |---|---|
-| `waves.start {repo, tag, title, request, tasks, plan?, overrides?}` | declares the wave, creates the branch, starts what can start. `overrides` as for tasks (`branch` = the target, `models`, `maxRounds`, `merge`) |
+| `waves.start {repo, tag, title, request, tasks, plan?, overrides?}` | declares the wave, creates the branch, starts what can start; a task's `model` runs its coder (the reviewer's stays the wave's). `overrides` as for tasks (`branch` = the target, `models`, `maxRounds`, `merge`) |
 | `waves.add {id, tasks}` | adds tasks (fixes, or work found late). A `rejected`, `blocked` or `reviewing` wave goes back to `building` |
 | `waves.get {id}` · `waves.list {repo?, tag?}` | a `WaveView`: declaration, stage, tasks with their state and session ids, counts, reviews, merge, usage, remote |
 | `waves.timeline {id, since?}` | the events |

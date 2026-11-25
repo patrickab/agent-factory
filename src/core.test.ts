@@ -1107,7 +1107,7 @@ describe("waves", () => {
     await until(async () => (await getWave(wave.id)).tasks.filter((task) => task.taskId !== null).length === 2);
     wave = await getWave(wave.id);
     expect([wave.running, wave.interrupted]).toEqual([true, false]);
-    expect(taskOf(wave, "b")).toEqual({ key: "b", title: "Task b", after: ["a"], taskId: null, sessionId: null, state: "pending", usage: null });
+    expect(taskOf(wave, "b")).toEqual({ key: "b", title: "Task b", after: ["a"], model: null, taskId: null, sessionId: null, state: "pending", usage: null });
     for (const key of ["a", "c"]) {
       const task = taskOf(wave, key);
       const record = await recordById(task.taskId);
@@ -1185,6 +1185,43 @@ describe("waves", () => {
     await appendWaveEvent(wave.id, { kind: "stage", stage: "merged", reason: null });
     await expectError(callAction("waves.add", { id: wave.id, tasks: [spec("late")] }), "refused", "is merged");
     await expectError(callAction("waves.add", { id: "ffffffff", tasks: [spec("late")] }), "not_found", "no wave");
+  }, 30_000);
+
+  test("a task's own model runs its coder, its neighbours run with the wave's; the reviewer's stays the wave's", async () => {
+    const repo = await registeredRepo();
+    const models = { coder: "a/b", reviewer: "a/b" };
+    const wave = await startWave(repo, [{ ...spec("cheap"), model: "c/d" }, spec("other")], { overrides: { models } });
+    expect(taskOf(wave, "cheap").model).toBe("c/d");
+    expect(taskOf(wave, "other").model).toBeNull();
+    await until(async () => (await getWave(wave.id)).tasks.every((task) => task.taskId !== null));
+    const settingsOf = async (key: string) => ((await callAction("tasks.get", { id: taskOf(await getWave(wave.id), key).taskId })) as TaskView).settings?.models;
+    expect(await settingsOf("cheap")).toEqual({ coder: "c/d", reviewer: "a/b" });
+    expect(await settingsOf("other")).toEqual(models);
+    const [tasks] = (await readWave(wave.id)).events;
+    expect(tasks).toMatchObject({ kind: "tasks", tasks: [{ key: "cheap", model: "c/d" }, { key: "other" }] });
+    expect(tasks.kind === "tasks" && "model" in tasks.tasks[1]).toBe(false);
+    expect((await readWave(wave.id)).declaration.overrides.models).toEqual(models);
+  });
+
+  test("a task's model not on the factory models list is invalid before anything is created; waves.add takes and checks one too", async () => {
+    const repo = await registeredRepo();
+    const start = (tasks: unknown[]) => callAction("waves.start", { tag: TAG, title: "t", request: "r", tasks }, { cwd: repo });
+    await expectError(start([spec("a"), { ...spec("b"), model: "x/y" }]), "invalid", "task b: the model x/y is not a factory model (factory models: a/b, c/d)");
+    await expectError(start([{ ...spec("a"), model: "sonnet" }]), "invalid", 'tasks[0].model must be "provider/model"');
+    await expectError(start([{ ...spec("a"), model: 4 }]), "invalid", "tasks[0].model");
+    expect(git(repo, "branch", "--list", "main-*")).toBe("");
+    expect(await listWaves()).toEqual([]);
+    expect(await listTasks()).toEqual([]);
+
+    const wave = await startWave(repo, [spec("a")]);
+    await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null);
+    const add = (tasks: unknown[]) => callAction("waves.add", { id: wave.id, tasks });
+    const before = (await readWave(wave.id)).events.length;
+    await expectError(add([{ ...spec("bad"), model: "x/y" }]), "invalid", "factory models: a/b, c/d");
+    expect((await readWave(wave.id)).events).toHaveLength(before);
+    const added = ((await add([{ ...spec("fix", ["a"]), model: "c/d" }])) as { wave: WaveView }).wave;
+    expect(taskOf(added, "fix")).toMatchObject({ model: "c/d", state: "pending" });
+    expect((await readWave(wave.id)).events.at(-1)).toMatchObject({ kind: "tasks", tasks: [{ key: "fix", model: "c/d" }] });
   }, 30_000);
 
   test("every validation error of waves.start, and none leaves a branch or a wave", async () => {

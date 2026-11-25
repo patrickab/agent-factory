@@ -150,16 +150,20 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 ### Waves (`src/waves.ts`, actions in `src/core.ts`)
 
 - A wave is a declared set of tasks on one branch: `waves.start {repo, tag, title, request, tasks, plan?, overrides?}`
-  (`mutates: true`) checks the specs (`tasks: [{key, title, request, after?}]`, `key` unique of `[A-Za-z0-9._-]`,
-  `after` keys of the wave, no cycle), refuses an unregistered repo, a target (`overrides.branch`, else the repo's
+  (`mutates: true`) checks the specs (`tasks: [{key, title, request, after?, model?}]`, `key` unique of
+  `[A-Za-z0-9._-]`, `after` keys of the wave, no cycle, `model` on the factory models list, else `invalid` naming the
+  list), refuses an unregistered repo, a target (`overrides.branch`, else the repo's
   branch) without a committed `factory.yaml` and an existing wave branch `<target>-<tag with "/" as "-">`, creates that
   branch off the target's tip (`base`), writes the record and pokes the wave's runner, which starts every task whose
   `after` are all `done`. `origin` is the declaring Pi session. Answers `{wave}`
 - `overrides` are stored with the wave: its tasks start with their `models`, `maxRounds`, `review`, target = the wave
   branch and `merge: auto` (a task merges into the wave branch by itself); `merge` is the wave's own
+- A task's `model` (`provider/model`) is its coder's model, stored in the `tasks` event and shown as
+  `WaveView.tasks[].model` (null: the wave's coder model, also for logs written before the field). The reviewer's model
+  stays the wave's: a chain of easy tasks runs on a cheaper model without a wave of its own
 - The wave's tasks carry its `tag`, `plan` and `wave` id; `tasks.start` cannot set `wave` (a task joins a wave only
   through `waves.start`/`waves.add`)
-- `waves.add {id, tasks}`: more tasks (`after` may name existing keys); a `rejected`, `blocked`, `reviewing` or
+- `waves.add {id, tasks}`: more tasks (specs as for `waves.start`, `model` too; `after` may name existing keys); a `rejected`, `blocked`, `reviewing` or
   `waiting_approve` wave goes back to `building`; refused when `merged`, `cancelled` or `merging`. Pending tasks that
   can never start (a task they wait for was cancelled or removed) are dropped (`dropped` in the `tasks` event): they
   count as cancelled. Added during `reviewing`, the running review is killed at once

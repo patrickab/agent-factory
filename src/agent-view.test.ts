@@ -39,6 +39,7 @@ const waveTask = (key: string, state: string, after: string[] = [], taskId: stri
   key,
   title: `the ${key}`,
   after,
+  model: null,
   taskId: state === "pending" ? null : taskId,
   sessionId: state === "pending" ? null : SESSION,
   state,

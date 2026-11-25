@@ -16,7 +16,7 @@ import { errorText } from "./util.ts";
 
 type Role = (typeof ROLES)[number];
 
-const MODEL_ID = /^[^/\s]+\/\S+$/;
+export const MODEL_ID = /^[^/\s]+\/\S+$/;
 
 const NO_MODELS_MESSAGE = "no factory models are set (set them with /factory models)";
 
