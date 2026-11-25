@@ -243,29 +243,29 @@ describe("waves", () => {
     const repo = makeRepo();
     const id = `20000000-${RUN}-4000-8000-000000000001`;
     await writtenWave(id, repo, "factory/w9");
-    const usage = (input: number, output: number, total: number) => ({ type: "message", message: { role: "assistant", usage: { input, output, cost: { total } } } });
+    const usage = (input: number, output: number, total: number, cacheRead = 0) => ({ type: "message", message: { role: "assistant", usage: { input, output, cacheRead, cost: { total } } } });
     const state = (name: string) => ({ type: "custom", customType: "factory-state", data: { state: name, round: 1, reason: "r" } });
     const done = { ...fakeRecord(ID_1, repo), wave: id };
     const cancelled = { ...fakeRecord(ID_2, repo), wave: id };
     for (const record of [done, cancelled]) await writeTask(record);
-    writeSession(done, [state("running"), usage(10, 5, 0.5), state("done")]);
-    writeSession(cancelled, [state("running"), usage(1, 1, 0.25), state("cancelled")]);
+    writeSession(done, [state("running"), usage(10, 5, 0.5, 3000), state("done")]);
+    writeSession(cancelled, [state("running"), usage(1, 1, 0.25, 500), state("cancelled")]);
     await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a"), spec("b"), spec("c", ["a"]), spec("gone")] });
     await appendWaveEvent(id, { kind: "task", key: "a", taskId: done.id, sessionId: done.sessionId });
     await appendWaveEvent(id, { kind: "task", key: "b", taskId: cancelled.id, sessionId: cancelled.sessionId });
     await appendWaveEvent(id, { kind: "task", key: "gone", taskId: ID_3, sessionId: "session-gone" });
-    const review = { round: 1, sessionId: "rev", model: "a/b", verdict: "rejected" as const, status: "ok", findings: [], usage: { input: 100, output: 50, cost: 1 }, wallMs: 5 };
+    const review = { round: 1, sessionId: "rev", model: "a/b", verdict: "rejected" as const, status: "ok", findings: [], usage: { input: 100, output: 50, cacheRead: 7, cacheWrite: 2, cost: 1 }, wallMs: 5 };
     await appendWaveEvent(id, { kind: "review", ...review });
     const wave = await getWave(id);
     expect(wave.tasks.map((task) => [task.key, task.state, task.usage])).toEqual([
-      ["a", "done", { input: 10, output: 5, cost: 0.5 }],
-      ["b", "cancelled", { input: 1, output: 1, cost: 0.25 }],
+      ["a", "done", { input: 10, output: 5, cacheRead: 3000, cacheWrite: 0, cost: 0.5 }],
+      ["b", "cancelled", { input: 1, output: 1, cacheRead: 500, cacheWrite: 0, cost: 0.25 }],
       ["c", "pending", null],
       // A task whose record was removed never finishes: it counts as cancelled.
       ["gone", "cancelled", null],
     ]);
     expect(wave.counts).toEqual({ total: 2, done: 1 });
-    expect(wave.usage).toEqual({ input: 111, output: 56, cost: 1.75 });
+    expect(wave.usage).toEqual({ input: 111, output: 56, cacheRead: 3507, cacheWrite: 2, cost: 1.75 });
     expect(wave.reviews).toEqual([{ at: expect.any(String), ...review }]);
     // Not resting and no runner: interrupted, whatever the stage.
     expect([wave.running, wave.interrupted]).toEqual([false, true]);

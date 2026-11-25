@@ -207,7 +207,7 @@ describe("foldWave", () => {
       verdict: "rejected" as const,
       status: "ok",
       findings: [{ severity: "major" as const, file: "src/a.ts", line: 3, text: "wrong" }],
-      usage: { input: 10, output: 5, cost: 0.1 },
+      usage: { input: 10, output: 5, cacheRead: 40, cacheWrite: 2, cost: 0.1 },
       wallMs: 900,
     };
     const fold = foldWave(declaration(ONE), [

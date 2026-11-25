@@ -29,7 +29,7 @@ function task(over: Partial<TaskView> = {}): TaskView {
     running: false,
     interrupted: false,
     settings: null,
-    usage: { input: 1, output: 1, cost: 2.1 },
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 2.1 },
     lastMessage: null,
     failure: null,
     review: null,

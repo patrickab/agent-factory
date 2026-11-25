@@ -347,7 +347,7 @@ async function review(fold: WaveFold): Promise<boolean | void> {
       verdict,
       status: data.status,
       findings: data.findings.map((finding) => ({ severity: finding.severity, file: finding.file, line: finding.line, text: finding.text })),
-      usage: { input: data.usage.input, output: data.usage.output, cost: data.usage.cost },
+      usage: { input: data.usage.input, output: data.usage.output, cacheRead: data.usage.cacheRead, cacheWrite: data.usage.cacheWrite, cost: data.usage.cost },
       wallMs: data.wallMs,
     };
     let moved: boolean;

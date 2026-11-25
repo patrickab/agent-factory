@@ -160,7 +160,7 @@ export async function waveTaskViews(fold: WaveFold): Promise<{ states: Map<strin
 
 function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["usage"] {
   if (usage === null) return sum;
-  return { input: (sum?.input ?? 0) + usage.input, output: (sum?.output ?? 0) + usage.output, cost: (sum?.cost ?? 0) + usage.cost };
+  return { input: (sum?.input ?? 0) + usage.input, output: (sum?.output ?? 0) + usage.output, cacheRead: (sum?.cacheRead ?? 0) + usage.cacheRead, cacheWrite: (sum?.cacheWrite ?? 0) + usage.cacheWrite, cost: (sum?.cost ?? 0) + usage.cost };
 }
 
 /**

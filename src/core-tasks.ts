@@ -72,7 +72,7 @@ export interface TaskView {
   /** The settings of the session's `factory-task` entry, null before it. */
   settings: Settings | null;
   /** Coder messages and reviews together; `input` is uncached input tokens. Null before either. */
-  usage: { input: number; output: number; cost: number } | null;
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number } | null;
   /** The coder's last message (its text), null before one. The answer to the commit message ask does not count. Added in factory/w2. */
   lastMessage: string | null;
   /**
@@ -215,8 +215,10 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
   let settings: Settings | null = null;
   let question: string | null = null;
   let usage: TaskView["usage"] = null;
-  const addUsage = (input: unknown, output: unknown, cost: unknown) => {
-    usage ??= { input: 0, output: 0, cost: 0 };
+  const addUsage = (input: unknown, output: unknown, cost: unknown, cacheRead: unknown, cacheWrite: unknown) => {
+    usage ??= { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    usage.cacheRead += numberOr0(cacheRead);
+    usage.cacheWrite += numberOr0(cacheWrite);
     usage.input += numberOr0(input);
     usage.output += numberOr0(output);
     usage.cost += numberOr0(cost);
@@ -234,11 +236,11 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
       settings = task.settings as unknown as Settings;
     }
     const review = customData(entry, "factory-review");
-    if (review && isRecord(review.usage)) addUsage(review.usage.input, review.usage.output, review.usage.cost);
+    if (review && isRecord(review.usage)) addUsage(review.usage.input, review.usage.output, review.usage.cost, review.usage.cacheRead, review.usage.cacheWrite);
     const message = assistantMessage(entry);
     if (message && isRecord(message.usage)) {
-      const { input, output, cost } = message.usage;
-      addUsage(input, output, isRecord(cost) ? cost.total : undefined);
+      const { input, output, cost, cacheRead, cacheWrite } = message.usage;
+      addUsage(input, output, isRecord(cost) ? cost.total : undefined, cacheRead, cacheWrite);
     }
   }
   const running = (await liveRunners(record)).length > 0;

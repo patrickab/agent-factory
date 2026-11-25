@@ -43,7 +43,7 @@ const findings = process.env.FAKE_VERDICT === "reject" ? [{ file: "b.txt", line:
 const emit = (record) => console.log(JSON.stringify(record));
 emit({ type: "session", id });
 emit({ type: "tool_execution_end", toolName: "submit_verdict", isError: false, result: { details: { findings } } });
-emit({ type: "message_end", message: { role: "assistant", usage: { input: 100, output: 20, cost: { total: 0.5 } } } });
+emit({ type: "message_end", message: { role: "assistant", usage: { input: 100, output: 20, cacheRead: 900, cacheWrite: 30, cost: { total: 0.5 } } } });
 `,
 );
 chmodSync(join(fakeBin, "pi"), 0o755);
@@ -184,10 +184,10 @@ describe("the wave runner", () => {
     expect(git(repo, "rev-parse", `refs/heads/${BRANCH}`)).toBe(git(repo, "rev-parse", "main"));
     expect(wave.merge).toEqual({ at: expect.any(String), from: moved, to: git(repo, "rev-parse", "main"), queueMs: expect.any(Number) });
     expect(wave.reviews).toEqual([
-      { at: expect.any(String), round: 1, sessionId: "11111111-2222-4333-8444-555555555555", model: null, verdict: "approved", status: "ok", findings: [], usage: { input: 100, output: 20, cost: 0.5 }, wallMs: expect.any(Number) },
+      { at: expect.any(String), round: 1, sessionId: "11111111-2222-4333-8444-555555555555", model: null, verdict: "approved", status: "ok", findings: [], usage: { input: 100, output: 20, cacheRead: 900, cacheWrite: 30, cost: 0.5 }, wallMs: expect.any(Number) },
     ]);
     expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", true]]);
-    expect(wave.usage).toEqual({ input: 100, output: 20, cost: 0.5 });
+    expect(wave.usage).toEqual({ input: 100, output: 20, cacheRead: 900, cacheWrite: 30, cost: 0.5 });
     const timeline = (await callAction("waves.timeline", { id: WAVE })) as { events: { kind: string; stage?: string }[] };
     expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "gate", "review", "merging", "merge", "merged"]);
     // The reviewer got the wave's whole diff and its request verbatim.

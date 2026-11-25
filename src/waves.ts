@@ -29,7 +29,7 @@ const LOG_LOCK_WAIT_MS = 10_000;
 
 export type WaveStage = "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled";
 export type WaveReason = "conflict" | "gates" | "dirty" | "infra" | "review_failed";
-export type Usage = { input: number; output: number; cost: number };
+export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 
 /**
  * `key` unique in the wave, `[A-Za-z0-9._-]+`; `after` = keys of the same wave; `model`: which of the wave's two models
@@ -213,7 +213,9 @@ function oneOf<T extends string>(raw: Record<string, unknown>, key: string, valu
 function usageOf(raw: unknown): Usage | null {
   if (raw === null || raw === undefined) return null;
   if (!isRecord(raw)) throw new Error("usage must be an object or null");
-  return { input: num(raw, "input"), output: num(raw, "output"), cost: num(raw, "cost") };
+  // Old log entries predate the cache fields: absent reads as 0.
+  const cache = (key: string) => (raw[key] === undefined ? 0 : num(raw, key));
+  return { input: num(raw, "input"), output: num(raw, "output"), cacheRead: cache("cacheRead"), cacheWrite: cache("cacheWrite"), cost: num(raw, "cost") };
 }
 
 export function parseWaveOverrides(raw: unknown, prefix = "overrides."): WaveOverrides {

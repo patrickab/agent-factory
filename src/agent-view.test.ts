@@ -29,7 +29,7 @@ function task(over: Partial<TaskView> = {}): TaskView {
     running: true,
     interrupted: false,
     settings: { branch: "master", merge: "auto", maxRounds: 3, review: true, models: { coder: "anthropic/opus", reviewer: "openai/gpt" } },
-    usage: { input: 1200, output: 300, cost: 2.1 },
+    usage: { input: 1200, output: 300, cacheRead: 0, cacheWrite: 0, cost: 2.1 },
     lastMessage: null,
     failure: null,
     review: null,
@@ -48,7 +48,7 @@ const waveTask = (key: string, state: string, after: string[] = [], taskId: stri
   taskId: state === "pending" ? null : taskId,
   sessionId: state === "pending" ? null : SESSION,
   state,
-  usage: state === "pending" ? null : { input: 1, output: 1, cost: 1 },
+  usage: state === "pending" ? null : { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 1 },
 });
 
 function wave(over: Partial<WaveView> = {}): WaveView {
@@ -75,7 +75,7 @@ function wave(over: Partial<WaveView> = {}): WaveView {
     gates: [],
     merge: null,
     remote: null,
-    usage: { input: 10, output: 10, cost: 18.4 },
+    usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, cost: 18.4 },
     actions: ["waves.add", "waves.cancel"],
     ...over,
   };
@@ -89,7 +89,7 @@ const review = (verdict: "approved" | "rejected" | "failed", findings: WaveView[
   verdict,
   status: verdict === "failed" ? "malformed" : "ok",
   findings,
-  usage: { input: 1, output: 1, cost: 0.9 },
+  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.9 },
   wallMs: 360_000,
 });
 
