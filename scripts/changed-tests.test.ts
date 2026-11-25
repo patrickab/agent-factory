@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { changedTests, reachedTests } from "./changed-tests.ts";
+import { allTests, changedTests, defaultBase, jobCount, reachedTests, runFiles } from "./changed-tests.ts";
 
 /** A fixture tree: a chain a <- b <- c (c imports b imports a), each with its test, and an unrelated d. */
 const TREE: Record<string, string> = {
@@ -83,5 +83,41 @@ describe("changedTests", () => {
     gitIn("mv", "src/no-test.ts", "src/moved.ts");
     commit();
     expect(changedTests(root, base)).toEqual(["src/uses-no-test.test.ts"]);
+  });
+});
+
+describe("running the reached files", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "changed-tests-run-")));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const write = (path: string, content: string) => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), content);
+  };
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" }).toString().trim();
+  git("init", "-q", "-b", "main");
+  write("ok.test.ts", 'import { expect, test } from "bun:test";\ntest("ok", () => expect(1).toBe(1));\n');
+  write("bad.test.ts", 'import { expect, test } from "bun:test";\ntest("bad", () => expect(1).toBe(2));\n');
+  // Fails on its first run only: the marker file it leaves makes the second one pass.
+  write("once.test.ts", 'import { expect, test } from "bun:test";\nimport { existsSync, writeFileSync } from "node:fs";\ntest("once", () => { const seen = existsSync("seen"); writeFileSync("seen", ""); expect(seen).toBe(true); });\n');
+  git("add", "-A");
+  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base");
+
+  test("jobs: the cores but two, at least one, FACTORY_TEST_JOBS over them", () => {
+    expect(jobCount({}, 8)).toBe(6);
+    expect(jobCount({}, 2)).toBe(1);
+    expect(jobCount({ FACTORY_TEST_JOBS: "3" }, 8)).toBe(3);
+    expect(jobCount({ FACTORY_TEST_JOBS: "none" }, 8)).toBe(6);
+  });
+
+  test("the base of a merge gate is the merge base with the default branch, all tests are every tracked test file", () => {
+    expect(defaultBase(root)).toBe(git("rev-parse", "HEAD"));
+    expect(allTests(root)).toEqual(["bad.test.ts", "ok.test.ts", "once.test.ts"]);
+  });
+
+  test("a failing file fails with its output, a file that passes alone on its second run is flaky", async () => {
+    const { results, flaky } = await runFiles(root, ["ok.test.ts", "bad.test.ts", "once.test.ts"], 2, process.env);
+    expect(results.map((result) => [result.file, result.passed])).toEqual([["bad.test.ts", false], ["ok.test.ts", true], ["once.test.ts", true]]);
+    expect(results[0].output).toContain("bad");
+    expect(flaky).toEqual(["once.test.ts"]);
   });
 });

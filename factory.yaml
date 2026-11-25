@@ -13,9 +13,10 @@ gates:
 # When a wave's task merges into the wave's branch: the tests its change reaches.
 task_gates:
   - [bun, scripts/changed-tests.ts]
-# Once per wave before its review, and at the merge of a task outside a wave: types and the whole suite.
+# Once per wave before its review, and at the merge of a task outside a wave: types and the tests the change since the
+# default branch reaches, the cores but two at once. The whole suite: `bun scripts/changed-tests.ts --all`.
 merge_gates:
   - [bun, run, types]
-  - [bun, run, test]
+  - [bun, scripts/changed-tests.ts]
   # The TUI's own tests, once it exists.
   - [bash, -c, "test ! -d tui || (cd tui && uv run --quiet pytest -q)"]

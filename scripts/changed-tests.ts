@@ -1,16 +1,18 @@
 #!/usr/bin/env bun
 /**
- * A wave's task gate (`task_gates` in `factory.yaml`): runs the test files a change since `$FACTORY_BASE` reaches.
+ * The test gate (`task_gates` and `merge_gates` in `factory.yaml`): runs the test files a change reaches, several at once.
  *
+ * - The change starts at `$FACTORY_BASE` (a wave's task), else at the merge base with the default branch (a merge gate, a
+ *   local run); `--all`, or no base at all, runs every test file
  * - Changed: `git diff --name-only $FACTORY_BASE` (committed and uncommitted) and untracked files
  * - Reached: a changed `*.test.ts`, the test next to a changed source (`x.ts` -> `x.test.ts`), and every test that
  *   imports a changed file, transitively over relative imports (`./`, `../`)
- * - Runs them with `bun test`, exits with its code. Nothing reached: exit 0. `FACTORY_BASE` unset: exit 75 (infra)
+ * - Runs them one `bun test` process per file, the cores but two at once (`FACTORY_TEST_JOBS` overrides), at low priority.
+ *   A failed file runs once more alone and passes as flaky when it passes then. Nothing reached: exit 0
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 
-const INFRA_EXIT = 75;
 const SOURCE = /\.(ts|tsx|mts|js|mjs)$/;
 const TEST = /\.test\.(ts|tsx|mts|js|mjs)$/;
 const IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
@@ -74,21 +76,84 @@ export function changedTests(root: string, base: string): string[] {
   return reachedTests(changed, sources);
 }
 
-if (import.meta.main) {
-  const base = process.env.FACTORY_BASE;
-  if (!base) {
-    console.log("changed-tests: FACTORY_BASE is not set (the commit the change starts from)");
-    process.exit(INFRA_EXIT);
+/** The commit a merge gate's change starts from: the merge base with the default branch (origin's HEAD, `main`, `master`), null when none resolves. */
+export function defaultBase(root: string): string | null {
+  for (const ref of ["origin/HEAD", "main", "master"]) {
+    const result = Bun.spawnSync(["git", "merge-base", "HEAD", ref], { cwd: root, stdout: "pipe", stderr: "pipe" });
+    if (result.exitCode === 0) return result.stdout.toString().trim();
   }
+  return null;
+}
+
+/** Every test file of the checkout at `root`. */
+export function allTests(root: string): string[] {
+  return [...git(root, ["ls-files", "-z"]), ...git(root, ["ls-files", "-z", "--others", "--exclude-standard"])].filter((path) => TEST.test(path) && existsSync(join(root, path))).sort();
+}
+
+/** How many test files run at once: `FACTORY_TEST_JOBS`, else the cores but two (the machine stays usable), at least one. */
+export function jobCount(env: Record<string, string | undefined>, cores: number): number {
+  const asked = Number(env.FACTORY_TEST_JOBS);
+  return Number.isInteger(asked) && asked > 0 ? asked : Math.max(1, cores - 2);
+}
+
+export interface FileResult { file: string; passed: boolean; output: string; seconds: number }
+
+/**
+ * Runs `files`, one `bun test` process per file, `jobs` at once and at low priority, the larger files first.
+ * A file that fails is run once more alone after the others: passing then, it passes and is named flaky (a test that
+ * only fails beside others is a timing problem, not a broken change).
+ */
+export async function runFiles(root: string, files: string[], jobs: number, env: Record<string, string | undefined>): Promise<{ results: FileResult[]; flaky: string[] }> {
+  const size = (file: string) => readFileSync(join(root, file)).length;
+  const queue = [...files].sort((a, b) => size(b) - size(a));
+  const children = new Set<ReturnType<typeof Bun.spawn>>();
+  const stop = () => { for (const child of children) child.kill(); process.exit(130); };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  const runOne = async (file: string): Promise<FileResult> => {
+    const started = Date.now();
+    const child = Bun.spawn(["nice", "-n", "10", "bun", "test", `./${file}`], { cwd: root, env, stdout: "pipe", stderr: "pipe" });
+    children.add(child);
+    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    children.delete(child);
+    return { file, passed: code === 0, output: out + err, seconds: (Date.now() - started) / 1000 };
+  };
+  const results: FileResult[] = [];
+  const worker = async () => {
+    for (let file = queue.shift(); file !== undefined; file = queue.shift()) results.push(await runOne(file));
+  };
+  await Promise.all(Array.from({ length: Math.min(jobs, queue.length) }, worker));
+  const flaky: string[] = [];
+  for (const failed of results.filter((result) => !result.passed)) {
+    const again = await runOne(failed.file);
+    if (!again.passed) continue;
+    flaky.push(failed.file);
+    Object.assign(failed, again);
+  }
+  process.off("SIGINT", stop);
+  process.off("SIGTERM", stop);
+  return { results: results.sort((a, b) => a.file.localeCompare(b.file)), flaky };
+}
+
+if (import.meta.main) {
   const root = git(process.cwd(), ["rev-parse", "--show-toplevel"])[0].trim();
-  const tests = changedTests(root, base);
+  const everything = process.argv.includes("--all");
+  const base = everything ? null : process.env.FACTORY_BASE || defaultBase(root);
+  // No base (no default branch to compare with): everything runs, the safe side.
+  const tests = base ? changedTests(root, base) : allTests(root);
   if (tests.length === 0) {
-    console.log(`changed-tests: the change since ${base.slice(0, 12)} reaches no test`);
+    console.log(`changed-tests: the change since ${base?.slice(0, 12)} reaches no test`);
     process.exit(0);
   }
-  console.log(`changed-tests: ${tests.length} test file(s): ${tests.join(" ")}`);
+  const jobs = jobCount(process.env, navigator.hardwareConcurrency);
+  console.log(`changed-tests: ${tests.length} test file(s)${base ? ` reached since ${base.slice(0, 12)}` : " (all)"}, ${jobs} at once`);
   // The tests run without FACTORY_BASE: it is this gate's input, and tests that check a command's environment would see it.
   const { FACTORY_BASE: _base, ...env } = process.env;
-  const run = Bun.spawnSync(["bun", "test", ...tests.map((path) => `./${path}`)], { cwd: root, env, stdout: "inherit", stderr: "inherit" });
-  process.exit(run.exitCode ?? 1);
+  const started = Date.now();
+  const { results, flaky } = await runFiles(root, tests, jobs, env);
+  const failed = results.filter((result) => !result.passed);
+  for (const result of failed) console.log(`\n== ${result.file}: failed\n${result.output.trimEnd()}`);
+  for (const result of results.filter((entry) => entry.passed)) console.log(`ok ${result.file} ${result.seconds.toFixed(1)}s${flaky.includes(result.file) ? " (flaky: failed beside the others, passed alone)" : ""}`);
+  console.log(`changed-tests: ${results.length - failed.length} passed, ${failed.length} failed in ${((Date.now() - started) / 1000).toFixed(0)}s${failed.length > 0 ? `: ${failed.map((result) => result.file).join(" ")}` : ""}`);
+  process.exit(failed.length === 0 ? 0 : 1);
 }

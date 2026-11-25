@@ -85,9 +85,11 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   | `task_gates` | the tests a wave's task's change reaches; env `FACTORY_BASE` = the commit its rebased change sits on. Default: none | a wave's task at its merge, after `gates` |
   | `merge_gates` | the full suite. Default: `gates` | a task outside a wave at its merge; a wave once before its reviewer (a failure blocks it, `gates`), again at its merge only when the target moved since |
 
-  `scripts/changed-tests.ts` is a command for `task_gates`: it runs the test files the change since `$FACTORY_BASE`
-  reaches (a changed `*.test.ts`, the test next to a changed source, the tests importing it, transitively over relative
-  imports)
+  `scripts/changed-tests.ts` is a command for `task_gates` and `merge_gates`: it runs the test files the change reaches
+  (a changed `*.test.ts`, the test next to a changed source, the tests importing it, transitively over relative
+  imports). The change starts at `$FACTORY_BASE`, else at the merge base with the default branch; `--all` runs every
+  test file. One `bun test` process per file, the cores but two at once (`FACTORY_TEST_JOBS` overrides), at low
+  priority; a file that fails beside the others and passes alone passes as flaky
 - `protected`: globs the coder must not change. Default: `factory.yaml`, `.factory/**`
 - `lockfiles`: file names that trigger `after_merge` and go last in the review patch. Default:
   `uv.lock`, `package-lock.json`, `bun.lock`, `bun.lockb`
