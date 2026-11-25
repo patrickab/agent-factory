@@ -554,7 +554,15 @@ async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
   const continuable = waveStage === null || waveStage === "building";
-  return { ...view, actions: taskActions(view, record.kind === "merge_request", continuable) };
+  return { ...view, actions: taskActions(view, record.kind === "merge_request", continuable, keptByWave(view, waveStage)) };
+}
+
+/**
+ * A done task its wave still counts on: the wave is neither merged nor cancelled (nor removed). Removed, it would count
+ * as cancelled and strand the tasks waiting for it, so `tasks.remove` refuses it; `waves.remove` removes it with its wave.
+ */
+function keptByWave(view: Pick<TaskView, "state">, waveStage: WaveStage | "removed" | null): boolean {
+  return view.state === "done" && waveStage !== null && waveStage !== "removed" && !WAVE_FINAL_STAGES.includes(waveStage);
 }
 
 const APPROVE_STATES: readonly State[] = ["waiting_approve"];
@@ -566,17 +574,23 @@ function isActive(view: Omit<TaskView, "actions">): boolean {
   return view.running || (view.state !== null && !RESTING_STATES.includes(view.state) && !view.interrupted);
 }
 
+/** The check of `requireRemovable` as a predicate: it neither runs nor waits for an answer. */
+function removable(view: Omit<TaskView, "actions">): boolean {
+  return !isActive(view) && view.state !== "waiting_answer";
+}
+
 /**
  * The predicates of the task actions' own checks (`requireState`, the lock, the runner, `requireContinuable`), as one
  * list for clients. An old merge request (`mergeRequest`) can only be removed. A task of a wave that does not build
- * (`continuable` false) is not continued: no approve, retry or message but the answer to its question.
+ * (`continuable` false) is not continued: no approve, retry or message but the answer to its question. A done task its
+ * wave still counts on (`kept`) is not removed.
  */
-function taskActions(view: Omit<TaskView, "actions">, mergeRequest = false, continuable = true): TaskActionName[] {
+function taskActions(view: Omit<TaskView, "actions">, mergeRequest = false, continuable = true, kept = false): TaskActionName[] {
   const allowed: Record<TaskActionName, boolean> = {
     "tasks.approve": !mergeRequest && continuable && !view.running && !view.interrupted && view.state !== null && APPROVE_STATES.includes(view.state),
     "tasks.retry": !mergeRequest && continuable && !view.running && (view.interrupted || (view.state !== null && RETRY_STATES.includes(view.state))),
     "tasks.cancel": !mergeRequest && (view.state === null || !FINAL_STATES.includes(view.state)),
-    "tasks.remove": !isActive(view) && view.state !== "waiting_answer",
+    "tasks.remove": removable(view) && !kept,
     "tasks.message": !mergeRequest && view.state !== null && view.state !== "merging" && (continuable || view.state === "waiting_answer"),
   };
   return (Object.keys(allowed) as TaskActionName[]).filter((name) => allowed[name]);
@@ -979,6 +993,17 @@ function requireRemovable(view: TaskView): void {
   }
 }
 
+/** The wave's check of `tasks.remove` (`keptByWave`): a done task its wave still counts on stays. */
+async function requireNotKeptByWave(record: TaskRecord, view: TaskView): Promise<void> {
+  const stage = await taskWaveStage(record);
+  if (!keptByWave(view, stage)) return;
+  const wave = (record.wave ?? "").slice(0, SHORT_ID_CHARS);
+  throw new FactoryError(
+    "refused",
+    `task ${shortId(record)} is done in wave ${wave}, which is ${stage}: the wave counts on it (removed, the tasks waiting for it could never start); remove it once the wave is merged or cancelled, or with its wave (waves.remove)`,
+  );
+}
+
 /** What removing the task would drop; refused (detail `force`) without `force` when that is anything. */
 async function droppedWork(record: TaskRecord, force: boolean): Promise<string | null> {
   const target = await taskMainBranch(record.sessionDir, record.sessionId);
@@ -1059,6 +1084,22 @@ export async function waveMergeRefusal(sessionDir: string, sessionId: string): P
   if (!reviewBegan(file.events)) return null;
   const { stage, branch } = foldWave(file.declaration, file.events);
   return `its wave ${short} is ${stage}, its review began: nothing more reaches its branch ${branch} (the reviewed tree is what merges); give the work to the wave with waves.add`;
+}
+
+/**
+ * Refuses a task outside a wave whose target is the branch of a wave not merged or cancelled (invariant 13): the wave
+ * would neither wait for it nor watch it, and its gates and reviewer would see a change none of its tasks made.
+ */
+async function requireNoOpenWaveBranch(repo: string, target: string): Promise<void> {
+  for (const file of await listWaves()) {
+    if (file.declaration.repo !== repo || file.declaration.branch !== target) continue;
+    const { stage, id } = foldWave(file.declaration, file.events);
+    if (WAVE_FINAL_STAGES.includes(stage)) continue;
+    throw new FactoryError(
+      "refused",
+      `${target} is the branch of wave ${id.slice(0, SHORT_ID_CHARS)}, which is ${stage}: only the wave's own tasks reach it; give the work to the wave with waves.add`,
+    );
+  }
 }
 
 /** The wave whose id is `id` or starts with it. */
@@ -1162,8 +1203,8 @@ async function waveLook(file: WaveFile): Promise<WaveLook> {
     "waves.retry": fold.stage === "blocked" || interrupted,
     "waves.approve": fold.stage === "waiting_approve",
     "waves.cancel": !WAVE_FINAL_STAGES.includes(fold.stage),
-    // `tasks.remove` of a task maybe only with force, as for the task itself.
-    "waves.remove": !running && [...views.values()].every((view) => view.actions.includes("tasks.remove")),
+    // `tasks.remove` of a task maybe only with force, as for the task itself; its done tasks go with the wave.
+    "waves.remove": !running && [...views.values()].every(removable),
   };
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
   return { view: { ...fold, running, interrupted, tasks, counts: waveCounts(full, states), usage, actions }, stuck };
@@ -1377,7 +1418,11 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
       throw new FactoryError("invalid", errorText(error));
     }
     const repo = await primaryOf(params.repo as string, cwd);
-    await requireFactoryModels(resolveSettings(await loadSettings(repo), overrides, "").models);
+    const stored = await loadSettings(repo);
+    await requireFactoryModels(resolveSettings(stored, overrides, "").models);
+    // The target as `launchTask` resolves it; a missing default branch is its refusal.
+    const target = overrides.branch ?? stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
+    if (target !== undefined) await requireNoOpenWaveBranch(repo, target);
     try {
       return taskView(await launchTask({ repo, title, request, overrides, tag, plan, signal, env }));
     } catch (error) {
@@ -1429,7 +1474,10 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const record = await findTask(params.id);
     return withTaskLock(
       record,
-      async (view) => requireRemovable(view),
+      async (view) => {
+        requireRemovable(view);
+        await requireNotKeptByWave(record, view);
+      },
       async () => {
         const dropped = await droppedWork(record, params.force === true);
         await deleteTask(record);
@@ -1517,14 +1565,15 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
       createdAt: new Date().toISOString(),
       overrides,
     };
+    // Declared in full or not at all: a step that fails leaves no branch, no record (and no task a runner started).
     try {
       await createWave(declaration);
+      await busyAsFactoryError(() => appendWaveEvent(declaration.id, { kind: "tasks", tasks: specs }));
+      await pokeWaveRunner(declaration.id, env);
     } catch (error) {
-      await runCommand(["git", "branch", "-D", branch], { cwd: repo });
+      await undoWaveStart(declaration).catch(() => undefined);
       throw error;
     }
-    await busyAsFactoryError(() => appendWaveEvent(declaration.id, { kind: "tasks", tasks: specs }));
-    await pokeWaveRunner(declaration.id, env);
     return { wave: await waveView(await readWave(declaration.id)) };
   },
 
@@ -1691,6 +1740,14 @@ async function moveWave(id: string, from: WaveStage, to: WaveStage, what: string
 /** The records of the wave's tasks (those it started and that were not removed). */
 async function waveRecords(id: string): Promise<TaskRecord[]> {
   return (await listTasks()).filter((record) => record.wave === id);
+}
+
+/** Undoes a `waves.start` that failed midway: its runner, any task it started, its record and its branch. */
+async function undoWaveStart(declaration: WaveDeclaration): Promise<void> {
+  await stopWaveRunners(declaration.id).catch(() => undefined);
+  for (const record of await waveRecords(declaration.id)) await deleteTask(record).catch(() => undefined);
+  await removeWave(declaration.id);
+  await runCommand(["git", "branch", "-D", declaration.branch], { cwd: declaration.repo });
 }
 
 /** One sentence: a multi-line error (git output) on one line. */

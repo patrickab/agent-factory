@@ -316,10 +316,17 @@ export function startTask(deps: OpsDeps, json: string): Promise<OpResult> {
   });
 }
 
+/** An old merge request (`Task.kind`, invariant 7) is refused approve and retry here too: it can only be removed. */
+function mergeRequestRefusal(current: Snapshot, what: string): OpResult | undefined {
+  return current.task.kind === "merge_request" ? { ok: false, error: `this task is an old merge request: ${what} is refused, it can only be removed` } : undefined;
+}
+
 /** Merges a task that waits for approve. Answers at once: the merge runs in the background. */
 export async function approveTask(deps: OpsDeps): Promise<OpResult> {
   const current = deps.session.snapshot;
   if (!current) return { ok: false, error: "this session holds no task" };
+  const refused = mergeRequestRefusal(current, "approve");
+  if (refused) return refused;
   if (current.state !== "waiting_approve") return { ok: false, error: "the task is not waiting for approve" };
   if (!deps.isIdle()) return { ok: false, error: "the session is busy" };
   return guarded(async () => {
@@ -334,6 +341,8 @@ export async function approveTask(deps: OpsDeps): Promise<OpResult> {
 export async function retryTask(deps: OpsDeps): Promise<OpResult> {
   const current = deps.session.snapshot;
   if (!current) return { ok: false, error: "this session holds no task" };
+  const refusedRetry = mergeRequestRefusal(current, "retry");
+  if (refusedRetry) return refusedRetry;
   if (current.state !== "blocked" && current.state !== "cancelled") return { ok: false, error: "retry needs a blocked or cancelled task" };
   if (!deps.isIdle()) return { ok: false, error: "the session is busy" };
   return guarded(async () => {

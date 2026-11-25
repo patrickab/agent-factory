@@ -178,15 +178,23 @@ async function targetConfig(declaration: WaveDeclaration, root: string) {
 
 /**
  * The review worktree on the wave's branch: the existing one (a run before this one left it), else a new one with the
- * `after_create` hooks of the target's tip. A rebase a dead run left in progress is aborted.
+ * `after_create` hooks of the target's tip. A new one whose hooks fail is removed again (as `launchTask` does for a
+ * task): a later run prepares a fresh one rather than reuse one the hooks never finished. A rebase a dead run left in
+ * progress is aborted.
  */
 async function ensureWorktree(declaration: WaveDeclaration): Promise<string> {
   const path = reviewWorktree(declaration);
   if (!existsSync(path)) {
     await git(runner.cleanup, declaration.repo, ["worktree", "prune"]);
     await git(runner.cleanup, declaration.repo, ["worktree", "add", "--quiet", path, declaration.branch]);
-    const { config } = await targetConfig(declaration, path);
-    await runAfterCreate(runner.run, path, config.hooks.after_create);
+    try {
+      const { config } = await targetConfig(declaration, path);
+      await runAfterCreate(runner.run, path, config.hooks.after_create);
+    } catch (error) {
+      await runner.cleanup(["git", "worktree", "remove", "--force", path], { cwd: declaration.repo });
+      await runner.cleanup(["git", "worktree", "prune"], { cwd: declaration.repo });
+      throw error;
+    }
   }
   await abortLeftoverRebase(runner.cleanup, path);
   return path;

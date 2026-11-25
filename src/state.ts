@@ -44,6 +44,11 @@ export interface Task extends StartPayload {
   baseSha: string;
   /** `PROTOCOL_VERSION` of the plugin that started the task. Absent on tasks started before it was written. */
   protocol?: number;
+  /**
+   * Only in the entry of an old merge request (written while they existed): it keeps its old limits (invariant 7), no
+   * approve and no retry, from its own session too; it can only be removed.
+   */
+  kind?: "merge_request";
 }
 
 /** The version of the entry protocol, written into every new `factory-task` entry. */

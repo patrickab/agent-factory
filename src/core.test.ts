@@ -2,7 +2,7 @@
  * The core over real git repos in a temp dir and a fake `pi` on PATH (never a model, never the real
  * `agent-worktree`). The fake answers each `/factory` command with the entries the plugin would write.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
@@ -11,7 +11,7 @@ import { ACTIONS, callAction, FactoryError, startWaveTasks, waveMergeRefusal, wa
 import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, lockTask, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
-import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
+import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath } from "./wave-poke.ts";
 import { appendWaveEvent, createWave, listWaves, readWave, type WaveView } from "./waves.ts";
 
 const savedEnv = { ...process.env };
@@ -1130,7 +1130,8 @@ describe("waves", () => {
     const repo = await registeredRepo();
     await callAction("settings.set", { repo, settings: { merge: "review", maxRounds: 4, models: { coder: "a/b", reviewer: "c/d" } } });
     const wave = await startWave(repo, [spec("a")], { overrides: { maxRounds: 1, models: { coder: "c/d" } } });
-    await stopWaveRunners(wave.id);
+    // Its runner's launch ends before the test does: a runner stopped mid-launch outlasts the test's time.
+    await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null);
     const resolved = { merge: "review" as const, maxRounds: 1, review: false, models: { coder: "c/d", reviewer: "c/d" } };
     expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
     await callAction("settings.set", { repo, settings: { merge: "auto", models: { reviewer: "a/b" } } });
@@ -1308,6 +1309,48 @@ describe("waves", () => {
     expect(prompts()).toEqual([]);
   });
 
+  test("tasks.start (and with it factory_new_task) refuses the branch of a wave not merged or cancelled (invariant 13)", async () => {
+    const repo = makeRepo();
+    git(repo, "branch", "main-factory-w9");
+    const id = "20000000-0000-4000-8000-000000000005";
+    await createWave({ id, repo, tag: "factory/w9", plan: null, title: "w", request: "r", branch: "main-factory-w9", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
+    const start = () => callAction("tasks.start", { title: "t", request: "r", overrides: { branch: "main-factory-w9" } }, { cwd: repo });
+    for (const stage of [null, "reviewing", "rejected", "blocked", "waiting_approve", "merging"] as const) {
+      if (stage !== null) await appendWaveEvent(id, { kind: "stage", stage, reason: stage === "blocked" ? "gates" : null });
+      await expectError(start(), "refused", `main-factory-w9 is the branch of wave 20000000, which is ${stage ?? "building"}: only the wave's own tasks reach it; give the work to the wave with waves.add`);
+    }
+    expect(await listTasks()).toEqual([]);
+    expect(prompts()).toEqual([]);
+    // Another target of the same repository is no wave's.
+    expect(((await callAction("tasks.start", { title: "t", request: "r" }, { cwd: repo })) as TaskView).wave).toBeNull();
+    // Once the wave is merged its branch takes tasks again.
+    await appendWaveEvent(id, { kind: "stage", stage: "merged", reason: null });
+    expect(((await start()) as TaskView).wave).toBeNull();
+    expect(await listTasks()).toHaveLength(2);
+  });
+
+  test("waves.start that fails midway (its runner does not start) leaves no branch and no record behind", async () => {
+    const repo = await registeredRepo();
+    const id = "20000000-0000-4000-8000-000000000006";
+    // The poke's marker cannot be written: a directory lies where it goes.
+    mkdirSync(wavePokePath(id), { recursive: true });
+    const uuid = spyOn(crypto, "randomUUID").mockReturnValue(id);
+    try {
+      await expectError(startWave(repo, [spec("a")]), "failed", "its runner did not start");
+    } finally {
+      uuid.mockRestore();
+    }
+    expect(git(repo, "branch", "--format=%(refname:short)")).toBe("main");
+    expect(await listWaves()).toEqual([]);
+    expect(existsSync(wavePokePath(id))).toBe(false);
+    expect(await listTasks()).toEqual([]);
+    // Nothing of it is in the way of the next declaration.
+    const again = await startWave(repo, [spec("a")]);
+    expect(again.branch).toBe("main-factory-w1");
+    // Its runner's launch ends before the test does.
+    await until(async () => taskOf(await getWave(again.id), "a").taskId !== null);
+  });
+
   test("tasks.start cannot set a wave", async () => {
     const repo = makeRepo();
     expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("wave");
@@ -1435,12 +1478,13 @@ describe("waiting on waves and the wave actions", () => {
     const actionsOf = async (record: TaskRecord) => ((await callAction("tasks.get", { id: record.id })) as TaskView).actions;
     // While the wave builds: as for any task.
     expect(await actionsOf(cancelled)).toEqual(["tasks.retry", "tasks.remove", "tasks.message"]);
-    expect(await actionsOf(done)).toEqual(["tasks.remove", "tasks.message"]);
+    // A done task stays while its wave is neither merged nor cancelled (its own test below).
+    expect(await actionsOf(done)).toEqual(["tasks.message"]);
     expect(await actionsOf(asking)).toEqual(["tasks.cancel", "tasks.message"]);
     for (const stage of ["reviewing", "waiting_approve", "merging", "rejected", "blocked", "merged", "cancelled"] as const) {
       await appendWaveEvent(WAVE, { kind: "stage", stage, reason: stage === "blocked" ? "gates" : null });
       expect(await actionsOf(cancelled)).toEqual(["tasks.remove"]);
-      expect(await actionsOf(done)).toEqual(["tasks.remove"]);
+      expect(await actionsOf(done)).toEqual(stage === "merged" || stage === "cancelled" ? ["tasks.remove"] : []);
       // The answer to a question continues the round it asked in: always allowed.
       expect(await actionsOf(asking)).toEqual(["tasks.cancel", "tasks.message"]);
       await expectError(callAction("tasks.retry", { id: cancelled.id }), "refused", `belongs to wave ${WAVE.slice(0, 8)}, which is ${stage}`);
@@ -1455,6 +1499,25 @@ describe("waiting on waves and the wave actions", () => {
     await appendWaveEvent(WAVE, { kind: "stage", stage: "building", reason: null });
     expect(await actionsOf(cancelled)).toEqual(["tasks.retry", "tasks.remove", "tasks.message"]);
     expect(await actionsOf(done)).toEqual(["tasks.approve", "tasks.cancel", "tasks.remove", "tasks.message"]);
+  });
+
+  test("tasks.remove refuses a done task while its wave is neither merged nor cancelled: removed, it would strand the tasks after it", async () => {
+    const repo = makeRepo();
+    const [done, cancelled] = await writtenWave(repo, ["done", "cancelled"]);
+    const actionsOf = async (record: TaskRecord) => ((await callAction("tasks.get", { id: record.id })) as TaskView).actions;
+    for (const stage of [null, "reviewing", "rejected", "blocked", "waiting_approve", "merging"] as const) {
+      if (stage !== null) await appendWaveEvent(WAVE, { kind: "stage", stage, reason: stage === "blocked" ? "gates" : null });
+      expect(await actionsOf(done)).not.toContain("tasks.remove");
+      await expectError(callAction("tasks.remove", { id: done.id, force: true }), "refused", `is done in wave ${WAVE.slice(0, 8)}, which is ${stage ?? "building"}: the wave counts on it`);
+    }
+    // A cancelled task counts as cancelled either way; the wave itself is still removable with its done task.
+    expect(await actionsOf(cancelled)).toContain("tasks.remove");
+    expect((await getWave()).actions).toContain("waves.remove");
+    expect(await callAction("tasks.remove", { id: cancelled.id })).toEqual({ removed: cancelled.id, dropped: null });
+    await appendWaveEvent(WAVE, { kind: "stage", stage: "merged", reason: null });
+    expect(await actionsOf(done)).toEqual(["tasks.remove"]);
+    expect(await callAction("tasks.remove", { id: done.id })).toEqual({ removed: done.id, dropped: null });
+    expect(await listTasks()).toEqual([]);
   });
 
   test("a task's merge is refused once its wave's review began, whatever started it, until the wave builds again", async () => {

@@ -291,6 +291,22 @@ describe("the wave runner", () => {
     expect((await getWave()).reason).toBe("infra");
   });
 
+  test("a failing after_create hook blocks it (infra) and removes the review worktree it created: waves.retry prepares a fresh one", async () => {
+    const mark = join(caseDir, "hook-may-pass");
+    const repo = await waveRepo(`hooks:\n  after_create:\n    - ["test", "-e", "${mark}"]\ngates: []\n`);
+    await runWave(WAVE);
+    const blocked = await getWave();
+    expect([blocked.stage, blocked.reason]).toEqual(["blocked", "infra"]);
+    expect(existsSync(reviewWorktree(repo))).toBe(false);
+    expect(git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+    // The hook passes now: the retry creates the worktree again, its hook runs, the wave merges.
+    writeFileSync(mark, "");
+    await callAction("waves.retry", { id: WAVE });
+    await until(async () => (await getWave()).stage === "merged");
+    await until(async () => (await liveWaveRunners(WAVE)).length === 0);
+    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
+  }, 30_000);
+
   test("a dirty review worktree blocks it with reason dirty; the file and the worktree stay", async () => {
     const repo = await waveRepo('hooks:\n  after_create:\n    - ["sh", "-c", "echo x > stray.txt"]\ngates: []\n');
     await runWave(WAVE);
