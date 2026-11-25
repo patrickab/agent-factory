@@ -10,8 +10,9 @@
  *   tasks that can never start while nothing else runs (`stuckKeys`) make the runner rest, the wave `building` with a
  *   `stage` event naming them (once): invariant 8, the wave never waits silently. `reviewing`: the review worktree on
  *   the wave's branch (`after_create` hooks of the target's tip run when it is made), the rebase onto the target
- *   unsquashed, the gates, the reviewer on the whole diff since the target; then `merging` (`waiting_approve` with the wave's `merge: review`), `rejected` or `blocked`.
- *   `merging`: the merge queue, merge gates and the fast-forward (`mergeTask` `asIs`), then `merged` or `blocked`
+ *   unsquashed, the merge gates (the full suite, once per wave), the reviewer on the whole diff since the target; then `merging` (`waiting_approve` with the wave's `merge: review`), `rejected` or `blocked`.
+ *   `merging`: the merge queue, merge gates (only when the target moved since the review's run) and the fast-forward
+ *   (`mergeTask` `asIs`), then `merged` or `blocked`
  * - Every step appends its event (`gate`, `review`, `merge`, `stage`). A stage change is a compare-and-append on the
  *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there.
  *   While it reviews, the runner watches the log: once the stage left `reviewing` it kills the gates and the reviewer
@@ -47,6 +48,7 @@ import {
   allCancelled,
   appendWaveEvents,
   foldWave,
+  gatedCommit,
   readWave,
   readyForReview,
   RESTING_WAVE_STAGES,
@@ -212,7 +214,7 @@ async function removeWorktree(declaration: WaveDeclaration): Promise<void> {
 }
 
 /** One `gate` event of a run of commands: passed when every one passed, the output tail of the last one run. */
-function gateEvent(phase: "review" | "merge", results: { result: Pick<CommandResult, "output" | "durationMs">; passed: boolean }[]): NewWaveEvent {
+function gateEvent(phase: "review" | "merge", results: { result: Pick<CommandResult, "output" | "durationMs">; passed: boolean }[], commit: string | null = null): NewWaveEvent {
   const last = results.at(-1);
   return {
     kind: "gate",
@@ -220,6 +222,7 @@ function gateEvent(phase: "review" | "merge", results: { result: Pick<CommandRes
     passed: results.every((run) => run.passed),
     wallMs: results.reduce((sum, run) => sum + run.result.durationMs, 0),
     log: last === undefined ? null : outputTail(last.result.output),
+    ...(commit === null ? {} : { commit }),
   };
 }
 
@@ -235,7 +238,11 @@ function sessionIdOf(sessionFile: string | null): string | null {
   return name.slice(name.lastIndexOf("_") + 1) || null;
 }
 
-/** `reviewing`: rebase, gates, reviewer, then the stage the verdict asks for. */
+/**
+ * `reviewing`: rebase, `merge_gates` (the full suite, once per wave: its tasks ran only what they reach; a failure
+ * blocks, `gates`, before any reviewer starts), reviewer, then the stage the verdict asks for. The gate event names
+ * the commit they passed on: the merge runs them again only on another one.
+ */
 async function review(fold: WaveFold): Promise<void> {
   const { id } = fold;
   const task = waveTask(fold);
@@ -257,9 +264,10 @@ async function review(fold: WaveFold): Promise<void> {
     if (conflicts) return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${conflicts.join(", ")}`);
     // The rebase brings the target's .gitignore: a file it stopped ignoring is no gate output.
     if (await uncommittedFiles(runner.run, root)) return leave("blocked", "dirty", await dirtyDetail(root));
+    const gated = await git(runner.run, root, ["rev-parse", "HEAD"]);
     const gates: { argv: string[]; result: CommandResult; passed: boolean }[] = [];
     try {
-      for (const argv of config.gates) {
+      for (const argv of config.merge_gates) {
         log(id, `gate ${argv.join(" ")}`);
         const result = await runner.run(argv, { cwd: root });
         gates.push({ argv, result, passed: passed(result) });
@@ -269,7 +277,7 @@ async function review(fold: WaveFold): Promise<void> {
       // The worktree was clean before the gates: what lies untracked now is their output.
       await removeUntracked(runner.cleanup, root);
     }
-    const gate = gates.length === 0 ? [] : [gateEvent("review", gates)];
+    const gate = gates.length === 0 ? [] : [gateEvent("review", gates, gated)];
     const failed = gates.find((run) => !run.passed);
     if (failed) return leave("blocked", gateReason(failed.result), gateDetail(failed.argv, failed.result), gate);
     // A gate that rewrote a tracked file passed on a tree the target would never get.
@@ -315,8 +323,11 @@ async function review(fold: WaveFold): Promise<void> {
   }
 }
 
-/** `merging`: the merge queue, merge gates and the fast-forward of the target. */
-async function merge(fold: WaveFold): Promise<void> {
+/**
+ * `merging`: the merge queue, merge gates and the fast-forward of the target. The merge gates are skipped on the
+ * commit they passed on before the review (`gated`): they run again only when the target moved since.
+ */
+async function merge(fold: WaveFold, gated: string | null): Promise<void> {
   const { id } = fold;
   const task = waveTask(fold);
   const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []) => {
@@ -357,6 +368,7 @@ async function merge(fold: WaveFold): Promise<void> {
     },
     status,
     asIs: true,
+    gated,
   });
   const gates = outcome.gates.filter((gate: GateData) => gate.phase === "merge_gates");
   const gate = gates.length === 0 ? [] : [gateEvent("merge", gates.map((data) => ({ result: { output: data.outputTail, durationMs: data.durationMs }, passed: data.exitCode === 0 && !data.killed })))];
@@ -385,7 +397,7 @@ async function step(id: string): Promise<Next> {
     return "again";
   }
   if (fold.stage === "merging") {
-    await merge(fold);
+    await merge(fold, gatedCommit(events));
     return "again";
   }
   return build(fold);

@@ -1072,6 +1072,16 @@ export function waveReviewWorktree(declaration: Pick<WaveDeclaration, "id" | "re
 }
 
 /**
+ * The wave of the task in the Pi session `sessionId` (files in `sessionDir`), null outside one. Only sessions the
+ * factory keeps (under its home) are looked up.
+ */
+export async function taskWave(sessionDir: string, sessionId: string): Promise<string | null> {
+  const sessions = join(factoryHome(), "sessions") + sep;
+  if (!resolve(sessionDir).startsWith(sessions)) return null;
+  return (await listTasks()).find((task) => task.sessionId === sessionId)?.wave ?? null;
+}
+
+/**
  * Why the merge of the task in the Pi session `sessionId` (files in `sessionDir`) must not land now, null when it may
  * (invariant 2): a task of a wave whose review began (`reviewBegan`) would bring commits onto the wave's branch that
  * its gates and reviewer never saw, or that are lost once it merged. The plugin asks right before a task merges, so

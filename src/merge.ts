@@ -2,7 +2,8 @@
  * The merge step of a passed task.
  *
  * - Consumes the task, the repo's `FactoryConfig` and two `Exec`s: `exec` is killed by a cancel, `cleanup` is not
- * - Commit, rebase onto the target branch, gates again (`merge_gates`, skipped when the rebase moved nothing), then
+ * - Commit, rebase onto the target branch, gates again (`merge_gates`, or `MergeInput.gates`; skipped when the rebase
+ *   moved nothing, or when the rebased commit is the one they already passed on: `MergeInput.gated`), then
  *   under the merge lock (a cancel ends the wait for it, never the update): a target checked out in a worktree (the
  *   primary or another one) is fast-forwarded there, and `hooks.after_merge` run when that is the primary and the
  *   merge changed a lockfile (`config.lockfiles`); a target checked out nowhere is moved with a compare-and-swap
@@ -86,6 +87,12 @@ export interface MergeInput {
   message?: CommitMessage;
   /** Merge the branch's commits as they are: no commit, no squash, the worktree must be clean (a wave's branch). */
   asIs?: boolean;
+  /** The gates of the merge queue. Default `config.merge_gates` (a wave's task: its `gates` and `task_gates`). */
+  gates?: string[][];
+  /** Run the gates with env `FACTORY_BASE` = the commit the rebased branch sits on (`taskBase` after the rebase). */
+  baseEnv?: boolean;
+  /** A commit these gates already passed on (a wave's review): they are skipped when the rebased HEAD is that commit. */
+  gated?: string | null;
 }
 
 export type GateFailure = { argv: string[]; result: CommandResult };
@@ -193,7 +200,8 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
     await commitWorktree(exec, root, text, config.protected);
   }
   let ontoBefore = await taskBase(exec, root, task);
-  const sameGates = JSON.stringify(config.merge_gates) === JSON.stringify(config.gates);
+  const mergeGates = input.gates ?? config.merge_gates;
+  const sameGates = JSON.stringify(mergeGates) === JSON.stringify(config.gates);
 
   // Rebased before it queues: a conflict goes to the coder at once, without a place in the queue.
   status(`rebase onto ${task.mainBranch}`);
@@ -215,10 +223,12 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       // Merge gates that are the round's gates, on the base the round passed them on (the squash keeps the tree), would
       // only repeat that run.
       const onto = await taskBase(exec, root, task);
+      const skip = (onto === ontoBefore && sameGates) || (input.gated != null && head === input.gated);
+      const env = input.baseEnv ? { FACTORY_BASE: onto } : undefined;
       try {
-        for (const argv of onto === ontoBefore && sameGates ? [] : config.merge_gates) {
+        for (const argv of skip ? [] : mergeGates) {
           status(`merge gate ${argv.join(" ")}`);
-          const gate = await exec(argv, { cwd: root });
+          const gate = await exec(argv, { cwd: root, ...(env ? { env } : {}) });
           gates.push(gateData(round, "merge_gates", argv, gate));
           if (!passed(gate)) return { kind: "gate_failed", gate: { argv, result: gate } };
         }

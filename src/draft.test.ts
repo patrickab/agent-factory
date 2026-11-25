@@ -21,8 +21,9 @@ function repo(files: Record<string, string> = {}): string {
 
 function draft(files: Record<string, string>) {
   const text = initDraft(repo(files)).text;
-  const parsed = Bun.YAML.parse(text) as { hooks: unknown; gates: string[][]; merge_gates: string[][] };
-  expect(Object.keys(parsed).sort()).toEqual(["gates", "hooks", "merge_gates"]);
+  const parsed = Bun.YAML.parse(text) as { hooks: unknown; gates: string[][]; merge_gates: string[][]; task_gates: string[][] };
+  expect(Object.keys(parsed).sort()).toEqual(["gates", "hooks", "merge_gates", "task_gates"]);
+  expect(parsed.task_gates).toEqual([]);
   return parsed;
 }
 
@@ -33,7 +34,7 @@ describe("draftFactoryYaml", () => {
     expect(result.text).toBe(template);
     expect(result.source).toBe("");
     const lines = template.split("\n");
-    for (const key of ["hooks:", "gates:", "merge_gates:"]) {
+    for (const key of ["hooks:", "gates:", "merge_gates:", "task_gates:"]) {
       expect(lines[lines.findIndex((line) => line.startsWith(key)) - 1]!.startsWith("#")).toBe(true);
     }
     expect(template).not.toContain("preview:");

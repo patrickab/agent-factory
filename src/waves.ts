@@ -91,7 +91,7 @@ export type WaveEvent =
   | { at: string; kind: "tasks"; tasks: WaveTaskEntry[]; dropped?: string[] }
   | { at: string; kind: "task"; key: string; taskId: string; sessionId: string }
   | { at: string; kind: "stage"; stage: WaveStage; reason: WaveReason | null; detail?: string }
-  | ({ kind: "gate" } & WaveGate)
+  | ({ kind: "gate"; commit?: string } & WaveGate)
   | ({ kind: "review" } & WaveReview)
   | ({ kind: "merge" } & WaveMerge)
   | ({ at: string; kind: "remote" } & Partial<WaveRemote>);
@@ -283,7 +283,10 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
     }
     case "gate": {
       if (typeof raw.passed !== "boolean") throw new Error("passed must be a boolean");
-      return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), passed: raw.passed, wallMs: num(raw, "wallMs"), log: strOrNull(raw, "log") };
+      const event: WaveEvent = { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), passed: raw.passed, wallMs: num(raw, "wallMs"), log: strOrNull(raw, "log") };
+      const commit = strOrNull(raw, "commit");
+      if (commit !== null) event.commit = commit;
+      return event;
     }
     case "review": {
       if (!Array.isArray(raw.findings)) throw new Error("findings must be an array");
@@ -455,6 +458,18 @@ export async function removeWave(id: string): Promise<void> {
   for (const path of [wavePath(id), waveLogPath(id), waveLockPath(id), waveLogLockPath(id), wavePokePath(id), waveReviewsDir(id)]) await rm(path, { recursive: true, force: true });
 }
 
+/**
+ * The commit the wave's `merge_gates` last passed on before its review (the `commit` of the last passed `review` gate
+ * event), null when none: its merge runs them again only on another commit (the target moved since).
+ */
+export function gatedCommit(events: readonly WaveEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.kind === "gate" && event.phase === "review" && event.passed && event.commit !== undefined) return event.commit;
+  }
+  return null;
+}
+
 // ---- the fold ----
 
 /** The wave's state from its declaration and events: a declared wave is `building`. */
@@ -487,7 +502,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         fold.detail = event.detail ?? null;
         break;
       case "gate": {
-        const { kind: _kind, ...gate } = event;
+        const { kind: _kind, commit: _commit, ...gate } = event;
         fold.gates.push(gate);
         break;
       }

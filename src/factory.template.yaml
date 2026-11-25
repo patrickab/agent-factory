@@ -11,8 +11,14 @@ hooks:
   after_merge: []
 # Fast checks (lint, types, format) after every coder turn.
 gates: []
-# Everything, tests included: run in the merge queue on the rebased branch, before the fast-forward.
+# Everything, tests included: run in the merge queue on the rebased branch,
+# before the fast-forward. A wave runs them once on its rebased branch before
+# its reviewer, and at its merge only when the target moved since.
 merge_gates: []
+# A wave's task, in the merge queue into the wave's branch, after gates (not
+# merge_gates): the tests its change reaches. Env FACTORY_BASE is the commit
+# the rebased change sits on (diff FACTORY_BASE..HEAD). Unset: gates only.
+task_gates: []
 # File names (no directory) of lockfiles: a merge that changes one runs after_merge, and they go last in the
 # patch the reviewer reads. Unset means the list below.
 # lockfiles: [uv.lock, package-lock.json, bun.lock, bun.lockb]

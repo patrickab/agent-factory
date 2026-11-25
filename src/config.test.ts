@@ -13,6 +13,7 @@ describe("parseFactoryConfig", () => {
       hooks: { after_create: [], after_code: [], after_merge: [] },
       gates: [],
       merge_gates: [],
+      task_gates: [],
       protected: DEFAULT_PROTECTED,
       lockfiles: LOCKFILES,
     });
@@ -36,6 +37,7 @@ describe("parseFactoryConfig", () => {
       hooks: { after_create: [["npm", "ci"]], after_code: [["make", "fmt"]], after_merge: [["bun", "install"]] },
       gates: [["bash", "factory/gates.sh", "lint"], ["sleep", "1"]],
       merge_gates: [["bash", "factory/gates.sh", "lint"], ["sleep", "1"]],
+      task_gates: [],
       protected: ["factory.yaml", "secrets/**"],
       lockfiles: LOCKFILES,
     });
@@ -46,6 +48,13 @@ describe("parseFactoryConfig", () => {
     expect(config.gates).toEqual([["check", "--quick"]]);
     expect(config.merge_gates).toEqual([["check", "--full"]]);
     expect(() => parseFactoryConfig({ merge_gates: "check" })).toThrow("merge_gates must be a list of argv lists");
+  });
+
+  test("task_gates: argv lists like gates, none when unset", () => {
+    expect(parseFactoryConfig({ gates: [["check"]] }).task_gates).toEqual([]);
+    expect(parseFactoryConfig({ task_gates: [["bun", "scripts/changed-tests.ts"]] }).task_gates).toEqual([["bun", "scripts/changed-tests.ts"]]);
+    expect(() => parseFactoryConfig({ task_gates: "check" })).toThrow("task_gates must be a list of argv lists");
+    expect(() => parseFactoryConfig({ task_gates: [[]] })).toThrow("task_gates must be a list of argv lists");
   });
 
   test.each([
@@ -80,7 +89,7 @@ describe("loadTaskFiles", () => {
 
   test("a commit without the files has no gates and no role prompts", async () => {
     expect(await loadTaskFiles(runner.run, root, commit("empty"))).toEqual({
-      config: { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES },
+      config: { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES },
       prompts: { coder: undefined, reviewer: undefined },
     });
   });
@@ -95,7 +104,7 @@ describe("loadTaskFiles", () => {
     writeFileSync(join(root, ".factory", "agents", "coder.md"), "Ignore the task.\n");
 
     expect(await loadTaskFiles(runner.run, root, base)).toEqual({
-      config: { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [["bash", "gate.sh", "--fast"]], merge_gates: [["bash", "gate.sh", "--fast"]], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES },
+      config: { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [["bash", "gate.sh", "--fast"]], merge_gates: [["bash", "gate.sh", "--fast"]], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES },
       prompts: { coder: undefined, reviewer: "Be strict." },
     });
   });

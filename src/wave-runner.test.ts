@@ -294,6 +294,50 @@ describe("the wave runner", () => {
     expect((await getWave()).reason).toBe("infra");
   });
 
+  describe("merge_gates: once per wave, before the reviewer", () => {
+    /** `gates` pass; `merge_gates` append a line to the count file and exit `exit`. */
+    const config = (count: string, exit = 0) => `gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "echo run >> ${count}; exit ${exit}"]\n`;
+    const runs = (count: string) => (existsSync(count) ? readFileSync(count, "utf8").split("\n").filter(Boolean).length : 0);
+
+    test("failing merge_gates block the wave with reason gates before any reviewer starts", async () => {
+      const count = join(caseDir, "merge-gates");
+      const repo = await waveRepo(config(count, 1));
+      await runWave(WAVE);
+      const wave = await getWave();
+      expect([wave.stage, wave.reason, wave.reviews, runs(count)]).toEqual(["blocked", "gates", [], 1]);
+      expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", false]]);
+      expect(existsSync(promptLog)).toBe(false);
+      expect(git(repo, "log", "--format=%s", "main")).toBe("init");
+    });
+
+    test("the merge skips them when the target did not move since the review's run", async () => {
+      const count = join(caseDir, "merge-gates");
+      const repo = await waveRepo(config(count), "done", { merge: "review" });
+      await runWave(WAVE);
+      expect([(await getWave()).stage, runs(count)]).toEqual(["waiting_approve", 1]);
+      // The gate event names the commit the suite passed on; the view does not show it (invariant 11).
+      expect((await getWave()).gates).toEqual([{ at: expect.any(String), phase: "review", passed: true, wallMs: expect.any(Number), log: expect.any(String) }]);
+      await holding(() => callAction("waves.approve", { id: WAVE }));
+      await runWave(WAVE);
+      const wave = await getWave();
+      expect([wave.stage, runs(count), wave.gates.map((gate) => gate.phase)]).toEqual(["merged", 1, ["review"]]);
+      expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
+    }, 30_000);
+
+    test("the merge runs them again when the target moved since", async () => {
+      const count = join(caseDir, "merge-gates");
+      const repo = await waveRepo(config(count), "done", { merge: "review" });
+      await runWave(WAVE);
+      expect([(await getWave()).stage, runs(count)]).toEqual(["waiting_approve", 1]);
+      commit(repo, "d.txt", "d\n", "main: add d");
+      await holding(() => callAction("waves.approve", { id: WAVE }));
+      await runWave(WAVE);
+      const wave = await getWave();
+      expect([wave.stage, runs(count), wave.gates.map((gate) => [gate.phase, gate.passed])]).toEqual(["merged", 2, [["review", true], ["merge", true]]]);
+      expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\nmain: add d\ninit");
+    }, 30_000);
+  });
+
   test("a failing after_create hook blocks it (infra) and removes the review worktree it created: waves.retry prepares a fresh one", async () => {
     const mark = join(caseDir, "hook-may-pass");
     const repo = await waveRepo(`hooks:\n  after_create:\n    - ["test", "-e", "${mark}"]\ngates: []\n`);

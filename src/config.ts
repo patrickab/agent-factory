@@ -2,7 +2,7 @@
  * The repo's side of a factory task.
  *
  * - Consumes `factory.yaml` (the keys the plugin runs: `hooks.after_create`, `hooks.after_code`, `hooks.after_merge`,
- *   `gates`, `merge_gates`, `protected`, `lockfiles`)
+ *   `gates`, `merge_gates`, `task_gates`, `protected`, `lockfiles`)
  *   and the role prompts `.factory/agents/<role>.md`, all as the task's base commit holds them. The working tree is
  *   the coder's to edit, so it is never the source of the rules the coder is held to
  * - Provides `TaskFiles` (`loadTaskFiles`), `FactoryConfig` (`parseFactoryYaml` for a file read elsewhere: `launch.ts`
@@ -18,8 +18,16 @@ export interface FactoryConfig {
   hooks: { after_create: string[][]; after_code: string[][]; after_merge: string[][] };
   /** After every coder turn: cheap checks (lint, types). */
   gates: string[][];
-  /** In the merge queue, on the branch rebased onto the target, before the fast-forward: the tests. `gates` when unset. */
+  /**
+   * In the merge queue, on the branch rebased onto the target, before the fast-forward: the tests. `gates` when unset.
+   * A wave runs them once on its rebased branch before its reviewer, a task outside a wave at its merge.
+   */
   merge_gates: string[][];
+  /**
+   * A wave's task, in the merge queue into the wave's branch, after `gates`: the tests its change reaches, with env
+   * `FACTORY_BASE` (the commit the rebased change sits on). Empty when unset: `gates` only.
+   */
+  task_gates: string[][];
   protected: string[];
   /**
    * File names (no directory) whose change makes a merge run `hooks.after_merge`; their bodies go last in the review's
@@ -42,7 +50,7 @@ function argvList(value: unknown, key: string): string[][] {
 /** `raw` is the parsed YAML document. A missing or empty file (`undefined`, `null`) means no hooks and no gates. */
 export function parseFactoryConfig(raw: unknown): FactoryConfig {
   if (raw === undefined || raw === null) {
-    return { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
+    return { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
   }
   if (!isRecord(raw)) throw new Error("factory.yaml: the document must be a mapping");
   const hooks = raw.hooks ?? {};
@@ -63,6 +71,7 @@ export function parseFactoryConfig(raw: unknown): FactoryConfig {
     },
     gates: argvList(raw.gates, "gates"),
     merge_gates: raw.merge_gates === undefined ? argvList(raw.gates, "gates") : argvList(raw.merge_gates, "merge_gates"),
+    task_gates: argvList(raw.task_gates, "task_gates"),
     protected: globs,
     lockfiles,
   };

@@ -8,6 +8,7 @@ const config: FactoryConfig = {
   hooks: { after_create: [], after_code: [["fmt"]], after_merge: [] },
   gates: [["lint"], ["test"]],
   merge_gates: [["lint"], ["test"]],
+  task_gates: [],
   protected: DEFAULT_PROTECTED,
   lockfiles: [],
 };

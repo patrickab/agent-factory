@@ -105,6 +105,11 @@ export interface OpsDeps {
    * always may.
    */
   mergeRefusal?(): Promise<string | null>;
+  /**
+   * The id of the wave this task belongs to, null outside a wave. A wave's task merges into the wave's branch with
+   * `gates` and `task_gates` (env `FACTORY_BASE`), not `merge_gates`: the wave runs those. Absent: no wave.
+   */
+  wave?(): Promise<string | null>;
 }
 
 export function newTaskSession(): TaskSession {
@@ -216,7 +221,10 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
         if (!session.disposed) record(deps, "factory-merge-intent", data);
       };
       const message = session.snapshot?.commitMessage ?? commitMessageFallback(task.title);
-      return mergeTask({ exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent, status: mergeStatus, message });
+      // A wave's task: what its change reaches, not the whole suite (the wave runs that once, before its reviewer).
+      const inWave = ((await deps.wave?.()) ?? null) !== null;
+      const gates = inWave ? { gates: [...config.gates, ...config.task_gates], baseEnv: true } : {};
+      return mergeTask({ exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent, status: mergeStatus, message, ...gates });
     },
     openRebase: () => rebaseInProgress(runner.run, root),
     // A follow-up on a merged task is a new commit of its own: the task title already named the first one.

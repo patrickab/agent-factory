@@ -13,7 +13,7 @@ files under Pi's agent dir; there is no daemon.
 |---|---|
 | **task** | One request in one worktree on its own branch, run by a detached runner that drives `pi --mode rpc`. |
 | **round** | A coder turn, then `after_code`, the gates and the optional review; a failed round goes back to the coder. |
-| **gates** | The commands in the target's `factory.yaml` that must pass: `gates` after every turn, `merge_gates` before the merge. |
+| **gates** | The commands in the target's `factory.yaml` that must pass: `gates` after every turn, `task_gates` when a wave's task merges, `merge_gates` before the merge. |
 | **tag** | Path segments (`plugin/m1/w1`) grouping tasks; `tasks.list` and `tasks.wait` filter by a tag or its prefix. |
 | **wave** | A declared set of tasks on one branch, started in order, then reviewed and merged as a whole by its runner. |
 | **rest** | No runner lives and the task waits (`waiting_approve`, `waiting_answer`, `blocked`), ended (`done`, `cancelled`) or was interrupted. |
@@ -75,8 +75,16 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 - `hooks.after_create`: argv lists, run once in a new task worktree
 - `hooks.after_code`: run after every coder turn, before the gates
 - `hooks.after_merge`: run in the main checkout after a merge that changed a lockfile
-- `gates`: fast checks after every coder turn. Exit 0 passes, 75 = broken environment (the task blocks), else fails
-- `merge_gates`: run in the merge queue on the rebased branch before the fast-forward. Default: `gates`
+- Gates, three argv lists. Exit 0 passes, 75 = broken environment (the task blocks), else fails:
+
+  | List | What | When |
+  |---|---|---|
+  | `gates` | fast checks (lint, types) | after every coder turn; a wave's task again at its merge into the wave's branch |
+  | `task_gates` | the tests a wave's task's change reaches; env `FACTORY_BASE` = the commit its rebased change sits on. Default: none | a wave's task at its merge, after `gates` |
+  | `merge_gates` | the full suite. Default: `gates` | a task outside a wave at its merge; a wave once before its reviewer (a failure blocks it, `gates`), again at its merge only when the target moved since |
+
+  This repo's `task_gates`: `scripts/changed-tests.ts` runs the test files the change since `$FACTORY_BASE` reaches
+  (a changed `*.test.ts`, the test next to a changed source, the tests importing it, transitively over relative imports)
 - `protected`: globs the coder must not change. Default: `factory.yaml`, `.factory/**`
 - `lockfiles`: file names that trigger `after_merge` and go last in the review patch. Default:
   `uv.lock`, `package-lock.json`, `bun.lock`, `bun.lockb`
@@ -215,12 +223,13 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   is active: the runner records why (one `stage` event, still `building`) and rests. A record of the wave that no
   `task` event names (a runner died between a launch and its event) is adopted, never launched twice
 - `reviewing`: a worktree on the wave's branch (`hooks.after_create` run when it is made), the rebase onto the target
-  without squashing (every commit of the wave survives), the `gates`, then the reviewer on the whole diff since the
+  without squashing (every commit of the wave survives), the `merge_gates` (the full suite, once per wave; a failure
+  blocks it before any reviewer starts), then the reviewer on the whole diff since the
   target, with the wave's `request` verbatim in its prompt under its own heading. Approved: `merging`, or
   `waiting_approve` with the wave's `merge: review`; rejected: `rejected` (findings in `reviews`); nothing differs from
   the target: `merged` without a review. `factory.yaml` and the reviewer prompt come from the target's tip
-- `merging`: the normal merge queue (`merge_gates`, fast-forward of the target); `merge` records the commit range and
-  the queue wait
+- `merging`: the normal merge queue (`merge_gates` only when the target moved since the review's run, fast-forward of
+  the target); `merge` records the commit range and the queue wait
 - The reviewer has no time limit, a wave's and a task's alike: it runs until it answers or is cancelled
   (`waves.cancel`, `tasks.cancel`). `timeout`, a status of older review entries, still reads
 - A rebase conflict, failed gates (`gates`; exit 75: `infra`), a dirty worktree (`dirty`), a failed reviewer

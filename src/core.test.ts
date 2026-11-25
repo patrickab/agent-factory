@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { ACTIONS, callAction, FactoryError, startWaveTasks, waveMergeRefusal, waveReviewWorktree, type TaskView, type TimelineEntry } from "./core.ts";
+import { ACTIONS, callAction, FactoryError, startWaveTasks, taskWave, waveMergeRefusal, waveReviewWorktree, type TaskView, type TimelineEntry } from "./core.ts";
 import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, lockTask, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
@@ -1582,6 +1582,16 @@ describe("waiting on waves and the wave actions", () => {
     expect(await waveMergeRefusal(task.sessionDir, task.sessionId)).toBeNull();
     await writeTask({ ...record, wave: null });
     expect(await refusal()).toBeNull();
+  });
+
+  test("taskWave: the wave of a factory task's session, null outside a wave or the factory's home", async () => {
+    const [task] = await writtenWave("/r", ["running"]);
+    const record = { ...task, sessionDir: join(caseDir, "agent", "factory", "sessions", "r") };
+    await writeTask(record);
+    expect(await taskWave(record.sessionDir, record.sessionId)).toBe(WAVE);
+    expect(await taskWave(task.sessionDir, task.sessionId)).toBeNull();
+    await writeTask({ ...record, wave: null });
+    expect(await taskWave(record.sessionDir, record.sessionId)).toBeNull();
   });
 
   test("waves.cancel stops the wave's runner and its running tasks, the branch stays; then nothing moves", async () => {

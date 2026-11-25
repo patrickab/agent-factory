@@ -10,6 +10,7 @@ import {
   appendWaveEvent,
   createWave,
   foldWave,
+  gatedCommit,
   listWaves,
   readWave,
   readyForReview,
@@ -221,6 +222,18 @@ describe("foldWave", () => {
     ]);
     expect(fold.reviews).toEqual([{ at: "t2", ...review }]);
     expect(fold.merge).toEqual({ at: "t5", from: "def", to: "fed", queueMs: 8 });
+  });
+
+  test("gatedCommit: the commit of the last passed review gate; the fold and so the view leave it out", () => {
+    const gate = (at: string, phase: "review" | "merge", passed: boolean, commit?: string): WaveEvent => ({ at, kind: "gate", phase, passed, wallMs: 1, log: null, ...(commit ? { commit } : {}) });
+    expect(gatedCommit([])).toBeNull();
+    expect(gatedCommit([gate("t1", "review", true)])).toBeNull();
+    const events = [gate("t1", "review", true, "c1"), gate("t2", "review", false, "c2"), gate("t3", "merge", true, "c3")];
+    expect(gatedCommit(events)).toBe("c1");
+    expect(gatedCommit([...events, gate("t4", "review", true, "c4")])).toBe("c4");
+    expect(foldWave(declaration(ONE), events).gates[0]).toEqual({ at: "t1", phase: "review", passed: true, wallMs: 1, log: null });
+    expect(parseWaveEvent(JSON.parse(JSON.stringify(events[0])))).toEqual(events[0]);
+    expect(() => parseWaveEvent({ ...events[0], commit: 3 })).toThrow("commit must be a string or null");
   });
 
   test("remote: each event sets the fields it carries", () => {

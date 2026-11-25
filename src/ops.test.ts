@@ -231,6 +231,42 @@ describe("the merge step", () => {
     expect([asked, outcome]).toEqual([1, { gates: [], result: { kind: "failed", merge: { ok: false, commit: null, error: "its wave is reviewing", depsSynced: false } } }]);
     expect([gitIn(repo, "rev-parse", "main"), gitIn(worktree, "rev-parse", "HEAD"), gitIn(worktree, "status", "--porcelain")]).toEqual([main, main, "?? task.txt"]);
   });
+
+  /**
+   * A repo whose gates log their list (and `FACTORY_BASE`) to a file outside it, a task with work, and `main` moved on
+   * after the task branched. Returns what the merge ran, `main` before the merge and the merge's outcome.
+   */
+  async function gatedMerge(wave: string | null) {
+    const log = join(scratch, `gates-${counter}.log`);
+    const line = (name: string) => `  - [sh, -c, 'echo "${name} \${FACTORY_BASE:-unset}" >> ${log}']\n`;
+    writeFileSync(join(repo, "factory.yaml"), `gates:\n${line("gates")}task_gates:\n${line("task_gates")}merge_gates:\n${line("merge_gates")}`);
+    gitIn(repo, "commit", "--quiet", "-am", "logging gates");
+    const worktree = addTaskWorktree();
+    writeFileSync(join(repo, "other.txt"), "other\n");
+    gitIn(repo, "add", "-A");
+    gitIn(repo, "commit", "--quiet", "-m", "main moved");
+    const main = gitIn(repo, "rev-parse", "main");
+    const pi = fake(worktree);
+    pi.holdTask("merging");
+    pi.deps.wave = async () => wave;
+    writeFileSync(join(worktree, "task.txt"), "work\n");
+    const files = await loadTaskFiles(new CommandRunner().run, worktree, main);
+    const outcome = await pipelineSteps(pi.deps, pi.deps.session.snapshot!.task, files, false).merge(files.config);
+    return { ran: readFileSync(log, "utf8").trim().split("\n"), main, outcome };
+  }
+
+  test("a wave's task runs gates and task_gates with FACTORY_BASE (the commit its rebased change sits on), not merge_gates", async () => {
+    const { ran, main, outcome } = await gatedMerge("30000000-0000-4000-8000-000000000001");
+    expect(outcome.result.kind).toBe("merged");
+    expect(ran).toEqual([`gates ${main}`, `task_gates ${main}`]);
+    expect(outcome.gates.map((gate) => gate.phase)).toEqual(["merge_gates", "merge_gates"]);
+  });
+
+  test("a task outside a wave still runs merge_gates at its merge, without FACTORY_BASE", async () => {
+    const { ran, outcome } = await gatedMerge(null);
+    expect(outcome.result.kind).toBe("merged");
+    expect(ran).toEqual(["merge_gates unset"]);
+  });
 });
 
 describe("retryTask", () => {
