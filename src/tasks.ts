@@ -8,7 +8,8 @@
  *   then acts on it (spawns a runner, deletes the task) holds it, and a spawned runner holds it until it exits. The
  *   file holds `<pid> <start time>` of its holder; a holder that no longer runs (`hostLiveness`) leaves a stale lock
  *   the next `lockTask` takes over; a lock a live process holds is a `TaskBusyError`
- * - A record written before `tag`, `plan` and `kind` existed reads with their defaults (`systemUser()`, null, `task`)
+ * - A record written before `tag`, `plan`, `kind` and `wave` existed reads with their defaults (`systemUser()`, null,
+ *   `task`, null)
  */
 import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
@@ -35,6 +36,8 @@ export interface TaskRecord {
   /** A memory_store path the task works from; the factory only stores it. */
   plan: string | null;
   kind: TaskKind;
+  /** The wave the task belongs to (`waves.start`, `waves.add`), null for a task outside one. */
+  wave: string | null;
 }
 
 export type TaskKind = "task" | "merge_request";
@@ -94,9 +97,11 @@ export function parseTaskRecord(raw: unknown, id: string): TaskRecord {
   if (plan !== null && (typeof plan !== "string" || plan.trim() === "")) throw new Error("plan must be a non-empty string or null");
   const kind = raw.kind ?? "task";
   if (!TASK_KINDS.includes(kind as TaskKind)) throw new Error(`kind must be one of ${TASK_KINDS.join(", ")}`);
+  const wave = raw.wave ?? null;
+  if (wave !== null && (typeof wave !== "string" || wave === "")) throw new Error("wave must be a non-empty string or null");
   const fields = {} as Record<(typeof RECORD_KEYS)[number], string>;
   for (const key of RECORD_KEYS) fields[key] = raw[key] as string;
-  return { ...fields, tag, plan, kind: kind as TaskKind };
+  return { ...fields, tag, plan, kind: kind as TaskKind, wave };
 }
 
 /** Temp file in the same directory + rename: a reader sees the old record or the new one, never half of one. */

@@ -38,6 +38,7 @@ function record(id: string, overrides: Partial<TaskRecord> = {}): TaskRecord {
     tag: "team",
     plan: null,
     kind: "task",
+    wave: null,
     ...overrides,
   };
 }
@@ -80,14 +81,16 @@ describe("task records", () => {
     expect((await listTasks()).map((task) => task.id)).toEqual([ONE]);
   });
 
-  test("a record without tag, plan and kind reads with the defaults; a malformed stored one is skipped", async () => {
+  test("a record without tag, plan, kind and wave reads with the defaults; a malformed stored one is skipped", async () => {
     mkdirSync(tasksDir(), { recursive: true });
-    const { tag: _tag, plan: _plan, kind: _kind, ...old } = record(ONE);
+    const { tag: _tag, plan: _plan, kind: _kind, wave: _wave, ...old } = record(ONE);
     writeFileSync(join(tasksDir(), `${ONE}.json`), JSON.stringify(old));
     writeFileSync(join(tasksDir(), `${uuid(2)}.json`), JSON.stringify(record(uuid(2), { tag: "a//b" })));
     writeFileSync(join(tasksDir(), `${uuid(3)}.json`), JSON.stringify({ ...record(uuid(3)), kind: "epic" }));
     writeFileSync(join(tasksDir(), `${uuid(4)}.json`), JSON.stringify({ ...record(uuid(4)), plan: "" }));
-    expect(await listTasks()).toEqual([{ ...old, tag: userInfo().username, plan: null, kind: "task" }]);
+    writeFileSync(join(tasksDir(), `${uuid(5)}.json`), JSON.stringify({ ...record(uuid(5)), wave: 3 }));
+    await writeTask(record(uuid(6), { wave: "w-1", createdAt: "2027-01-01T00:00:00.000Z" }));
+    expect(await listTasks()).toEqual([{ ...old, tag: userInfo().username, plan: null, kind: "task", wave: null }, record(uuid(6), { wave: "w-1", createdAt: "2027-01-01T00:00:00.000Z" })]);
     expect(systemUser()).toBe(userInfo().username);
   });
 

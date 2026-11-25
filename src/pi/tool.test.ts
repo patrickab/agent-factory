@@ -14,7 +14,7 @@ import { isTaskSession, registerFactoryTool } from "./tool.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tool-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
-// The gates may run inside a factory task, whose runner sets TASK_SESSION_ENV: the tests start outside one.
+// The factory's gates run these tests inside a task's runner, which sets the task-session variable.
 const savedTaskSession = process.env[TASK_SESSION_ENV];
 
 beforeEach(() => {

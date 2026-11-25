@@ -216,6 +216,7 @@ function fakeRecord(id: string, repo: string): TaskRecord {
     tag: "team/a",
     plan: null,
     kind: "task",
+    wave: null,
   };
 }
 

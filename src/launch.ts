@@ -240,6 +240,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
         tag: input.tag ?? systemUser(),
         plan: input.plan ?? null,
         kind,
+        wave: null,
       };
       await writeTask(record);
       recorded = true;
