@@ -1,0 +1,131 @@
+/**
+ * Where a wave's files lie, and the poke that makes its runner look at it again.
+ *
+ * - `wavesDir()` under the factory home: `<id>.jsonl` (the log), `<id>.log` (the runner's output), `<id>.lock` (the
+ *   runner's lock: one runner per wave), `<id>.log.lock` (held around one read-check-append of the log), `<id>.poke`
+ *   (the poke marker) and `<id>.reviews/` (the reviewer's sessions and patch files)
+ * - `pokeWave`: writes the marker, then starts `bun wave-runner.ts <id>` detached and hands it the wave's lock, unless
+ *   a live runner holds that lock: that runner sees the marker and looks again before it ends (invariant 6)
+ * - `liveWaveRunners`/`stopWaveRunners`: a wave's runner processes, found by `pgrep -f` on the whole wave id argument
+ * - Imports nothing outside node built-ins and the plain plugin modules: a task's runner pokes its wave when it ends
+ */
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { runCommand } from "./run.ts";
+import { factoryHome } from "./settings.ts";
+import { onPath, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
+import { handLockFile, lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
+import { outputTail } from "./util.ts";
+
+// `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory.
+export const WAVE_RUNNER_PATH = join(import.meta.dirname, "wave-runner.ts");
+/** Set on a wave task's runner: the wave it pokes when it ends with the task at rest. */
+export const TASK_WAVE_ENV = "FACTORY_TASK_WAVE";
+/** Set on a wave runner a poke started: the wave's lock is handed to it right after the spawn. */
+export const WAVE_LOCK_ENV = "FACTORY_WAVE_LOCK";
+/** A task runner's own variables, which a poke (from that runner) never passes on to the wave runner. */
+const TASK_RUNNER_ENV = ["FACTORY_TASK_SESSION", "FACTORY_TASK_LOCK", TASK_WAVE_ENV];
+const STOP_WAIT_MS = 10_000;
+
+/** Wave ids have the shape of task ids (`crypto.randomUUID`): never a path separator. */
+const WAVE_ID = /^[0-9a-f-]{36}$/;
+
+export function isWaveId(id: string): boolean {
+  return WAVE_ID.test(id);
+}
+
+export function wavesDir(): string {
+  return join(factoryHome(), "waves");
+}
+
+export function wavePath(id: string): string {
+  return join(wavesDir(), `${id}.jsonl`);
+}
+
+/** Where the detached runner of a wave writes its stdout and stderr. */
+export function waveLogPath(id: string): string {
+  return join(wavesDir(), `${id}.log`);
+}
+
+/** The wave runner's lock: whoever holds it is the wave's one runner. */
+export function waveLockPath(id: string): string {
+  return join(wavesDir(), `${id}.lock`);
+}
+
+/** Held around one read-check-append of the wave's log (`appendWaveEvents`): appends never interleave. */
+export function waveLogLockPath(id: string): string {
+  return join(wavesDir(), `${id}.log.lock`);
+}
+
+/** The poke marker: present while a poke has not been looked at yet. */
+export function wavePokePath(id: string): string {
+  return join(wavesDir(), `${id}.poke`);
+}
+
+/** The reviewer's sessions and patch files of the wave. */
+export function waveReviewsDir(id: string): string {
+  return join(wavesDir(), `${id}.reviews`);
+}
+
+/**
+ * Makes the wave's runner look at the wave: the marker, then a new runner with `env` (default `process.env`) unless a
+ * live one holds the wave's lock. Resolves with true when it started a runner.
+ */
+export async function pokeWave(id: string, env: RunnerEnv = process.env): Promise<boolean> {
+  if (!isWaveId(id)) throw new Error(`${id} is not a wave id`);
+  const bun = onPath("bun");
+  if (bun === null) throw new Error("bun is not on PATH: the wave runner needs it");
+  await mkdir(wavesDir(), { recursive: true });
+  // The marker first: a runner that holds the lock now looks for it after it let the lock go.
+  await writeFile(wavePokePath(id), "", "utf8");
+  try {
+    await lockFile(waveLockPath(id), `wave ${id.slice(0, 8)} has a runner`);
+  } catch (error) {
+    if (error instanceof TaskBusyError) return false;
+    throw error;
+  }
+  let pid: number | undefined;
+  try {
+    const runnerEnv: RunnerEnv = { ...env, [WAVE_LOCK_ENV]: "1" };
+    for (const key of TASK_RUNNER_ENV) delete runnerEnv[key];
+    pid = await spawnDetached([bun, WAVE_RUNNER_PATH, id], runnerEnv, waveLogPath(id), import.meta.dirname);
+  } finally {
+    if (pid === undefined) await unlockFile(waveLockPath(id));
+  }
+  if (pid !== undefined) await handLockFile(waveLockPath(id), pid);
+  return pid !== undefined;
+}
+
+/** The pids of the wave's live runners, found by their command line (`wave-runner.ts <id>`, the whole id). */
+export async function liveWaveRunners(id: string): Promise<number[]> {
+  if (!isWaveId(id)) return [];
+  const result = await runCommand(["pgrep", "-f", `wave-runner\\.ts ${id}$`], { cwd: "/", maxStdoutChars: 10_000 });
+  // Exit 1 is "no match"; anything else (pgrep missing or failing) would hide a live runner.
+  if (result.exitCode === 1) return [];
+  if (result.exitCode !== 0) throw new Error(`pgrep, which finds a wave's runner, failed (exit ${result.exitCode}): ${outputTail(result.output)}`);
+  return result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number);
+}
+
+async function runnersEnded(id: string, waitMs: number): Promise<boolean> {
+  const deadline = Date.now() + waitMs;
+  while ((await liveWaveRunners(id)).length > 0) {
+    if (Date.now() > deadline) return false;
+    await Bun.sleep(100);
+  }
+  return true;
+}
+
+/** Ends the wave's runners: SIGTERM (the runner cancels its commands and lets the lock go), SIGKILL when that is not enough. */
+export async function stopWaveRunners(id: string): Promise<void> {
+  const pids = await liveWaveRunners(id);
+  if (pids.length === 0) return;
+  for (const pid of pids) signalRunner(pid, "SIGTERM");
+  if (await runnersEnded(id, STOP_WAIT_MS)) return;
+  for (const pid of await liveWaveRunners(id)) signalRunner(pid, "SIGKILL");
+  if (!(await runnersEnded(id, STOP_WAIT_MS))) throw new Error(`the runner of wave ${id} does not end`);
+}
+
+/** Removes the wave's poke marker. */
+export async function clearPoke(id: string): Promise<void> {
+  await rm(wavePokePath(id), { force: true });
+}

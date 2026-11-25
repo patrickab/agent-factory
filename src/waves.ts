@@ -2,20 +2,26 @@
  * A wave's record on disk and the fold from its events to its state. Pure: nothing here starts a process.
  *
  * - One file per wave, `<factoryHome>/waves/<id>.jsonl`, append-only: line 1 is the declaration (`createWave`), every
- *   later line one event (`appendWaveEvent`). Lock and runner log lie next to it (`waveLockPath`, `waveLogPath`)
+ *   later line one event (`appendWaveEvent`, `appendWaveEvents`). Its other files lie next to it (`wave-poke.ts`)
  * - The wave's state is only ever `foldWave` of its events plus its tasks' states: the scheduling helpers
  *   (`startableKeys`, `readyForReview`, `allCancelled`, `waveCounts`) take the fold and a map key -> task state
- * - One writer appends: the holder of the wave's lock. A line is written by one write; a line cut short by a crash
- *   is skipped when read, and the next append starts on a line of its own
+ * - Every append holds the log lock (`waveLogLockPath`) from the read of the log to its write: appends never interleave,
+ *   and `appendWaveEvents` checks the fold under it (a compare-and-append: the runner's stage change loses against a
+ *   `waves.add` that came first). A line cut short by a crash is skipped when read, and the next append starts on a
+ *   line of its own
  * - `listWaves` skips files that are no valid wave, as `listTasks` does; `validateTaskSpecs` checks specs a wave adds
  */
 import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { FactoryError } from "./core.ts";
-import { factoryHome } from "./settings.ts";
 import { parseSettingsFields, type Settings } from "./state.ts";
-import { lockFile, unlockFile } from "./tasks.ts";
+import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
+import { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
+
+export { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir };
+
+/** How long an append waits for the log lock before the wave counts as busy. */
+const LOG_LOCK_WAIT_MS = 10_000;
 
 export type WaveStage = "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled";
 export type WaveReason = "conflict" | "gates" | "dirty" | "infra" | "review_failed";
@@ -119,39 +125,35 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides"> {
   actions: string[];
 }
 
-/** Wave ids have the shape of task ids (`crypto.randomUUID`): never a path separator. */
-const WAVE_ID = /^[0-9a-f-]{36}$/;
 const TASK_KEY = /^[A-Za-z0-9._-]+$/;
 
-export function isWaveId(id: string): boolean {
-  return WAVE_ID.test(id);
-}
-
-export function wavesDir(): string {
-  return join(factoryHome(), "waves");
-}
-
-export function wavePath(id: string): string {
-  return join(wavesDir(), `${id}.jsonl`);
-}
-
-/** Where the detached runner of a wave writes its stdout and stderr. */
-export function waveLogPath(id: string): string {
-  return join(wavesDir(), `${id}.log`);
-}
-
-export function waveLockPath(id: string): string {
-  return join(wavesDir(), `${id}.lock`);
-}
-
-/** Takes the wave's lock for this process: a `TaskBusyError` while a live process holds it. */
+/** Takes the wave runner's lock for this process: a `TaskBusyError` while a live runner holds it. */
 export async function lockWave(id: string): Promise<void> {
-  await lockFile(waveLockPath(id), `wave ${id.slice(0, 8)} is busy: another factory action holds it, try again once it has ended`);
+  await lockFile(waveLockPath(id), `wave ${id.slice(0, 8)} has a runner`);
 }
 
-/** Removes the wave's lock if this process holds it. */
+/** Removes the wave runner's lock if this process holds it. */
 export async function unlockWave(id: string): Promise<void> {
   await unlockFile(waveLockPath(id));
+}
+
+/** Runs `act` holding the wave's log lock, waiting up to `LOG_LOCK_WAIT_MS` for it; then a `TaskBusyError`. */
+async function withLogLock<T>(id: string, act: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + LOG_LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      await lockFile(waveLogLockPath(id), `wave ${id.slice(0, 8)} is busy: another process writes its log, try again`);
+      break;
+    } catch (error) {
+      if (!(error instanceof TaskBusyError) || Date.now() > deadline) throw error;
+      await Bun.sleep(20);
+    }
+  }
+  try {
+    return await act();
+  } finally {
+    await unlockFile(waveLogLockPath(id));
+  }
 }
 
 // ---- parsing ----
@@ -331,28 +333,49 @@ export async function createWave(declaration: WaveDeclaration): Promise<void> {
   }
 }
 
-/** Appends one event to an existing wave; the caller holds the wave's lock. Returns the event as written. */
+/** Appends one event to an existing wave under its log lock. Returns the event as written. */
 export async function appendWaveEvent(id: string, event: NewWaveEvent): Promise<WaveEvent> {
-  if (!isWaveId(id)) throw new FactoryError("not_found", `${id} is not a wave id`);
-  const written = parseWaveEvent({ ...event, at: event.at ?? new Date().toISOString() });
-  let file;
-  try {
-    file = await open(wavePath(id), "r+");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new FactoryError("not_found", `no wave ${id}`);
-    throw error;
-  }
-  try {
-    const { size } = await file.stat();
-    const last = Buffer.alloc(1);
-    if (size > 0) await file.read(last, 0, 1, size - 1);
-    // After a torn append the new event starts on a line of its own; the torn line is skipped on read.
-    const prefix = size > 0 && last[0] !== 0x0a ? "\n" : "";
-    await file.write(`${prefix}${JSON.stringify(written)}\n`, size);
-  } finally {
-    await file.close();
-  }
+  const [written] = (await appendWaveEvents(id, [event])) ?? [];
   return written;
+}
+
+/**
+ * Appends events to an existing wave in one write, under its log lock. `events` may be a function of the wave's fold
+ * read under that lock (a compare-and-append): it returns the events, or null to append nothing; it may throw. Returns
+ * the events as written, null when the function returned null.
+ */
+export async function appendWaveEvents(id: string, events: NewWaveEvent[] | ((fold: WaveFold) => NewWaveEvent[] | null)): Promise<WaveEvent[] | null> {
+  if (!isWaveId(id)) throw new FactoryError("not_found", `${id} is not a wave id`);
+  return withLogLock(id, async () => {
+    let chosen: NewWaveEvent[] | null;
+    if (typeof events === "function") {
+      const file = await readWave(id);
+      chosen = events(foldWave(file.declaration, file.events));
+      if (chosen === null) return null;
+    } else {
+      chosen = events;
+    }
+    const at = new Date().toISOString();
+    const written = chosen.map((event) => parseWaveEvent({ ...event, at: event.at ?? at }));
+    let handle;
+    try {
+      handle = await open(wavePath(id), "r+");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new FactoryError("not_found", `no wave ${id}`);
+      throw error;
+    }
+    try {
+      const { size } = await handle.stat();
+      const last = Buffer.alloc(1);
+      if (size > 0) await handle.read(last, 0, 1, size - 1);
+      // After a torn append the new events start on a line of their own; the torn line is skipped on read.
+      const prefix = size > 0 && last[0] !== 0x0a ? "\n" : "";
+      await handle.write(`${prefix}${written.map((event) => `${JSON.stringify(event)}\n`).join("")}`, size);
+    } finally {
+      await handle.close();
+    }
+    return written;
+  });
 }
 
 /** The wave's file. A missing wave is a `not_found` `FactoryError`; an invalid file an `Error` naming it. */
@@ -391,12 +414,10 @@ export async function listWaves(repo?: string): Promise<WaveFile[]> {
   return waves.sort((a, b) => a.declaration.createdAt.localeCompare(b.declaration.createdAt));
 }
 
-/** Removes the wave's file, its runner log and its lock. Its tasks and branch stay. */
+/** Removes the wave's file, its runner log, its locks, its poke marker and its reviews. Its tasks and branch stay. */
 export async function removeWave(id: string): Promise<void> {
   if (!isWaveId(id)) return;
-  await rm(wavePath(id), { force: true });
-  await rm(waveLogPath(id), { force: true });
-  await rm(waveLockPath(id), { force: true });
+  for (const path of [wavePath(id), waveLogPath(id), waveLockPath(id), waveLogLockPath(id), wavePokePath(id), waveReviewsDir(id)]) await rm(path, { recursive: true, force: true });
 }
 
 // ---- the fold ----

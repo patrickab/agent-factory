@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_PROTECTED, type FactoryConfig } from "./config.ts";
-import { runMerge, runMergeRequest, runRound, type PipelineSteps } from "./pipeline.ts";
+import { runMerge, runRound, type PipelineSteps } from "./pipeline.ts";
 import type { CommandResult } from "./run.ts";
-import { gateData, stateDraft, type Draft, type MergeData, type ReviewData, type ReviewStatus, type Settings, type Snapshot } from "./state.ts";
+import { type Draft, type MergeData, type ReviewData, type ReviewStatus, type Settings, type Snapshot } from "./state.ts";
 
 const config: FactoryConfig = {
   hooks: { after_create: [], after_code: [["fmt"]], after_merge: [] },
@@ -320,81 +320,5 @@ describe("runMerge", () => {
   test("a merge that fails under a cancel ends cancelled", async () => {
     const entries = await runMerge(snapshotOf(), config, fakeSteps({ cancelled: () => true, merge: async () => ({ gates: [], result: { kind: "failed", merge: failed } }) }));
     expect(lastState(entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
-  });
-});
-
-describe("runMergeRequest", () => {
-  const mergeRequestOf = (settings: Partial<Settings> = {}): Snapshot => {
-    const snapshot = snapshotOf(settings);
-    return { ...snapshot, task: { ...snapshot.task, branch: "wave", kind: "merge_request", source: "wave" } };
-  };
-  const steps = (overrides: Partial<PipelineSteps> = {}, conflicts: string[] | null = null, dirty = false) => {
-    const base = fakeSteps(overrides);
-    return Object.assign(base, {
-      dirty: async () => dirty,
-      trackedChanges: async () => false,
-      removeUntracked: async () => {
-        base.calls.push("removeUntracked");
-      },
-      rebase: async () => {
-        base.calls.push("rebase");
-        return conflicts;
-      },
-    });
-  };
-  const states = (entries: Draft[]) => entries.flatMap((entry) => (entry.type === "custom" && entry.customType === "factory-state" ? [`${entry.data.state}/${entry.data.reason}`] : []));
-
-  test("rebase, gates (no after_code hooks), review even with review off, then merging; review merge mode waits for approve", async () => {
-    const auto = steps();
-    expect(states(await runMergeRequest(mergeRequestOf({ review: false }), auto))).toEqual(["merging/passed"]);
-    expect(auto.calls).toEqual(["rebase", "lint", "test", "removeUntracked", "review"]);
-    expect(states(await runMergeRequest(mergeRequestOf({ merge: "review" }), steps()))).toEqual(["waiting_approve/passed"]);
-  });
-
-  test("a conflict, a failed gate (infra too) or a rejected review block it, and never open a round", async () => {
-    const conflict = await runMergeRequest(mergeRequestOf(), steps({}, ["a.ts"]));
-    const failing = (code: number) => steps({ runCommand: async () => commandResult(code, "boom") });
-    const gates = await runMergeRequest(mergeRequestOf(), failing(1));
-    const infra = await runMergeRequest(mergeRequestOf(), failing(75));
-    const rejected = await runMergeRequest(mergeRequestOf(), steps({ review: async () => reviewOf("ok", ["major"]) }));
-    expect([conflict, gates, infra, rejected].map(states)).toEqual([["blocked/conflict"], ["blocked/gates"], ["blocked/gates"], ["blocked/review_rejected"]]);
-    expect([conflict, gates, infra, rejected].flatMap(kinds).filter((kind) => kind === "factory-round" || kind === "custom_message")).toEqual([]);
-    expect(kinds(rejected)).toEqual(["factory-gate", "factory-gate", "factory-review", "factory-state"]);
-  });
-
-  test("uncommitted changes in its worktree block it before the rebase: nothing is committed for it", async () => {
-    const dirty = steps({}, null, true);
-    expect(states(await runMergeRequest(mergeRequestOf(), dirty))).toEqual(["blocked/dirty"]);
-    expect(dirty.calls).toEqual([]);
-  });
-
-  test("a gate that leaves tracked files changed blocks it as dirty before the review (review 2, finding 1)", async () => {
-    const rewritten = Object.assign(steps(), { trackedChanges: async () => true });
-    expect(states(await runMergeRequest(mergeRequestOf(), rewritten))).toEqual(["blocked/dirty"]);
-    expect(rewritten.calls).toEqual(["rebase", "lint", "test", "removeUntracked"]);
-  });
-
-  test("what the gates leave untracked is removed after them, failed or cancelled too (review 3, finding 1)", async () => {
-    const failing = steps({ runCommand: async () => commandResult(1, "boom") });
-    expect(states(await runMergeRequest(mergeRequestOf(), failing))).toEqual(["blocked/gates"]);
-    expect(failing.calls).toEqual(["rebase", "removeUntracked"]);
-    const cancelled = steps({ cancelled: () => cancelled.calls.includes("lint") });
-    expect(states(await runMergeRequest(mergeRequestOf(), cancelled))).toEqual(["cancelled/cancelled"]);
-    expect(cancelled.calls).toEqual(["rebase", "lint", "removeUntracked"]);
-  });
-
-  test("its merge blocks on a conflict or a failed merge gate instead of a coder round", async () => {
-    const conflict = await runMerge(mergeRequestOf(), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "conflict", files: ["a.ts"] } }) }));
-    const gate = { argv: ["test"], result: commandResult(1, "fail") };
-    const gateFailed = await runMerge(mergeRequestOf(), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate } }) }));
-    expect([conflict, gateFailed].map(states)).toEqual([["blocked/conflict"], ["blocked/gates"]]);
-    expect([...conflict, ...gateFailed].map((entry) => entry.type)).toEqual(["custom", "custom"]);
-  });
-
-  test("its merge blocks as dirty when a merge gate left tracked files changed (review 2, finding 1)", async () => {
-    const gate = gateData(1, "merge_gates", ["fmt"], commandResult(0, ""));
-    const entries = await runMerge(mergeRequestOf(), config, fakeSteps({ merge: async () => ({ gates: [gate], result: { kind: "dirty" } }) }));
-    expect(kinds(entries)).toEqual(["factory-gate", "factory-state"]);
-    expect(states(entries)).toEqual(["blocked/dirty"]);
   });
 });

@@ -7,9 +7,6 @@
  *   (`agent-worktree` when it is on PATH, else `git worktree add`), runs the repo's `hooks.after_create` in it, writes
  *   the `TaskRecord` and starts the detached runner with `/factory start <json>`. A failing or aborted step undoes the
  *   earlier ones, through git only. A missing target branch or `factory.yaml` throws a `LaunchRefusedError`
- * - A `merge_request` gets a worktree on its existing `source` branch instead (`git worktree add`): a source that is
- *   missing, the target itself or checked out in a worktree is a `LaunchRefusedError`. Its source branch is never
- *   deleted, not by a failed start and not by `deleteTask`
  * - Provides `sendCommand`: one more message to a task's session, through a new detached runner (the caller's `env`;
  *   `runnerSpawn` puts it in a systemd user scope under a service) that takes over the task lock its caller holds;
  *   `messageTask`: a message to the coder in any state but merging (`taskInboxPath` of a live runner, else a new
@@ -17,9 +14,9 @@
  * - Provides `defaultBranch`, `localBranchExists` and `startCommand` (the payload `parseStartPayload` accepts)
  * - Provides `liveRunners`/`stopRunners` (a task's runner processes, found with `pgrep -f`), `unmergedWork` and
  *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another)
+ * - The detached spawn itself (`runnerSpawn`, `spawnDetached`) lives in `spawn.ts`, shared with the wave runner's poke
  */
-import { spawn } from "node:child_process";
-import { closeSync, existsSync, openSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { appendFile, mkdir, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
@@ -28,7 +25,9 @@ import { inboxReadPath, lastFactoryState, taskMainBranch } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
 import type { Settings, StartPayload } from "./state.ts";
-import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskKind, type TaskRecord } from "./tasks.ts";
+import { onPath, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
+import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { TASK_WAVE_ENV } from "./wave-poke.ts";
 import { outputTail } from "./util.ts";
 
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory, and a runner would not start.
@@ -38,10 +37,7 @@ const HOOK_TIMEOUT_MS = 10 * 60_000;
 /** How long `stopRunners` waits for a runner to end after SIGTERM, then after SIGKILL. */
 const STOP_WAIT_MS = 10_000;
 
-/** `Bun.which` reads the PATH the process started with unless it is given the current one. */
-function onPath(binary: string): string | null {
-  return Bun.which(binary, { PATH: process.env.PATH ?? "" });
-}
+export { runnerSpawn, type RunnerEnv };
 
 export async function localBranchExists(repo: string, branch: string): Promise<boolean> {
   const result = await runCommand(["git", "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo });
@@ -59,8 +55,8 @@ export async function defaultBranch(repo: string): Promise<string> {
 }
 
 /** The prompt that starts a task in its session. */
-export function startCommand(title: string, request: string, settings: Settings, kind: TaskKind = "task"): string {
-  const payload: StartPayload = { request, title, settings, ...(kind === "merge_request" ? { kind } : {}) };
+export function startCommand(title: string, request: string, settings: Settings): string {
+  const payload: StartPayload = { request, title, settings };
   return `/factory start ${JSON.stringify(payload)}`;
 }
 
@@ -94,12 +90,8 @@ async function removeWorktree(repo: string, path: string | undefined, branch: st
   if (branch !== undefined && (await localBranchExists(repo, branch))) await runCommand(["git", "branch", "-D", branch], { cwd: repo });
 }
 
-/** The branch a task owns and removing it deletes: a merge request's source branch is not its own. */
-function ownBranch(record: Pick<TaskRecord, "branch" | "kind">): string | undefined {
-  return record.kind === "merge_request" ? undefined : record.branch;
-}
-
-function worktreePath(repo: string, name: string): string {
+/** Where a worktree named `name` of `repo` lies when `agent-worktree` does not choose. */
+export function worktreePath(repo: string, name: string): string {
   return resolve(repo, "..", "worktrees", basename(repo), name);
 }
 
@@ -123,31 +115,9 @@ async function createWorktree(exec: Exec, repo: string, name: string, base: stri
   }
 }
 
-/**
- * A worktree named `name` on the existing branch `source`, through git: `agent-worktree` only makes new branches. A
- * failure removes the worktree the attempt left, never `source`.
- */
-async function checkoutWorktree(exec: Exec, repo: string, name: string, source: string): Promise<string> {
-  const path = worktreePath(repo, name);
-  try {
-    await git(exec, repo, ["worktree", "add", "--quiet", path, source]);
-    return path;
-  } catch (error) {
-    await removeWorktree(repo, path, undefined).catch(() => undefined);
-    throw error;
-  }
-}
-
-/** Refuses a merge request's `source` unless it is a local branch other than `target`, checked out in no worktree. */
-async function requireSourceBranch(repo: string, source: string, target: string): Promise<void> {
-  if (!(await localBranchExists(repo, source))) throw new LaunchRefusedError(`${repo}: the source branch ${source} does not exist locally`);
-  if (source === target) throw new LaunchRefusedError(`${repo}: the source branch ${source} is the target branch itself`);
-  const holder = await worktreeOfBranch(repo, source);
-  if (holder !== undefined) throw new LaunchRefusedError(`${repo}: the source branch ${source} is checked out in ${holder}, remove that worktree or switch it to another branch first`);
-}
-
-async function runAfterCreate(exec: Exec, worktree: string): Promise<void> {
-  for (const argv of await afterCreateHooks(worktree)) {
+/** Runs `hooks` (default: `hooks.after_create` of the worktree's `factory.yaml`) in `worktree`; throws on the first that fails. */
+export async function runAfterCreate(exec: Exec, worktree: string, hooks?: string[][]): Promise<void> {
+  for (const argv of hooks ?? (await afterCreateHooks(worktree))) {
     const result = await exec(argv, { cwd: worktree, timeoutMs: HOOK_TIMEOUT_MS });
     if (result.exitCode !== 0 || result.killed) {
       const why = result.timedOut ? "timed out" : `exit ${result.exitCode}`;
@@ -162,9 +132,6 @@ export class LaunchRefusedError extends Error {}
 /** A message `messageTask` refuses for the task's state (merging, not started). */
 export class MessageRefusedError extends Error {}
 
-/** The environment of the runners a caller starts (`process.env` when it gives none). */
-export type RunnerEnv = Record<string, string | undefined>;
-
 export interface LaunchInput {
   /** A path in the repository; the task records its primary checkout. */
   repo: string;
@@ -174,10 +141,6 @@ export interface LaunchInput {
   /** Default: `systemUser()`. */
   tag?: string;
   plan?: string | null;
-  /** Default: `task`. */
-  kind?: TaskKind;
-  /** The existing branch a `merge_request` reviews and merges; required for that kind, ignored for `task`. */
-  source?: string;
   /** Aborting it before the runner is started kills the running hook and undoes the launch. */
   signal?: AbortSignal;
   /** The runner's environment. */
@@ -207,12 +170,6 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
   if (config.exitCode !== 0) {
     throw new LaunchRefusedError(`${repo}: branch ${settings.branch} has no factory.yaml (write one with /factory init or the config.write action, and commit it)`);
   }
-  const kind = input.kind ?? "task";
-  const source = kind === "merge_request" ? input.source : undefined;
-  if (kind === "merge_request") {
-    if (source === undefined) throw new Error("a merge request needs a source branch");
-    await requireSourceBranch(repo, source, settings.branch);
-  }
 
   const id = crypto.randomUUID();
   const name = `${slug(input.title)}-${id.slice(0, 8)}`;
@@ -222,8 +179,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
   input.signal?.addEventListener("abort", abort, { once: true });
   try {
     if (aborted()) throw new Error("the start was aborted");
-    const made = source === undefined ? createWorktree(commands.run, repo, name, settings.branch) : checkoutWorktree(commands.run, repo, name, source);
-    const worktree = await made.catch((error: unknown) => {
+    const worktree = await createWorktree(commands.run, repo, name, settings.branch).catch((error: unknown) => {
       throw aborted() ? new Error("the start was aborted") : error;
     });
     let recorded = false;
@@ -234,24 +190,23 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
         id,
         repo,
         worktree,
-        branch: source ?? name,
+        branch: name,
         title: input.title,
         sessionId: crypto.randomUUID(),
         sessionDir: join(factoryHome(), "sessions", repoDirName(repo)),
         createdAt: new Date().toISOString(),
         tag: input.tag ?? systemUser(),
         plan: input.plan ?? null,
-        kind,
         wave: input.wave ?? null,
       };
       await writeTask(record);
       recorded = true;
       await lockTask(id);
-      await sendCommand(record, startCommand(input.title, input.request, settings, kind), input.env);
+      await sendCommand(record, startCommand(input.title, input.request, settings), input.env);
       return record;
     } catch (error) {
       if (recorded) await removeTask(id).catch(() => undefined);
-      await removeWorktree(repo, worktree, source === undefined ? name : undefined).catch(() => undefined);
+      await removeWorktree(repo, worktree, name).catch(() => undefined);
       throw aborted() ? new Error("the start was aborted") : error;
     }
   } finally {
@@ -259,56 +214,25 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
   }
 }
 
-/** What a systemd user scope needs to reach the user manager; copied from the host when `env` lacks it. */
-const SYSTEMD_USER_ENV = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"];
-
-/**
- * The argv and environment of a runner. Under a systemd service (`INVOCATION_ID` in `hostEnv`) with `systemdRun` on
- * PATH it runs in a user scope of its own, outside the service's control group: a restart of the service leaves it.
- * `systemd-run --scope` execs the command, so the spawned pid is the runner's.
- */
-export function runnerSpawn(command: string[], env: RunnerEnv, hostEnv: RunnerEnv, systemdRun: string | null): { argv: string[]; env: RunnerEnv } {
-  if (!hostEnv.INVOCATION_ID || systemdRun === null) return { argv: command, env };
-  const scopeEnv = { ...env };
-  for (const key of SYSTEMD_USER_ENV) if (scopeEnv[key] === undefined && hostEnv[key] !== undefined) scopeEnv[key] = hostEnv[key];
-  return { argv: [systemdRun, "--user", "--scope", "--quiet", "--", ...command], env: scopeEnv };
-}
-
 /**
  * Starts `bun runner.ts` for `message` in its own process group, detached, output appended to the task's log, with
- * `env` (default `process.env`) plus the lock path. The caller holds the task lock (`lockTask`): it passes to the
- * runner, which removes it when it exits.
+ * `env` (default `process.env`) plus the lock path and the task's wave (`TASK_WAVE_ENV`, which the runner pokes when
+ * it ends with the task at rest). The caller holds the task lock (`lockTask`): it passes to the runner, which removes
+ * it when it exits.
  */
 export async function sendCommand(record: TaskRecord, message: string, env: RunnerEnv = process.env): Promise<void> {
   const bun = onPath("bun");
   if (bun === null) throw new Error("bun is not on PATH: the task runner needs it");
   await mkdir(tasksDir(), { recursive: true });
   await mkdir(record.sessionDir, { recursive: true });
-  const log = openSync(taskLogPath(record.id), "a");
-  let pid: number | undefined;
-  try {
-    const runner = runnerSpawn(
-      [bun, RUNNER_PATH, record.worktree, record.sessionDir, record.sessionId, taskInboxPath(record.id), message],
-      // A task runs without pauses, so the default short prompt cache is enough and the dearer long cache writes are not.
-      { ...env, FACTORY_TASK_LOCK: taskLockPath(record.id), PI_CACHE_RETENTION: "short" },
-      process.env,
-      onPath("systemd-run"),
-    );
-    const child = spawn(runner.argv[0], runner.argv.slice(1), {
-      cwd: dirname(RUNNER_PATH),
-      detached: true,
-      env: runner.env,
-      stdio: ["ignore", log, log],
-    });
-    await new Promise<void>((resolveSpawn, reject) => {
-      child.once("spawn", () => resolveSpawn());
-      child.once("error", reject);
-    });
-    child.unref();
-    pid = child.pid;
-  } finally {
-    closeSync(log);
-  }
+  const { [TASK_WAVE_ENV]: _wave, ...base } = env;
+  const pid = await spawnDetached(
+    [bun, RUNNER_PATH, record.worktree, record.sessionDir, record.sessionId, taskInboxPath(record.id), message],
+    // A task runs without pauses, so the default short prompt cache is enough and the dearer long cache writes are not.
+    { ...base, FACTORY_TASK_LOCK: taskLockPath(record.id), PI_CACHE_RETENTION: "short", ...(record.wave === null ? {} : { [TASK_WAVE_ENV]: record.wave }) },
+    taskLogPath(record.id),
+    dirname(RUNNER_PATH),
+  );
   if (pid !== undefined) await handTaskLock(record.id, pid);
 }
 
@@ -369,19 +293,6 @@ export async function liveRunners(record: Pick<TaskRecord, "sessionId">): Promis
   return result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number);
 }
 
-function signalRunner(pid: number, signal: NodeJS.Signals): void {
-  // A runner leads its own process group, Pi is in it. Every command the plugin starts has a group of its own
-  // (`run.ts`), so a Pi killed with SIGKILL leaves those running.
-  for (const target of [-pid, pid]) {
-    try {
-      process.kill(target, signal);
-      return;
-    } catch {
-      // not a group leader, or gone already
-    }
-  }
-}
-
 async function runnersEnded(record: Pick<TaskRecord, "sessionId">, waitMs: number): Promise<boolean> {
   const deadline = Date.now() + waitMs;
   while ((await liveRunners(record)).length > 0) {
@@ -409,12 +320,11 @@ export interface UnmergedWork {
 
 /**
  * The task's unmerged work. Without a `target` (the task never recorded one) its commits are those no other local
- * branch has. A worktree whose status cannot be read counts as dirty. A merge request's commits stay on its source
- * branch, which removing it keeps: none count.
+ * branch has. A worktree whose status cannot be read counts as dirty.
  */
 export async function unmergedWork(record: TaskRecord, target: string | undefined): Promise<UnmergedWork> {
   let commits = 0;
-  if (ownBranch(record) !== undefined && (await localBranchExists(record.repo, record.branch))) {
+  if (await localBranchExists(record.repo, record.branch)) {
     const range =
       target !== undefined && (await localBranchExists(record.repo, target))
         ? [`refs/heads/${target}..refs/heads/${record.branch}`]
@@ -431,14 +341,14 @@ export async function unmergedWork(record: TaskRecord, target: string | undefine
 }
 
 /**
- * Removes the task's worktree, its own branch (through git; a merge request's source branch stays), its record, its
- * runner log, its lock and its inbox. The session file stays.
+ * Removes the task's worktree, its own branch (through git), its record, its runner log, its lock and its inbox. The
+ * session file stays.
  */
 export async function deleteTask(record: TaskRecord): Promise<void> {
-  const branch = ownBranch(record);
+  const branch = record.branch;
   await removeWorktree(record.repo, record.worktree, branch);
   if (existsSync(record.worktree)) throw new Error(`${record.worktree}: the worktree could not be removed`);
-  if (branch !== undefined && (await localBranchExists(record.repo, branch))) throw new Error(`${record.repo}: the branch ${branch} could not be deleted`);
+  if (await localBranchExists(record.repo, branch)) throw new Error(`${record.repo}: the branch ${branch} could not be deleted`);
   await removeTask(record.id);
   await rm(taskInboxPath(record.id), { force: true });
   await rm(inboxReadPath(taskInboxPath(record.id)), { force: true });

@@ -421,7 +421,6 @@ describe("sendCommand", () => {
       createdAt: new Date().toISOString(),
       tag: "t",
       plan: null,
-      kind: "task",
       wave: null,
     };
     await lockTask(record.id);
@@ -452,7 +451,6 @@ describe("messageTask", () => {
       createdAt: new Date().toISOString(),
       tag: "t",
       plan: null,
-      kind: "task",
       wave: null,
     };
   }

@@ -8,8 +8,8 @@
  *   then acts on it (spawns a runner, deletes the task) holds it, and a spawned runner holds it until it exits. The
  *   file holds `<pid> <start time>` of its holder; a holder that no longer runs (`hostLiveness`) leaves a stale lock
  *   the next `lockTask` takes over; a lock a live process holds is a `TaskBusyError`
- * - A record written before `tag`, `plan`, `kind` and `wave` existed reads with their defaults (`systemUser()`, null,
- *   `task`, null)
+ * - A record written before `tag`, `plan` and `wave` existed reads with their defaults (`systemUser()`, null, null);
+ *   the `kind` field of older records is ignored
  */
 import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
@@ -35,14 +35,10 @@ export interface TaskRecord {
   tag: string;
   /** A memory_store path the task works from; the factory only stores it. */
   plan: string | null;
-  kind: TaskKind;
   /** The wave the task belongs to (`waves.start`, `waves.add`), null for a task outside one. */
   wave: string | null;
 }
 
-export type TaskKind = "task" | "merge_request";
-
-const TASK_KINDS: readonly TaskKind[] = ["task", "merge_request"];
 const RECORD_KEYS = ["id", "repo", "worktree", "branch", "title", "sessionId", "sessionDir", "createdAt"] as const;
 /** The shape of `crypto.randomUUID()`: a task id never holds a path separator. */
 const TASK_ID = /^[0-9a-f-]{36}$/;
@@ -95,13 +91,11 @@ export function parseTaskRecord(raw: unknown, id: string): TaskRecord {
   if (typeof tag !== "string" || (raw.tag != null && !isTaskTag(tag))) throw new Error(`tag ${JSON.stringify(tag)} is not segments of A-Z a-z 0-9 . _ @ + - joined by /`);
   const plan = raw.plan ?? null;
   if (plan !== null && (typeof plan !== "string" || plan.trim() === "")) throw new Error("plan must be a non-empty string or null");
-  const kind = raw.kind ?? "task";
-  if (!TASK_KINDS.includes(kind as TaskKind)) throw new Error(`kind must be one of ${TASK_KINDS.join(", ")}`);
   const wave = raw.wave ?? null;
   if (wave !== null && (typeof wave !== "string" || wave === "")) throw new Error("wave must be a non-empty string or null");
   const fields = {} as Record<(typeof RECORD_KEYS)[number], string>;
   for (const key of RECORD_KEYS) fields[key] = raw[key] as string;
-  return { ...fields, tag, plan, kind: kind as TaskKind, wave };
+  return { ...fields, tag, plan, wave };
 }
 
 /** Temp file in the same directory + rename: a reader sees the old record or the new one, never half of one. */

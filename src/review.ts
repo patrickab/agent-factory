@@ -4,14 +4,14 @@
  * - Consumes the task's diff, the reviewer model and role prompt, and the directory for this task's reviews
  * - Provides `runReview` (the `factory-review` data) and the pure parts it is built from: the patch file's text, the
  *   findings check and the reading of the child's `--mode json` stdout
- * - A merge request's reviewer reviews the whole branch against its target, the request as its instructions, verbatim
- *   in the prompt under a heading of its own: it reads like a task description but is not one
+ * - A wave's reviewer (`ReviewInput.wave`) reviews the wave's whole branch against its target, the wave's request as
+ *   its instructions, verbatim in the prompt under a heading of its own: it reads like a task description but is not one
  */
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TaskDiff } from "./git.ts";
 import type { Exec } from "./run.ts";
-import { approvedFrom, isMergeRequest, type Finding, type ReviewData, type ReviewStatus, type ReviewUsage, type Severity, type Task } from "./state.ts";
+import { approvedFrom, type Finding, type ReviewData, type ReviewStatus, type ReviewUsage, type Severity, type Task } from "./state.ts";
 
 export const VERDICT_TOOL = "submit_verdict";
 const REVIEWER_TOOL_EXTENSION = join(import.meta.dirname, "pi", "reviewer-tool.ts");
@@ -45,12 +45,12 @@ export function reviewRequest(task: Pick<Task, "title" | "request">, followUps: 
   return `${request}\n## Follow-up messages from the user\n\n${messages.join("\n")}`;
 }
 
-/** The prompt of a merge request's reviewer: the branch, the patch file and the requester's instructions. */
-export function mergeRequestPrompt(task: Pick<Task, "title" | "request" | "branch" | "mainBranch">, patchFile: string): string {
+/** The prompt of a wave's reviewer: the wave's branch, the patch file and the supervisor's instructions. */
+export function wavePrompt(task: Pick<Task, "title" | "request" | "branch" | "mainBranch">, patchFile: string): string {
   return (
-    `Review the merge request "${task.title}": the branch ${task.branch}, rebased onto ${task.mainBranch}, merges into it. ` +
+    `Review the wave "${task.title}": the branch ${task.branch}, rebased onto ${task.mainBranch}, merges into it. ` +
     `Its whole diff against ${task.mainBranch} is the patch file ${patchFile}: read it with the read tool, look at the surrounding code ` +
-    `where the diff alone is not enough, then finish with ${VERDICT_TOOL}.\n\n## Instructions from the requester\n\n${task.request}\n`
+    `where the diff alone is not enough, then finish with ${VERDICT_TOOL}.\n\n## Instructions from the supervisor\n\n${task.request}\n`
   );
 }
 
@@ -120,6 +120,8 @@ export interface ReviewInput {
   /** Holds this task's reviewer sessions and patch files. */
   reviewsDir: string;
   cancelled: () => boolean;
+  /** A wave's review: `task` is the wave (its title, request, branch and target), the prompt `wavePrompt`. */
+  wave?: boolean;
 }
 
 async function taskPrompt({ reviewsDir, round, task, followUps }: ReviewInput, patchFile: string): Promise<string> {
@@ -153,7 +155,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewData> {
   await mkdir(reviewsDir, { recursive: true });
   const patchFile = join(reviewsDir, `round-${round}.patch`);
   await writeFile(patchFile, reviewPatch(input.diff, PATCH_MAX_CHARS));
-  const prompt = isMergeRequest(task) ? mergeRequestPrompt(task, patchFile) : await taskPrompt(input, patchFile);
+  const prompt = input.wave ? wavePrompt(task, patchFile) : await taskPrompt(input, patchFile);
   const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
   argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", reviewsDir);
   if (model) argv.push("--model", model);

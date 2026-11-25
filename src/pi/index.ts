@@ -16,7 +16,7 @@
  *   is merged after it and the task ends `blocked`/`stopped`. The merge is not awaited there: Pi defers every prompt,
  *   `/factory cancel` included, until the `agent_settled` handlers return
  * - `factory.yaml` and the role prompts come from a commit of the target branch (the task's base, `taskBase`, at the
- *   run's start; a merge request's target tip), never from the tree the coder edits
+ *   run's start), never from the tree the coder edits
  * - A task runs in a git worktree of its own, on its own branch, made off `settings.branch` by whoever starts it. It
  *   stays up to date with that branch and merges into it: a run that opens commits the worktree and rebases it onto
  *   the branch. A conflicting rebase is aborted and the run opens with a `conflict` round instead, so does a rebase
@@ -35,10 +35,8 @@
  *   commit, with a commit message the coder is asked for; a part outside the task's scope goes to a new task through
  *   `factory_new_task` (registered in task sessions only, usable in a follow-up run, once per user message), on this
  *   task's target branch and merge mode
- * - A merge request (`/factory start` with `"kind": "merge_request"`) has no coder: start and retry run its pipeline in
- *   the background (`ops.ts`), a plain message to it is refused, and `factory_ask_supervisor` is not registered
  */
-import type { ExtensionAPI, ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
@@ -65,7 +63,7 @@ import {
   type OpsDeps,
   type RunOpening,
 } from "../ops.ts";
-import { applyEntry, followUpMessages, isMergeRequest, messageText, rebuild, RESTING_STATES, stateDraft, wasInterrupted, type Draft, type Snapshot, type State } from "../state.ts";
+import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, wasInterrupted, type Draft, type Snapshot, type State } from "../state.ts";
 import { registerFactoryTool } from "./tool.ts";
 import { errorText } from "../util.ts";
 
@@ -82,14 +80,6 @@ function lastAssistantText(entries: Iterable<{ type: string }>): string {
     if (entry.type === "message" && message?.role === "assistant") text = messageText(message);
   }
   return text;
-}
-
-/**
- * The context types the session manager read-only, but Pi passes its session manager itself: the only way to a
- * message without a turn. A Pi that does not leaves `appendMessage` undefined.
- */
-function writableSessionManager(ctx: ExtensionContext): Partial<Pick<SessionManager, "appendMessage">> {
-  return ctx.sessionManager as Partial<Pick<SessionManager, "appendMessage">>;
 }
 
 function isMergedTask(snapshot: Snapshot): boolean {
@@ -128,8 +118,6 @@ export default function (pi: ExtensionAPI) {
         session.snapshot = applyEntry(session.snapshot, "factory-spawn", spawn);
       },
     });
-    // A merge request has no coder that could ask.
-    if (isMergeRequest(session.snapshot.task)) return;
     registerAskSupervisorTool(pi, {
       refusal: () => (session.snapshot?.state === "running" ? null : "only the coder of a running task may ask"),
       asked: (question, ctx) => {
@@ -143,12 +131,6 @@ export default function (pi: ExtensionAPI) {
     cwd: ctx.cwd,
     appendEntry: (customType, data) => pi.appendEntry(customType, data),
     sendUserMessage: (text) => pi.sendUserMessage(text),
-    recordRequest: (text) => {
-      const manager = writableSessionManager(ctx);
-      if (typeof manager.appendMessage !== "function") throw new Error("this Pi cannot record a message without a turn");
-      manager.appendMessage({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() });
-    },
-    canRecordRequest: () => typeof writableSessionManager(ctx).appendMessage === "function",
     sendMessage: (message, options) => pi.sendMessage(message, options),
     setStatus: (key, text) => ctx.ui.setStatus(key, text),
     isIdle: () => ctx.isIdle(),
@@ -217,10 +199,6 @@ export default function (pi: ExtensionAPI) {
     if (!atRest) return;
     // One `factory_new_task` per user message, a follow-up queued during the run included.
     if (session.followUp) session.followUp.spawnedForMessage = false;
-    if (isMergeRequest(atRest.task)) {
-      ctx.ui.notify("factory: a merge request has no coder to message, retry or cancel it", "error");
-      return { action: "handled" };
-    }
     if (atRest.state === "merging") {
       ctx.ui.notify("factory: a merge is running, send the message when it has ended", "warning");
       return { action: "handled" };

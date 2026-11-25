@@ -7,10 +7,11 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { ACTIONS, callAction, FactoryError, scheduleWave, type TaskView, type TimelineEntry } from "./core.ts";
+import { ACTIONS, callAction, FactoryError, type TaskView, type TimelineEntry } from "./core.ts";
 import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, lockTask, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
 import { appendWaveEvent, createWave, listWaves, readWave, type WaveView } from "./waves.ts";
 
 const savedEnv = { ...process.env };
@@ -129,6 +130,8 @@ function modelsFile(): string {
 }
 
 afterEach(async () => {
+  // Wave runners first: they would start tasks while the tasks' runners stop.
+  for (const wave of await listWaves()) await stopWaveRunners(wave.declaration.id);
   for (const record of await listTasks()) await stopRunners(record);
   for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
   Object.assign(process.env, savedEnv);
@@ -216,7 +219,6 @@ function fakeRecord(id: string, repo: string): TaskRecord {
     createdAt: `2026-01-01T00:00:0${id.at(-1)}.000Z`,
     tag: "team/a",
     plan: null,
-    kind: "task",
     wave: null,
   };
 }
@@ -473,7 +475,6 @@ describe("task reads", () => {
       createdAt: record.createdAt,
       tag: "team/a",
       plan: null,
-      kind: "task",
       wave: null,
       sessionId: record.sessionId,
       sessionPath: path,
@@ -821,33 +822,34 @@ describe("D review fixes", () => {
 });
 
 describe("task tags", () => {
-  test("tasks.start: tag defaults to the system user, plan to null, kind is task; given ones are stored", async () => {
+  test("tasks.start: tag defaults to the system user, plan to null; given ones are stored", async () => {
     const repo = makeRepo();
     const plain = (await callAction("tasks.start", { title: "Add b", request: "add b.txt" }, { cwd: repo })) as TaskView;
-    expect([plain.tag, plain.plan, plain.kind]).toEqual([userInfo().username, null, "task"]);
-    const tagged = (await callAction("tasks.start", { title: "Add c", request: "add c.txt", tag: "plugin/m1/w1", plan: "plan/plugin/m1/w1.md", kind: "task" }, { cwd: repo })) as TaskView;
-    expect([tagged.tag, tagged.plan, tagged.kind]).toEqual(["plugin/m1/w1", "plan/plugin/m1/w1.md", "task"]);
+    expect([plain.tag, plain.plan]).toEqual([userInfo().username, null]);
+    const tagged = (await callAction("tasks.start", { title: "Add c", request: "add c.txt", tag: "plugin/m1/w1", plan: "plan/plugin/m1/w1.md" }, { cwd: repo })) as TaskView;
+    expect([tagged.tag, tagged.plan]).toEqual(["plugin/m1/w1", "plan/plugin/m1/w1.md"]);
     const stored = await recordOf(tagged);
-    expect([stored.tag, stored.plan, stored.kind]).toEqual(["plugin/m1/w1", "plan/plugin/m1/w1.md", "task"]);
+    expect([stored.tag, stored.plan]).toEqual(["plugin/m1/w1", "plan/plugin/m1/w1.md"]);
   }, 30_000);
 
-  test("tasks.start refuses a malformed tag, an empty plan and an unknown kind before any worktree", async () => {
+  test("tasks.start refuses a malformed tag and an empty plan before any worktree; kind and source are no params", async () => {
     const repo = makeRepo();
     for (const tag of ["", "a//b", "/a", "a/", "a b", "ä"]) {
       await expectError(callAction("tasks.start", { title: "t", request: "r", tag }, { cwd: repo }), "invalid", "is not segments of");
     }
     await expectError(callAction("tasks.start", { title: "t", request: "r", plan: " " }, { cwd: repo }), "invalid", "plan must not be empty");
-    await expectError(callAction("tasks.start", { title: "t", request: "r", kind: "epic" }, { cwd: repo }), "invalid", 'kind "epic" is not "task" or "merge_request"');
+    expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("kind");
+    expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("source");
     expect(await listTasks()).toEqual([]);
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
   });
 
-  test("a record written without tag, plan and kind still lists, with the defaults", async () => {
-    const { tag: _tag, plan: _plan, kind: _kind, ...old } = fakeRecord(ID_1, "/r");
+  test("a record written without tag and plan still lists, with the defaults; an old kind is ignored", async () => {
+    const { tag: _tag, plan: _plan, ...old } = fakeRecord(ID_1, "/r");
     mkdirSync(tasksDir(), { recursive: true });
-    writeFileSync(join(tasksDir(), `${ID_1}.json`), JSON.stringify(old));
+    writeFileSync(join(tasksDir(), `${ID_1}.json`), JSON.stringify({ ...old, kind: "merge_request" }));
     const views = ((await callAction("tasks.list", {})) as { tasks: TaskView[] }).tasks;
-    expect(views.map((view) => [view.id, view.tag, view.plan, view.kind])).toEqual([[ID_1, userInfo().username, null, "task"]]);
+    expect(views.map((view) => [view.id, view.tag, view.plan, "kind" in view])).toEqual([[ID_1, userInfo().username, null, false]]);
   });
 
   test("tasks.list tag: the tag itself and the tags under it, not a longer segment", async () => {
@@ -998,87 +1000,6 @@ describe("waiting_answer", () => {
   });
 });
 
-describe("merge requests", () => {
-  /** A repo with a branch `wave` one commit ahead of main, checked out nowhere. */
-  function waveRepo(): string {
-    const repo = makeRepo();
-    git(repo, "checkout", "--quiet", "-b", "wave");
-    writeFileSync(join(repo, "w.txt"), "w\n");
-    git(repo, "add", "-A");
-    git(repo, "commit", "--quiet", "-m", "wave");
-    git(repo, "checkout", "--quiet", "main");
-    return repo;
-  }
-  const mergeRequest = (repo: string, more: Record<string, unknown> = {}) =>
-    callAction("tasks.start", { title: "Merge wave", request: "Read plan/w.md", kind: "merge_request", source: "wave", overrides: { branch: "main" }, ...more }, { cwd: repo });
-
-  test("tasks.start refuses a merge request without source, source on a task, source = target, a source checked out or missing, before any worktree", async () => {
-    const repo = waveRepo();
-    await expectError(mergeRequest(repo, { source: undefined }), "invalid", "a merge_request needs a source branch");
-    await expectError(callAction("tasks.start", { title: "t", request: "r", source: "wave" }, { cwd: repo }), "invalid", "source is for a merge_request only");
-    await expectError(mergeRequest(repo, { source: "main" }), "refused", "the source branch main is the target branch itself");
-    await expectError(mergeRequest(repo, { source: "gone" }), "refused", "the source branch gone does not exist locally");
-    const holder = join(caseDir, "holder");
-    git(repo, "worktree", "add", "--quiet", holder, "wave");
-    await expectError(mergeRequest(repo), "refused", `the source branch wave is checked out in ${holder}`);
-    expect(await listTasks()).toEqual([]);
-    expect(git(repo, "worktree", "list").split("\n")).toHaveLength(2);
-  });
-
-  test("a merge request's worktree checks the source out; message is refused and never offered; remove keeps the source branch", async () => {
-    const repo = waveRepo();
-    const wave = git(repo, "rev-parse", "wave");
-    const view = (await mergeRequest(repo, { tag: "plugin/w2" })) as TaskView;
-    expect([view.kind, view.branch, view.tag]).toEqual(["merge_request", "wave", "plugin/w2"]);
-    const record = await recordOf(view);
-    expect(git(record.worktree, "symbolic-ref", "--short", "HEAD")).toBe("wave");
-    await until(async () => (await stateOf(record)) === "waiting_approve");
-    await until(() => runnerEnded(record));
-    expect(prompts()).toEqual(["prompt /factory start"]);
-
-    const resting = (await callAction("tasks.get", { id: record.id })) as TaskView;
-    expect(resting.actions).toEqual(["tasks.approve", "tasks.cancel", "tasks.remove"]);
-    await expectError(callAction("tasks.message", { id: record.id, text: "hi" }), "refused", "is a merge request: it has no coder to message");
-    expect(prompts()).toEqual(["prompt /factory start"]);
-
-    // The wave's commit is not on main, yet removing drops nothing: the source branch stays.
-    expect(await callAction("tasks.remove", { id: record.id })).toEqual({ removed: record.id, dropped: null });
-    expect(existsSync(record.worktree)).toBe(false);
-    expect(git(repo, "rev-parse", "wave")).toBe(wave);
-    expect(await listTasks()).toEqual([]);
-  });
-
-  test("tasks.diff of a merge request shows its commits only, the tree its reviewer saw, not its worktree's leftovers (review 3, minor 3)", async () => {
-    const repo = waveRepo();
-    const record = await recordOf((await mergeRequest(repo)) as TaskView);
-    await until(async () => (await stateOf(record)) === "waiting_approve");
-    await until(() => runnerEnded(record));
-    writeFileSync(join(record.worktree, "w.txt"), "edited\n");
-    writeFileSync(join(record.worktree, "stray.txt"), "stray\n");
-    const diff = (await callAction("tasks.diff", { id: record.id })) as { base: string; diff: string; files: object[] };
-    expect(diff.base).toBe(git(repo, "rev-parse", "main"));
-    expect(diff.files).toEqual([{ path: "w.txt", added: 1, removed: 0 }]);
-    expect(diff.diff).toContain("+w");
-    expect(diff.diff).not.toContain("edited");
-    expect(diff.diff).not.toContain("stray.txt");
-  });
-
-  test("a forced remove in the middle of a rebase in its worktree keeps the source branch where it was (m7)", async () => {
-    const repo = waveRepo();
-    const wave = git(repo, "rev-parse", "wave");
-    const record = await recordOf((await mergeRequest(repo)) as TaskView);
-    await until(async () => (await stateOf(record)) === "waiting_approve");
-    await until(() => runnerEnded(record));
-    writeFileSync(join(repo, "w.txt"), "main\n");
-    git(repo, "add", "-A");
-    git(repo, "commit", "--quiet", "-m", "main w");
-    expect(() => git(record.worktree, "rebase", "main")).toThrow();
-    expect(await callAction("tasks.remove", { id: record.id, force: true })).toMatchObject({ removed: record.id });
-    expect(existsSync(record.worktree)).toBe(false);
-    expect(git(repo, "rev-parse", "refs/heads/wave")).toBe(wave);
-  });
-});
-
 describe("waves", () => {
   const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after });
   const TAG = "factory/w1";
@@ -1115,11 +1036,15 @@ describe("waves", () => {
     const repo = await registeredRepo();
     const main = git(repo, "rev-parse", "main");
     const overrides = { maxRounds: 3, merge: "review" as const, models: { coder: "a/b" } };
-    const wave = await startWave(repo, [spec("a"), spec("b", ["a"]), spec("c")], { plan: "plan/w1.md", overrides });
+    let wave = await startWave(repo, [spec("a"), spec("b", ["a"]), spec("c")], { plan: "plan/w1.md", overrides });
     expect(wave).toMatchObject({ repo, tag: TAG, plan: "plan/w1.md", title: "Wave one", request: "review the wave", branch: "main-factory-w1", target: "main", base: main });
-    expect(wave).toMatchObject({ origin: "session-0", stage: "building", reason: null, running: false, interrupted: false, counts: { total: 3, done: 0 } });
+    expect(wave).toMatchObject({ origin: "session-0", stage: "building", reason: null, counts: { total: 3, done: 0 } });
     expect("overrides" in wave).toBe(false);
     expect(git(repo, "rev-parse", "refs/heads/main-factory-w1")).toBe(main);
+    // The wave's runner starts the tasks that wait for nothing; it lives while the wave does not rest.
+    await until(async () => (await getWave(wave.id)).tasks.filter((task) => task.taskId !== null).length === 2);
+    wave = await getWave(wave.id);
+    expect([wave.running, wave.interrupted]).toEqual([true, false]);
     expect(taskOf(wave, "b")).toEqual({ key: "b", title: "Task b", after: ["a"], taskId: null, sessionId: null, state: "pending", usage: null });
     for (const key of ["a", "c"]) {
       const task = taskOf(wave, key);
@@ -1141,37 +1066,41 @@ describe("waves", () => {
     await expectError(startWave(repo, [spec("x")]), "refused", "main-factory-w1 exists already");
   });
 
-  test("a task with after starts only once its predecessor is done", async () => {
+  test("a task with after starts once its predecessor is done (its runner pokes the wave); a wave without changes ends merged", async () => {
     process.env.FAKE_PI_START_END = "done";
     const repo = await registeredRepo();
     const wave = await startWave(repo, [spec("a"), spec("b", ["a"])]);
-    const a = await recordById(taskOf(wave, "a").taskId);
     expect(taskOf(wave, "b").state).toBe("pending");
-    await until(async () => (await stateOf(a)) === "done");
-    await until(() => runnerEnded(a));
-    const between = await getWave(wave.id);
-    expect([taskOf(between, "a").state, taskOf(between, "b").state]).toEqual(["done", "pending"]);
-    expect(between.counts).toEqual({ total: 2, done: 1 });
-    expect(await scheduleWave(wave.id)).toEqual(["b"]);
-    expect(await scheduleWave(wave.id)).toEqual([]);
+    await until(async () => taskOf(await getWave(wave.id), "b").taskId !== null, 20_000);
+    const a = await recordById(taskOf(await getWave(wave.id), "a").taskId);
+    expect(await stateOf(a)).toBe("done");
     const b = await recordById(taskOf(await getWave(wave.id), "b").taskId);
     expect(b.wave).toBe(wave.id);
-    await until(async () => (await stateOf(b)) === "done");
-    expect((await getWave(wave.id)).counts).toEqual({ total: 2, done: 2 });
-  });
+    // Nothing differs from the target: no review, no merge, the wave rests merged and its runner ends.
+    await until(async () => (await getWave(wave.id)).stage === "merged", 20_000);
+    await until(async () => (await liveWaveRunners(wave.id)).length === 0);
+    const done = await getWave(wave.id);
+    expect([done.counts, done.merge, done.running, done.interrupted]).toEqual([{ total: 2, done: 2 }, null, false, false]);
+    expect((await readWave(wave.id)).events.map((event) => event.kind)).toEqual(["tasks", "task", "task", "stage", "stage"]);
+  }, 30_000);
 
   test("waves.add to a rejected wave returns it to building; after may name existing keys", async () => {
     const repo = await registeredRepo();
     const wave = await startWave(repo, [spec("a")]);
+    await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null);
     await appendWaveEvent(wave.id, { kind: "stage", stage: "rejected", reason: null });
     expect((await getWave(wave.id)).stage).toBe("rejected");
-    // Nothing starts while the wave is not building.
-    expect(await scheduleWave(wave.id)).toEqual([]);
+    // A stage change pokes the runner (as the actions do), which sees the wave rest and ends.
+    await pokeWave(wave.id);
+    await until(async () => (await liveWaveRunners(wave.id)).length === 0);
     const added = ((await callAction("waves.add", { id: wave.id.slice(0, 8), tasks: [spec("fix", ["a"]), spec("more")] })) as { wave: WaveView }).wave;
     expect(added.stage).toBe("building");
     expect(taskOf(added, "fix").state).toBe("pending");
-    expect(taskOf(added, "more").taskId).not.toBeNull();
     expect(added.counts).toEqual({ total: 3, done: 0 });
+    // The poke started a runner again: it starts what can start.
+    await until(async () => taskOf(await getWave(wave.id), "more").taskId !== null);
+    expect(taskOf(await getWave(wave.id), "fix").taskId).toBeNull();
+    await stopWaveRunners(wave.id);
     const kinds = (await readWave(wave.id)).events.map((event) => event.kind);
     expect(kinds).toEqual(["tasks", "task", "stage", "tasks", "stage", "task"]);
     await expectError(callAction("waves.add", { id: wave.id, tasks: [spec("a")] }), "invalid", "task key a is not unique");
@@ -1179,7 +1108,7 @@ describe("waves", () => {
     await appendWaveEvent(wave.id, { kind: "stage", stage: "merged", reason: null });
     await expectError(callAction("waves.add", { id: wave.id, tasks: [spec("late")] }), "refused", "is merged");
     await expectError(callAction("waves.add", { id: "ffffffff", tasks: [spec("late")] }), "not_found", "no wave");
-  });
+  }, 30_000);
 
   test("every validation error of waves.start, and none leaves a branch or a wave", async () => {
     const repo = await registeredRepo();
@@ -1252,16 +1181,18 @@ describe("waves", () => {
     expect(wave.counts).toEqual({ total: 2, done: 1 });
     expect(wave.usage).toEqual({ input: 111, output: 56, cost: 1.75 });
     expect(wave.reviews).toEqual([{ at: expect.any(String), ...review }]);
-    expect(wave.actions).toEqual(isActionNameList(["waves.add", "waves.cancel"]));
-    expect(wave.interrupted).toBe(false);
+    // Not resting and no runner: interrupted, whatever the stage.
+    expect([wave.running, wave.interrupted]).toEqual([false, true]);
+    expect(wave.actions).toEqual(isActionNameList(["waves.add", "waves.retry", "waves.cancel", "waves.remove"]));
     await appendWaveEvent(id, { kind: "stage", stage: "reviewing", reason: null });
-    // Not resting and no runner: interrupted (no wave runner exists yet).
     expect((await getWave(id)).interrupted).toBe(true);
+    await appendWaveEvent(id, { kind: "stage", stage: "rejected", reason: null });
+    expect((await getWave(id)).interrupted).toBe(false);
     const timeline = (await callAction("waves.timeline", { id, since: 4 })) as { events: { kind: string }[]; next: number };
-    expect(timeline.events.map((event) => event.kind)).toEqual(["review", "stage"]);
-    expect(timeline.next).toBe(6);
-    expect(((await callAction("waves.timeline", { id, since: 6 })) as { events: unknown[] }).events).toEqual([]);
-    await expectError(callAction("waves.timeline", { id, since: 7 }), "invalid", "past");
+    expect(timeline.events.map((event) => event.kind)).toEqual(["review", "stage", "stage"]);
+    expect(timeline.next).toBe(7);
+    expect(((await callAction("waves.timeline", { id, since: 7 })) as { events: unknown[] }).events).toEqual([]);
+    await expectError(callAction("waves.timeline", { id, since: 8 }), "invalid", "past");
   });
 
   test("tasks.start cannot set a wave", async () => {

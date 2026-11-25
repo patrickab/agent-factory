@@ -11,8 +11,6 @@
  * - The models a task or repository may use are one user-level list (`models.ts`): `models.get`/`models.set`.
  *   `tasks.start` and `settings.set` refuse a model not on it, and anything while it is empty; reads never check it
  * - `hostOnly` actions are for the host (pi-host), never offered to an agent: `tasks.import`
- * - A `merge_request` task (`tasks.start` with `kind` and `source`) reviews and merges an existing branch, no coder
- *   ever: `tasks.message` refuses it, and it never offers that action
  * - `tasks.wait` polls the watched tasks until they rest (no runner lives and the state is a resting one, or the task
  *   is interrupted) or one needs attention (it rests and is not `done`): a supervisor's completion signal
  * - Runners an action starts get the caller's `env` (default `process.env`): the host passes one without its secrets
@@ -60,22 +58,22 @@ import {
   type StoredSettings,
 } from "./settings.ts";
 import { isFactoryPrompt, messageText, parseSettingsFields, RESTING_STATES, type Settings, type State } from "./state.ts";
-import { isTaskTag, listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskKind, type TaskRecord } from "./tasks.ts";
+import { isTaskTag, listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import {
   appendWaveEvent,
+  appendWaveEvents,
   createWave,
   foldWave,
   listWaves,
-  lockWave,
   parseWaveOverrides,
   readWave,
   RESTING_WAVE_STAGES,
   startableKeys,
-  unlockWave,
   validateTaskSpecs,
   waveCounts,
   waveTaskState,
+  type NewWaveEvent,
   type WaveDeclaration,
   type WaveFile,
   type WaveFold,
@@ -83,6 +81,7 @@ import {
   type WaveStage,
   type WaveView,
 } from "./waves.ts";
+import { liveWaveRunners, pokeWave } from "./wave-poke.ts";
 
 export type FactoryErrorCode = "invalid" | "not_found" | "busy" | "refused" | "failed";
 
@@ -110,7 +109,6 @@ export interface TaskView {
   createdAt: string;
   tag: string;
   plan: string | null;
-  kind: TaskKind;
   /** The wave the task belongs to (`waves.start`, `waves.add`), null outside one. */
   wave: string | null;
   sessionId: string;
@@ -219,7 +217,7 @@ export const ACTIONS = {
     {
       record: {
         type: "object",
-        description: "id, repo, worktree, branch, title, sessionId, sessionDir, createdAt: non-empty strings; optional tag (default the system user), plan (string or null), kind (task or merge_request)",
+        description: "id, repo, worktree, branch, title, sessionId, sessionDir, createdAt: non-empty strings; optional tag (default the system user), plan (string or null)",
       },
     },
     ["record"],
@@ -234,16 +232,14 @@ export const ACTIONS = {
   ),
   "tasks.diff": spec("A task's worktree against where it branched off its target", { id: ID }, ["id"], false),
   "tasks.start": spec(
-    "Start a task in its own worktree; answers once its runner is spawned. kind merge_request: no coder, the existing branch source is rebased onto the target (overrides.branch) unsquashed, gated, reviewed and merged",
+    "Start a task in its own worktree; answers once its runner is spawned",
     {
       repo: REPO,
       title: { type: "string", description: "A short title of the task" },
-      request: { type: "string", description: "The full, self-contained task for the coder; for a merge_request the reviewer's extra instructions" },
+      request: { type: "string", description: "The full, self-contained task for the coder" },
       overrides: { type: "object", description: "Settings over the repository's stored ones", properties: SETTINGS_PROPERTIES },
       tag: { ...TAG, description: `${String(TAG.description)}. Default: the system user` },
       plan: { type: "string", description: "The memory_store path of the plan the task works from (only stored)" },
-      kind: { type: "string", enum: ["task", "merge_request"], description: "Default: task" },
-      source: { type: "string", description: "merge_request only: the existing local branch to merge, checked out in no worktree" },
     },
     ["repo", "title", "request"],
     true,
@@ -476,7 +472,10 @@ async function taskView(record: TaskRecord): Promise<TaskView> {
     const asked = customData(entry, "factory-question");
     if (asked && typeof asked.text === "string") question = asked.text;
     const task = customData(entry, "factory-task");
-    if (task && isRecord(task.settings)) settings = task.settings as unknown as Settings;
+    if (task && isRecord(task.settings)) {
+      // SAFETY: the factory-task entry is written by the plugin from a parsed StartPayload, whose settings are Settings.
+      settings = task.settings as unknown as Settings;
+    }
     const review = customData(entry, "factory-review");
     if (review && isRecord(review.usage)) addUsage(review.usage.input, review.usage.output, review.usage.cost);
     const message = assistantMessage(entry);
@@ -495,7 +494,6 @@ async function taskView(record: TaskRecord): Promise<TaskView> {
     createdAt: record.createdAt,
     tag: record.tag,
     plan: record.plan,
-    kind: record.kind,
     wave: record.wave,
     sessionId: record.sessionId,
     sessionPath,
@@ -528,7 +526,7 @@ function taskActions(view: Omit<TaskView, "actions">): TaskActionName[] {
     "tasks.retry": !view.running && (view.interrupted || (view.state !== null && RETRY_STATES.includes(view.state))),
     "tasks.cancel": view.state === null || !FINAL_STATES.includes(view.state),
     "tasks.remove": !isActive(view) && view.state !== "waiting_answer",
-    "tasks.message": view.kind !== "merge_request" && view.state !== null && view.state !== "merging",
+    "tasks.message": view.state !== null && view.state !== "merging",
   };
   return (Object.keys(allowed) as TaskActionName[]).filter((name) => allowed[name]);
 }
@@ -860,18 +858,22 @@ async function findWave(id: unknown): Promise<WaveFile> {
   return matches[0];
 }
 
-/** Runs `act` holding the wave's lock; a live holder is `busy`. */
-async function withWaveLock<T>(id: string, act: () => Promise<T>): Promise<T> {
+/** Runs `act`, a `TaskBusyError` (the wave's log lock stayed taken) as `busy`. */
+async function busyAsFactoryError<T>(act: () => Promise<T>): Promise<T> {
   try {
-    await lockWave(id);
+    return await act();
   } catch (error) {
     if (error instanceof TaskBusyError) throw new FactoryError("busy", error.message);
     throw error;
   }
+}
+
+/** Pokes the wave's runner (`wave-poke.ts`); a runner that cannot start is `failed`. */
+async function pokeWaveRunner(id: string, env?: RunnerEnv): Promise<void> {
   try {
-    return await act();
-  } finally {
-    await unlockWave(id);
+    await pokeWave(id, env);
+  } catch (error) {
+    throw new FactoryError("failed", `wave ${id.slice(0, SHORT_ID_CHARS)}: its runner did not start (${oneLine(errorText(error))}); a later poke tries again`);
   }
 }
 
@@ -879,7 +881,7 @@ async function withWaveLock<T>(id: string, act: () => Promise<T>): Promise<T> {
  * The views of the wave's started tasks by key. A started task whose record is gone (removed) counts as `cancelled`:
  * it never finishes.
  */
-async function waveTaskViews(fold: WaveFold): Promise<{ states: Map<string, string | null>; views: Map<string, TaskView> }> {
+export async function waveTaskViews(fold: WaveFold): Promise<{ states: Map<string, string | null>; views: Map<string, TaskView> }> {
   const records = new Map((await listTasks()).map((record) => [record.id, record]));
   const states = new Map<string, string | null>();
   const views = new Map<string, TaskView>();
@@ -904,13 +906,13 @@ function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["u
   return { input: (sum?.input ?? 0) + usage.input, output: (sum?.output ?? 0) + usage.output, cost: (sum?.cost ?? 0) + usage.cost };
 }
 
-/** The wave as clients see it: its fold, its tasks' states and usage. No wave runner exists yet: `running` is false. */
+/** The wave as clients see it: its fold, its tasks' states and usage, whether its runner lives. */
 async function waveView(file: WaveFile): Promise<WaveView> {
   const full = foldWave(file.declaration, file.events);
   const { overrides: _overrides, ...fold } = full;
   const { states, views } = await waveTaskViews(full);
-  const running = false;
-  const interrupted = !RESTING_WAVE_STAGES.includes(fold.stage) && fold.stage !== "building" && !running;
+  const running = (await liveWaveRunners(fold.id)).length > 0;
+  const interrupted = !RESTING_WAVE_STAGES.includes(fold.stage) && !running;
   let usage: WaveView["usage"] = null;
   const tasks = fold.tasks.map((task) => {
     const taskUsage = views.get(task.key)?.usage ?? null;
@@ -933,8 +935,9 @@ async function waveView(file: WaveFile): Promise<WaveView> {
 
 /**
  * The scheduler: starts every pending task of the wave whose `after` tasks are all `done`, through `launchTask` with
- * the wave's branch as target, its tag, plan and id, and records a `task` event for each. The caller holds the wave's
- * lock (`scheduleWave` takes it). Nothing starts unless the wave is `building`. Resolves with the started keys.
+ * the wave's branch as target, its tag, plan and id, and records a `task` event for each. Only the wave's runner calls
+ * it, holding the runner's lock: no task starts twice. Nothing starts unless the wave is `building`. Resolves with the
+ * started keys.
  */
 export async function startWaveTasks(id: string, env?: RunnerEnv): Promise<string[]> {
   const { declaration, events } = await readWave(id);
@@ -959,11 +962,6 @@ export async function startWaveTasks(id: string, env?: RunnerEnv): Promise<strin
     started.push(key);
   }
   return started;
-}
-
-/** `startWaveTasks` under the wave's lock: what `waves.start`/`waves.add` run, and what a poke runs later. */
-export async function scheduleWave(id: string, env?: RunnerEnv): Promise<string[]> {
-  return withWaveLock(id, () => startWaveTasks(id, env));
 }
 
 const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Promise<unknown>> = {
@@ -1097,8 +1095,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     if (target === undefined) throw new FactoryError("refused", `task ${shortId(record)} has not started yet, so it has no diff`);
     if (!existsSync(record.worktree)) throw new FactoryError("refused", `the worktree of task ${shortId(record)} is gone (${record.worktree})`);
     const base = await git(runCommand, record.worktree, ["merge-base", "HEAD", `refs/heads/${target}`]);
-    // A merge request's reviewer saw, and its target gets, the committed tree only.
-    const tree = record.kind === "merge_request" ? await git(runCommand, record.worktree, ["rev-parse", "HEAD^{tree}"]) : await snapshotTree(runCommand, record.worktree);
+    const tree = await snapshotTree(runCommand, record.worktree);
     const diff = await treeDiff(runCommand, record.worktree, base, tree);
     const files: FileCounts[] = await diffFileCounts(runCommand, record.worktree, base, tree);
     return { base, diff: diff.patch, files };
@@ -1112,13 +1109,6 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const tag = tagParam("tasks.start", params.tag);
     if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "tasks.start: plan must not be empty");
     const plan = params.plan as string | undefined;
-    if (params.kind !== undefined && params.kind !== "task" && params.kind !== "merge_request") {
-      throw new FactoryError("invalid", `tasks.start: kind ${JSON.stringify(params.kind)} is not "task" or "merge_request"`);
-    }
-    const kind = (params.kind as TaskKind | undefined) ?? "task";
-    const source = nonEmpty(params.source);
-    if (kind === "merge_request" && source === undefined) throw new FactoryError("invalid", "tasks.start: a merge_request needs a source branch");
-    if (kind === "task" && params.source !== undefined) throw new FactoryError("invalid", "tasks.start: source is for a merge_request only");
     let overrides: StoredSettings = {};
     try {
       if (params.overrides !== undefined) overrides = parseSettingsFields(params.overrides as Params, "overrides.");
@@ -1128,7 +1118,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const repo = await primaryOf(params.repo as string, cwd);
     await requireFactoryModels(resolveSettings(await loadSettings(repo), overrides, "").models);
     try {
-      return taskView(await launchTask({ repo, title, request, overrides, tag, plan, kind, source, signal, env }));
+      return taskView(await launchTask({ repo, title, request, overrides, tag, plan, signal, env }));
     } catch (error) {
       if (error instanceof LaunchRefusedError) throw new FactoryError("refused", error.message);
       throw error;
@@ -1200,7 +1190,6 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const record = await findTask(params.id);
     const text = nonEmpty(params.text);
     if (text === undefined) throw new FactoryError("invalid", "tasks.message needs a text that is not empty");
-    if (record.kind === "merge_request") throw new FactoryError("refused", `task ${shortId(record)} is a merge request: it has no coder to message, retry or cancel it`);
     const view = await taskView(record);
     if (view.state === null) throw new FactoryError("refused", `task ${shortId(record)} has not started yet, send the message once it runs`);
     if (view.state === "merging") throw new FactoryError("refused", `task ${shortId(record)} is merging, send the message when the merge has ended`);
@@ -1275,24 +1264,23 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
       await runCommand(["git", "branch", "-D", branch], { cwd: repo });
       throw error;
     }
-    await withWaveLock(declaration.id, async () => {
-      await appendWaveEvent(declaration.id, { kind: "tasks", tasks: specs });
-      await startWaveTasks(declaration.id, env);
-    });
+    await busyAsFactoryError(() => appendWaveEvent(declaration.id, { kind: "tasks", tasks: specs }));
+    await pokeWaveRunner(declaration.id, env);
     return { wave: await waveView(await readWave(declaration.id)) };
   },
 
   "waves.add": async (params, { env }) => {
     const id = (await findWave(params.id)).declaration.id;
-    await withWaveLock(id, async () => {
-      const { declaration, events } = await readWave(id);
-      const fold = foldWave(declaration, events);
-      if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage}, it takes no more tasks`);
-      const specs = validateTaskSpecs(params.tasks, fold.tasks);
-      await appendWaveEvent(id, { kind: "tasks", tasks: specs });
-      if (fold.stage !== "building") await appendWaveEvent(id, { kind: "stage", stage: "building", reason: null });
-      await startWaveTasks(id, env);
-    });
+    // Checked and appended under the log lock: a runner's stage change after it loses, never the added tasks.
+    await busyAsFactoryError(() =>
+      appendWaveEvents(id, (fold) => {
+        if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage}, it takes no more tasks`);
+        const events: NewWaveEvent[] = [{ kind: "tasks", tasks: validateTaskSpecs(params.tasks, fold.tasks) }];
+        if (fold.stage !== "building") events.push({ kind: "stage", stage: "building", reason: null });
+        return events;
+      }),
+    );
+    await pokeWaveRunner(id, env);
     return { wave: await waveView(await readWave(id)) };
   },
 

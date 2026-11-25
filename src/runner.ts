@@ -23,6 +23,8 @@
  *   them as the message (the rest follow from the inbox) and hands it the task lock
  * - A dialog an extension opens (`select`, `confirm`, `input`, `editor`) is answered as cancelled: nobody is there
  * - `FACTORY_TASK_LOCK`: the task lock (`tasks.ts`) handed to this runner, removed when it exits if it still names it
+ * - `FACTORY_TASK_WAVE` (a wave's task): when the runner ends with the task at rest it pokes that wave (`pokeWave`),
+ *   whose runner then looks at its tasks again. Pi does not get the variable
  * - SIGTERM/SIGINT: closes Pi's stdin and kills Pi after `KILL_GRACE_MS`. Exit code = Pi's; 1 when Pi exited before it
  *   answered the prompt or refused it
  * - Imports nothing outside node built-ins and the plain plugin modules: the deployed plugin has no `node_modules`
@@ -33,6 +35,7 @@ import { join } from "node:path";
 import { RESTING_STATES, type StateData } from "./state.ts";
 import { handLockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
+import { pokeWave, TASK_WAVE_ENV } from "./wave-poke.ts";
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const CHECK_INTERVAL_MS = 2000;
@@ -166,7 +169,7 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
   let inboxOffset = await readInboxOffset(inboxPath);
   const pi = Bun.spawn(["pi", "--mode", "rpc", "--session-dir", sessionDir, "--session-id", sessionId], {
     cwd: worktree,
-    env: { ...process.env, [TASK_SESSION_ENV]: "1" },
+    env: { ...process.env, [TASK_SESSION_ENV]: "1", [TASK_WAVE_ENV]: undefined },
     stdin: "pipe",
     stdout: "pipe",
     stderr: "inherit",
@@ -408,6 +411,15 @@ async function startSuccessor(args: [worktree: string, sessionDir: string, sessi
   if (text.split(" ")[0] === String(process.pid)) await handLockFile(lock, pid);
 }
 
+/** Pokes the task's wave (`FACTORY_TASK_WAVE`) when the task rests. */
+async function pokeTaskWave(sessionDir: string, sessionId: string): Promise<void> {
+  const wave = process.env[TASK_WAVE_ENV];
+  if (wave === undefined || wave === "") return;
+  const state = await lastFactoryState(sessionDir, sessionId);
+  if (state === undefined || !RESTING_STATES.includes(state.state)) return;
+  await pokeWave(wave);
+}
+
 /** Removes the task lock handed to this runner, unless it names another holder by now. */
 async function releaseTaskLock(): Promise<void> {
   const path = process.env.FACTORY_TASK_LOCK;
@@ -428,6 +440,7 @@ if (import.meta.main) {
       return 1;
     })
     .then(async (code) => {
+      await pokeTaskWave(sessionDir, sessionId).catch((error: unknown) => console.error(`runner: poking the task's wave: ${errorText(error)}`));
       await releaseTaskLock().catch((error: unknown) => console.error(`runner: releasing the task lock: ${errorText(error)}`));
       process.exit(code);
     });
