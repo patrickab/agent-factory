@@ -1,0 +1,14 @@
+# What the agent factory needs to know about this repo (it builds itself with the installed version).
+# Task worktrees come from `agent-worktree`, which copies node_modules: nothing to install.
+hooks:
+  after_create: []
+  after_code: []
+  after_merge:
+    - [bun, install, --frozen-lockfile]
+# After every coder turn: types only.
+gates:
+  - [bun, run, types]
+# In the merge queue, on the rebased branch: types and the whole suite.
+merge_gates:
+  - [bun, run, types]
+  - [bun, run, test]
