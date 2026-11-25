@@ -495,6 +495,24 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
   return fold;
 }
 
+/** Stages that keep what came before them: a wave blocked or cancelled is as far as it was when that happened. */
+const KEEPS_REVIEW: readonly WaveStage[] = ["building", "blocked", "cancelled"];
+
+/**
+ * Whether the wave's review began since it last built (invariant 2): from then on nothing may reach its branch until
+ * `waves.add` makes it build again. A wave blocked or cancelled while it built (a launch failed) has not begun one, so
+ * the merges of its tasks still running land.
+ */
+export function reviewBegan(events: readonly WaveEvent[]): boolean {
+  let began = false;
+  for (const event of events) {
+    if (event.kind !== "stage") continue;
+    if (event.stage === "building") began = false;
+    else if (!KEEPS_REVIEW.includes(event.stage)) began = true;
+  }
+  return began;
+}
+
 // ---- scheduling ----
 
 /** Task states by wave task key; a key missing or null means no state is known yet. */

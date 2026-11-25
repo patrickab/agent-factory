@@ -214,6 +214,25 @@ describe("factory.yaml lockfiles", () => {
   });
 });
 
+describe("the merge step", () => {
+  test("a merge refusal (the task's wave is under review) fails the merge before anything: no commit, the target unmoved", async () => {
+    const worktree = addTaskWorktree();
+    const pi = fake(worktree);
+    pi.holdTask("merging");
+    writeFileSync(join(worktree, "task.txt"), "work\n");
+    let asked = 0;
+    pi.deps.mergeRefusal = async () => {
+      asked += 1;
+      return "its wave is reviewing";
+    };
+    const main = gitIn(repo, "rev-parse", "main");
+    const files = await loadTaskFiles(new CommandRunner().run, worktree, main);
+    const outcome = await pipelineSteps(pi.deps, pi.deps.session.snapshot!.task, files, false).merge(files.config);
+    expect([asked, outcome]).toEqual([1, { gates: [], result: { kind: "failed", merge: { ok: false, commit: null, error: "its wave is reviewing", depsSynced: false } } }]);
+    expect([gitIn(repo, "rev-parse", "main"), gitIn(worktree, "rev-parse", "HEAD"), gitIn(worktree, "status", "--porcelain")]).toEqual([main, main, "?? task.txt"]);
+  });
+});
+
 describe("retryTask", () => {
   test("expected failures", async () => {
     expect(await retryTask(fake(dir).deps)).toEqual({ ok: false, error: "this session holds no task" });

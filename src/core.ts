@@ -25,10 +25,10 @@
  */
 import { existsSync, realpathSync } from "node:fs";
 import { readFile, stat, truncate, writeFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
 import { initDraft } from "./draft.ts";
-import { diffFileCounts, git, primaryCheckout, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
+import { diffFileCounts, git, primaryCheckout, snapshotTree, treeDiff, uncommittedFiles, type FileCounts } from "./git.ts";
 import {
   defaultBranch,
   deleteTask,
@@ -44,12 +44,14 @@ import {
   unmergedWork,
   type RunnerEnv,
   type UnmergedWork,
+  worktreePath,
 } from "./launch.ts";
 import { inboxReadPath, readFactoryStates, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { loadModels, requireModels, saveModels } from "./models.ts";
 import { runCommand } from "./run.ts";
 import {
   DEFAULT_SETTINGS,
+  factoryHome,
   loadSettings,
   parseStoredSettings,
   registeredRepos,
@@ -74,6 +76,7 @@ import {
   readWave,
   removeWave,
   RESTING_WAVE_STAGES,
+  reviewBegan,
   startableKeys,
   stuckKeys,
   unreachableKeys,
@@ -335,7 +338,7 @@ export const ACTIONS = {
   "waves.approve": spec("Merge a wave waiting for approve (its merge setting is review). Answers {wave}", { id: WAVE_ID }, ["id"], true),
   "waves.cancel": spec("Stop a wave: cancel its tasks that are not done or cancelled, stop its runner; its branch stays. Answers {wave}", { id: WAVE_ID }, ["id"], true),
   "waves.remove": spec(
-    "Delete a wave's record and its tasks (as tasks.remove does); its branch only when the wave is merged. Refused while the wave or one of its tasks runs. Answers {removed: id}",
+    "Delete a wave's record, its tasks (as tasks.remove does) and a review worktree a block left (one holding uncommitted changes only with force); its branch only when the wave is merged. Refused while the wave or one of its tasks runs. Answers {removed: id}",
     { id: WAVE_ID, force: { type: "boolean", description: "Also drop commits its target branch lacks and uncommitted changes" } },
     ["id"],
     true,
@@ -477,7 +480,23 @@ function assistantMessage(entry: Record<string, unknown>): Record<string, unknow
   return entry.type === "message" && isRecord(entry.message) && entry.message.role === "assistant" ? entry.message : undefined;
 }
 
-async function taskView(record: TaskRecord): Promise<TaskView> {
+/**
+ * The stage of the record's wave, null outside one, `removed` when its wave is gone. `known`: the stage the caller
+ * read already (`waveTaskViews`).
+ */
+async function taskWaveStage(record: TaskRecord, known?: WaveStage): Promise<WaveStage | "removed" | null> {
+  if (record.wave === null) return null;
+  if (known !== undefined) return known;
+  try {
+    const file = await readWave(record.wave);
+    return foldWave(file.declaration, file.events).stage;
+  } catch (error) {
+    if (error instanceof FactoryError && error.code === "not_found") return "removed";
+    throw error;
+  }
+}
+
+async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise<TaskView> {
   const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
   const entries = sessionPath === null ? [] : parseEntries(await readFile(sessionPath, "utf8"));
   let last: { state: State; round: number; reason: string; at: string } | null = null;
@@ -533,7 +552,9 @@ async function taskView(record: TaskRecord): Promise<TaskView> {
     settings,
     usage,
   };
-  return { ...view, actions: taskActions(view, record.kind === "merge_request") };
+  const waveStage = await taskWaveStage(record, knownWaveStage);
+  const continuable = waveStage === null || waveStage === "building";
+  return { ...view, actions: taskActions(view, record.kind === "merge_request", continuable) };
 }
 
 const APPROVE_STATES: readonly State[] = ["waiting_approve"];
@@ -546,18 +567,33 @@ function isActive(view: Omit<TaskView, "actions">): boolean {
 }
 
 /**
- * The predicates of the task actions' own checks (`requireState`, the lock, the runner), as one list for clients. An
- * old merge request (`mergeRequest`) can only be removed.
+ * The predicates of the task actions' own checks (`requireState`, the lock, the runner, `requireContinuable`), as one
+ * list for clients. An old merge request (`mergeRequest`) can only be removed. A task of a wave that does not build
+ * (`continuable` false) is not continued: no approve, retry or message but the answer to its question.
  */
-function taskActions(view: Omit<TaskView, "actions">, mergeRequest = false): TaskActionName[] {
+function taskActions(view: Omit<TaskView, "actions">, mergeRequest = false, continuable = true): TaskActionName[] {
   const allowed: Record<TaskActionName, boolean> = {
-    "tasks.approve": !mergeRequest && !view.running && !view.interrupted && view.state !== null && APPROVE_STATES.includes(view.state),
-    "tasks.retry": !mergeRequest && !view.running && (view.interrupted || (view.state !== null && RETRY_STATES.includes(view.state))),
+    "tasks.approve": !mergeRequest && continuable && !view.running && !view.interrupted && view.state !== null && APPROVE_STATES.includes(view.state),
+    "tasks.retry": !mergeRequest && continuable && !view.running && (view.interrupted || (view.state !== null && RETRY_STATES.includes(view.state))),
     "tasks.cancel": !mergeRequest && (view.state === null || !FINAL_STATES.includes(view.state)),
     "tasks.remove": !isActive(view) && view.state !== "waiting_answer",
-    "tasks.message": !mergeRequest && view.state !== null && view.state !== "merging",
+    "tasks.message": !mergeRequest && view.state !== null && view.state !== "merging" && (continuable || view.state === "waiting_answer"),
   };
   return (Object.keys(allowed) as TaskActionName[]).filter((name) => allowed[name]);
+}
+
+/**
+ * Refuses `what` for a task of a wave that is not `building` (invariant 2): from its review on, the gates and the
+ * reviewer have seen the wave's branch, and a commit of the task would reach it unseen (or, once merged, be lost).
+ */
+async function requireContinuable(record: TaskRecord, what: string): Promise<void> {
+  const stage = await taskWaveStage(record);
+  if (stage === null || stage === "building") return;
+  const wave = (record.wave ?? "").slice(0, SHORT_ID_CHARS);
+  throw new FactoryError(
+    "refused",
+    `task ${shortId(record)} belongs to wave ${wave}, which is ${stage === "removed" ? "removed" : stage}: its tasks take no more work once it left building, ${what} is refused; give the work to the wave with waves.add`,
+  );
 }
 
 /**
@@ -862,7 +898,7 @@ async function waitForTasks(watched: Watched, ignore: string[], timeoutMs: numbe
     });
     const states = (await Promise.all(records.map((record) => polledState(record, cache)))).map((state, index) => (leftWave(records[index], state) ? "done" : state));
     if (timedOut || waves.attention || (await waitMayEnd(records, states, waves.busy))) {
-      const tasks = await Promise.all(records.map(taskView));
+      const tasks = await Promise.all(records.map((record) => taskView(record)));
       const looks = await Promise.all(files.map(waveLook));
       const waveViews = looks.map((look) => look.view);
       const attention = [
@@ -995,6 +1031,36 @@ export function waveBranchName(target: string, tag: string): string {
   return `${target}-${tag.replaceAll("/", "-")}`;
 }
 
+/** The wave's review worktree (`wave-runner.ts`): one per wave, next to the tasks' worktrees. */
+export function waveReviewWorktree(declaration: Pick<WaveDeclaration, "id" | "repo">): string {
+  return worktreePath(declaration.repo, `wave-${declaration.id.slice(0, SHORT_ID_CHARS)}-review`);
+}
+
+/**
+ * Why the merge of the task in the Pi session `sessionId` (files in `sessionDir`) must not land now, null when it may
+ * (invariant 2): a task of a wave whose review began (`reviewBegan`) would bring commits onto the wave's branch that
+ * its gates and reviewer never saw, or that are lost once it merged. The plugin asks right before a task merges, so
+ * no path (an action, a `/factory` command typed into the session, a resume) gets past it. Only sessions the factory
+ * keeps (under its home) are looked up; a task outside a wave merges as before.
+ */
+export async function waveMergeRefusal(sessionDir: string, sessionId: string): Promise<string | null> {
+  const sessions = join(factoryHome(), "sessions") + sep;
+  if (!resolve(sessionDir).startsWith(sessions)) return null;
+  const record = (await listTasks()).find((task) => task.sessionId === sessionId);
+  if (record === undefined || record.wave === null) return null;
+  const short = record.wave.slice(0, SHORT_ID_CHARS);
+  let file: WaveFile;
+  try {
+    file = await readWave(record.wave);
+  } catch (error) {
+    if (error instanceof FactoryError && error.code === "not_found") return `its wave ${short} is removed: nothing more reaches its branch`;
+    throw error;
+  }
+  if (!reviewBegan(file.events)) return null;
+  const { stage, branch } = foldWave(file.declaration, file.events);
+  return `its wave ${short} is ${stage}, its review began: nothing more reaches its branch ${branch} (the reviewed tree is what merges); give the work to the wave with waves.add`;
+}
+
 /** The wave whose id is `id` or starts with it. */
 async function findWave(id: unknown): Promise<WaveFile> {
   const wanted = nonEmpty(id)?.trim();
@@ -1043,7 +1109,7 @@ export async function waveTaskViews(fold: WaveFold): Promise<{ states: Map<strin
         states.set(task.key, "cancelled");
         return;
       }
-      const view = await taskView(record);
+      const view = await taskView(record, fold.stage);
       views.set(task.key, view);
       states.set(task.key, view.state);
     }),
@@ -1100,9 +1166,10 @@ async function waveLook(file: WaveFile): Promise<WaveLook> {
  * it, holding the runner's lock: no task starts twice. A record of this wave no `task` event names (a runner died
  * between the launch and its event) is adopted for the first pending task of its title instead of a second launch.
  * Nothing starts unless the wave is `building`. Resolves with the started keys; a launch that fails throws (`refused`
- * or `failed`) after the tasks started before it are recorded.
+ * or `failed`) after the tasks started before it are recorded. `signal` (the runner stops): no further launch, the
+ * running one is undone (`launchTask`), and it resolves with the keys started before.
  */
-export async function startWaveTasks(id: string, env?: RunnerEnv): Promise<string[]> {
+export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: AbortSignal): Promise<string[]> {
   const { declaration, events } = await readWave(id);
   const fold = foldWave(declaration, events);
   if (fold.stage !== "building") return [];
@@ -1114,6 +1181,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv): Promise<strin
   const orphans = (await listTasks()).filter((record) => record.wave === id && !named.has(record.id));
   const started: string[] = [];
   for (const key of startableKeys(fold, states)) {
+    if (signal?.aborted) break;
     const task = fold.tasks.find((candidate) => candidate.key === key);
     if (task === undefined) continue;
     const orphan = orphans.findIndex((record) => record.title === task.title);
@@ -1122,8 +1190,9 @@ export async function startWaveTasks(id: string, env?: RunnerEnv): Promise<strin
       [record] = orphans.splice(orphan, 1);
     } else {
       try {
-        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, tag: declaration.tag, plan: declaration.plan, wave: id, env });
+        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, tag: declaration.tag, plan: declaration.plan, wave: id, env, signal });
       } catch (error) {
+        if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
         throw new FactoryError(error instanceof LaunchRefusedError ? "refused" : "failed", why);
       }
@@ -1222,7 +1291,7 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
   "tasks.list": async (params, { cwd }) => {
     const tag = tagParam("tasks.list", params.tag);
     const repo = params.repo === undefined ? undefined : await primaryOf(params.repo as string, cwd);
-    return { tasks: await Promise.all((await tasksIn(repo, tag)).map(taskView)) };
+    return { tasks: await Promise.all((await tasksIn(repo, tag)).map((record) => taskView(record))) };
   },
 
   "tasks.wait": async (params, { signal }) => {
@@ -1310,7 +1379,10 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
   "tasks.approve": async (params, { env }) => {
     const record = await findTask(params.id);
     refuseMergeRequest(record, "approve");
-    const check = async (view: TaskView) => requireState(view, APPROVE_STATES, "approve needs waiting_approve");
+    const check = async (view: TaskView) => {
+      requireState(view, APPROVE_STATES, "approve needs waiting_approve");
+      await requireContinuable(record, "approve");
+    };
     await withTaskLock(record, check, () => sendToRestingTask(record, "/factory approve", env));
     return taskView(record);
   },
@@ -1319,7 +1391,10 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const record = await findTask(params.id);
     refuseMergeRequest(record, "retry");
     // An interrupted task is set right by the session's start (`resumeTask`) before the retry runs.
-    const check = async (view: TaskView) => requireState(view, RETRY_STATES, "retry needs blocked, cancelled or interrupted", true);
+    const check = async (view: TaskView) => {
+      requireState(view, RETRY_STATES, "retry needs blocked, cancelled or interrupted", true);
+      await requireContinuable(record, "retry");
+    };
     const sent = await withTaskLock(record, check, async (view) => {
       const statesBefore = (await readFactoryStates(record.sessionDir, record.sessionId)).count;
       await sendToRestingTask(record, "/factory retry", env);
@@ -1359,6 +1434,8 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const view = await taskView(record);
     if (view.state === null) throw new FactoryError("refused", `task ${shortId(record)} has not started yet, send the message once it runs`);
     if (view.state === "merging") throw new FactoryError("refused", `task ${shortId(record)} is merging, send the message when the merge has ended`);
+    // The answer to its question continues the round it asked in, a wave's task or not; anything else is more work.
+    if (view.state !== "waiting_answer") await requireContinuable(record, "a message");
     // `messageTask` takes the task lock itself (resting) or appends to the live runner's inbox (running).
     const deliver = async () => {
       try {
@@ -1519,7 +1596,8 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
   },
 
   "waves.remove": async (params) => {
-    const { id, repo, branch } = (await findWave(params.id)).declaration;
+    const { declaration } = await findWave(params.id);
+    const { id, repo, branch } = declaration;
     const short = id.slice(0, SHORT_ID_CHARS);
     // The runner's lock for the whole removal: no poke starts a runner meanwhile.
     try {
@@ -1543,6 +1621,14 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
           throw error;
         }
       }
+      // A review worktree a block left behind: removed with the wave, unless it holds somebody's work (without force).
+      const review = waveReviewWorktree(declaration);
+      const hasReview = existsSync(review);
+      if (hasReview && params.force !== true && (await uncommittedFiles(runCommand, review))) {
+        throw new FactoryError("refused", `wave ${short}: its review worktree ${review} holds uncommitted changes, commit or remove them there, or give force: true to remove it anyway`, {
+          force: true,
+        });
+      }
       for (const record of records) {
         await withTaskLock(
           record,
@@ -1552,6 +1638,11 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
             await deleteTask(record);
           },
         );
+      }
+      // Before the branch: `git branch -D` refuses a branch a worktree has checked out.
+      if (hasReview) {
+        const removed = await runCommand(["git", "worktree", "remove", ...(params.force === true ? ["--force"] : []), review], { cwd: repo });
+        if (removed.exitCode !== 0) throw new FactoryError("failed", `wave ${short}: removing its review worktree ${review} failed: ${oneLine(removed.output)}`);
       }
       // Only a merged wave's branch: the target has all of it. Any other branch may hold work nobody merged.
       if (stage === "merged" && (await localBranchExists(repo, branch))) {

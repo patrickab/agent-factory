@@ -23,15 +23,18 @@
  * - The review worktree is removed (`git worktree remove`, never forced: a dirty one stays, nothing is deleted) when the
  *   wave leaves `reviewing`/`merging` for anything but `merging`
  * - Ends when the wave rests: lets the lock go, then looks for a poke marker once more and runs on when there is one
- *   and it gets the lock back. SIGTERM/SIGINT: cancels the running commands and ends
+ *   and it gets the lock back. SIGTERM/SIGINT (`stopping`): cancels the running commands and any launch of a task
+ *   (`startWaveTasks` gets the abort signal: no further task starts, the one launching is undone), records no stage
+ *   change (a step its stop cut short says nothing about the wave: it stays where it was, `interrupted`, and a
+ *   resume runs that step again) and leaves the review worktree for that resume
  */
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { loadTaskFiles, type FactoryConfig } from "./config.ts";
-import { FactoryError, oneLine, startWaveTasks, waveTaskViews } from "./core.ts";
+import { FactoryError, oneLine, startWaveTasks, waveReviewWorktree, waveTaskViews } from "./core.ts";
 import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, treeDiff, uncommittedFiles } from "./git.ts";
-import { runAfterCreate, worktreePath } from "./launch.ts";
+import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
 import { INFRA_EXIT } from "./pipeline.ts";
 import { runReview } from "./review.ts";
@@ -56,8 +59,11 @@ import {
   type WaveStage,
 } from "./waves.ts";
 
-/** How long a building wave waits for a poke before it looks at its tasks again. */
-const POLL_MS = 10_000;
+/**
+ * How long a building wave waits for a poke before it looks at its tasks again. `FACTORY_WAVE_POLL_MS` (tests only)
+ * sets it: a test proves a poke wakes the runner, not this poll.
+ */
+const POLL_MS = Number(process.env.FACTORY_WAVE_POLL_MS) || 10_000;
 /** How often the wait looks for the poke marker. */
 const MARKER_POLL_MS = 200;
 /** How long a runner a poke started waits for the lock to be handed to it. */
@@ -68,6 +74,8 @@ type Next = "again" | "wait" | "rest";
 
 const runner = new CommandRunner();
 let stopping = false;
+/** Aborted when the runner stops: the launch of a task in progress is undone, no further one starts. */
+const stopped = new AbortController();
 
 function log(id: string, text: string): void {
   console.error(`${new Date().toISOString()} wave ${id.slice(0, 8)}: ${text}`);
@@ -87,14 +95,20 @@ function waveTask(declaration: WaveDeclaration): Task {
 
 /** The review worktree's path: one per wave, next to the tasks' worktrees. */
 function reviewWorktree(declaration: WaveDeclaration): string {
-  return worktreePath(declaration.repo, `wave-${declaration.id.slice(0, 8)}-review`);
+  return waveReviewWorktree(declaration);
 }
 
 /**
  * Appends `events` and the new stage, with `detail` (why, invariant 8) when given, if the wave is still at `from`.
- * False when it moved on meanwhile.
+ * False when it moved on meanwhile. A stopping runner records nothing (`done` for a step that ended all the same:
+ * a merge that landed).
  */
-async function moveStage(id: string, from: WaveStage, to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []): Promise<boolean> {
+async function moveStage(id: string, from: WaveStage, to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = [], done = false): Promise<boolean> {
+  // A step the stop cut short (a killed gate, an aborted reviewer or launch) says nothing about the wave.
+  if (stopping && !done) {
+    log(id, `stopping: ${from} -> ${to} is not recorded, the wave stays ${from}`);
+    return false;
+  }
   const stage: NewWaveEvent = { kind: "stage", stage: to, reason, ...(detail === null ? {} : { detail }) };
   const written = await appendWaveEvents(id, (fold) => (fold.stage === from ? [...events, stage] : null));
   if (written === null) log(id, `left ${from} meanwhile: ${to} is not recorded`);
@@ -178,7 +192,10 @@ async function ensureWorktree(declaration: WaveDeclaration): Promise<string> {
   return path;
 }
 
-/** Removes the review worktree unless it holds anything uncommitted: then it stays, nothing is deleted. */
+/**
+ * Removes the review worktree unless it holds anything uncommitted: then it stays, nothing is deleted. (A stopping
+ * runner's steps leave it to the resume.)
+ */
 async function removeWorktree(declaration: WaveDeclaration): Promise<void> {
   const path = reviewWorktree(declaration);
   if (!existsSync(path)) return;
@@ -216,7 +233,7 @@ async function review(fold: WaveFold): Promise<void> {
   const task = waveTask(fold);
   const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []) => {
     const moved = await moveStage(id, "reviewing", to, reason, detail, events);
-    if (!moved || to !== "merging") await removeWorktree(fold);
+    if (!stopping && (!moved || to !== "merging")) await removeWorktree(fold);
   };
   let root: string;
   try {
@@ -295,8 +312,10 @@ async function merge(fold: WaveFold): Promise<void> {
   const { id } = fold;
   const task = waveTask(fold);
   const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []) => {
-    await moveStage(id, "merging", to, reason, detail, events);
-    await removeWorktree(fold);
+    // The target moved: that is recorded even when the runner stops, the merge is not run twice.
+    const landed = to === "merged";
+    await moveStage(id, "merging", to, reason, detail, events, landed);
+    if (!stopping || landed) await removeWorktree(fold);
   };
   let root: string;
   let config: FactoryConfig;
@@ -379,7 +398,7 @@ async function build(fold: WaveFold): Promise<Next> {
   const env = { ...process.env };
   delete env[WAVE_LOCK_ENV];
   try {
-    const started = await startWaveTasks(id, env);
+    const started = await startWaveTasks(id, env, stopped.signal);
     if (started.length > 0) {
       log(id, `started ${started.join(", ")}`);
       return "again";
@@ -389,6 +408,8 @@ async function build(fold: WaveFold): Promise<Next> {
     if (!(error instanceof FactoryError) || (error.code !== "refused" && error.code !== "failed")) throw error;
     return (await moveStage(id, "building", "blocked", "infra", `${error.message}; waves.retry starts it again`)) ? "rest" : "again";
   }
+  // A stopping runner started what it could not stop; it judges nothing more.
+  if (stopping) return "wait";
   const stuck = stuckKeys(fold, states);
   if (stuck.length === 0) return "wait";
   const detail = `${stuck.length === 1 ? "task" : "tasks"} ${stuck.join(", ")} can never start (a task waited for was cancelled or removed) and no task runs: waves.add (which drops them) or waves.cancel`;
@@ -449,6 +470,7 @@ export async function runWave(id: string): Promise<number> {
   const stop = (signal: NodeJS.Signals) => {
     log(id, `${signal}, stopping`);
     stopping = true;
+    stopped.abort();
     runner.cancel();
   };
   process.on("SIGTERM", stop);

@@ -436,3 +436,66 @@ describe("resuming from the log", () => {
     expect(existsSync(reviewWorktree(repo))).toBe(false);
   });
 });
+
+/** The log of a wave whose review approved it: the runner resumes at the merge. */
+async function approvedForMerge(): Promise<void> {
+  await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
+  await appendWaveEvent(WAVE, { kind: "review", round: 1, sessionId: null, model: null, verdict: "approved", status: "ok", findings: [], usage: null, wallMs: 1 });
+  await appendWaveEvent(WAVE, { kind: "stage", stage: "merging", reason: null });
+}
+
+describe("the merge takes the review worktree as it is (invariant 2)", () => {
+  test("a worktree that holds anything but its commit before the merge blocks it as dirty, named; the file stays, the target unmoved", async () => {
+    const repo = await waveRepo();
+    git(repo, "worktree", "add", "--quiet", reviewWorktree(repo), BRANCH);
+    writeFileSync(join(reviewWorktree(repo), "notes.txt"), "mine\n");
+    await approvedForMerge();
+    await runWave(WAVE);
+    expect([(await getWave()).stage, (await getWave()).reason, (await getWave()).merge]).toEqual(["blocked", "dirty", null]);
+    expect((await timeline()).at(-1)?.detail).toContain("notes.txt");
+    expect(readFileSync(join(reviewWorktree(repo), "notes.txt"), "utf8")).toBe("mine\n");
+    expect(git(repo, "log", "--format=%s", "main")).toBe("init");
+  });
+
+  test("a merge gate that rewrites a tracked file blocks it as dirty: the gated tree is not the one that would merge", async () => {
+    const repo = await waveRepo('gates: []\nmerge_gates:\n  - ["sh", "-c", "echo changed > b.txt"]\n');
+    await approvedForMerge();
+    await runWave(WAVE);
+    const wave = await getWave();
+    expect([wave.stage, wave.reason, wave.merge, wave.gates.map((gate) => [gate.phase, gate.passed])]).toEqual(["blocked", "dirty", null, [["merge", true]]]);
+    expect(git(repo, "log", "--format=%s", "main")).toBe("init");
+    expect(git(repo, "rev-parse", `refs/heads/${BRANCH}`)).not.toBe(git(repo, "rev-parse", "main"));
+  });
+
+  test("what a merge gate leaves untracked is removed: the target gets the wave's commits only, the worktree goes", async () => {
+    const repo = await waveRepo('gates: []\nmerge_gates:\n  - ["sh", "-c", "echo x > out.log"]\n');
+    await approvedForMerge();
+    await runWave(WAVE);
+    expect([(await getWave()).stage, (await getWave()).gates.map((gate) => [gate.phase, gate.passed])]).toEqual(["merged", [["merge", true]]]);
+    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
+    expect(git(repo, "ls-tree", "-r", "--name-only", "main")).toBe("a.txt\nb.txt\nc.txt\nfactory.yaml");
+    // `git worktree remove` (never forced) refuses a worktree with untracked files: it went, so out.log was gone.
+    expect(existsSync(reviewWorktree(repo))).toBe(false);
+  });
+});
+
+describe("a runner stopped from outside", () => {
+  test("SIGTERM while it reviews leaves the wave interrupted, not blocked: nothing recorded, the worktree kept; a resume reviews again", async () => {
+    const repo = await waveRepo();
+    process.env.FAKE_REVIEW_SLEEP = "120000";
+    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
+    expect(await pokeWave(WAVE)).toBe(true);
+    await until(() => existsSync(promptLog));
+    const [pid] = await liveWaveRunners(WAVE);
+    process.kill(pid, "SIGTERM");
+    await until(async () => (await liveWaveRunners(WAVE)).length === 0);
+    const wave = await getWave();
+    expect([wave.stage, wave.reason, wave.interrupted, wave.reviews, wave.actions.includes("waves.retry")]).toEqual(["reviewing", null, true, [], true]);
+    expect((await timeline()).map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "gate"]);
+    expect(existsSync(reviewWorktree(repo))).toBe(true);
+    delete process.env.FAKE_REVIEW_SLEEP;
+    expect(await runWave(WAVE)).toBe(0);
+    expect((await getWave()).stage).toBe("merged");
+    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
+  }, 30_000);
+});

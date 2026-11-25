@@ -35,9 +35,12 @@
  *   commit, with a commit message the coder is asked for; a part outside the task's scope goes to a new task through
  *   `factory_new_task` (registered in task sessions only, usable in a follow-up run, once per user message), on this
  *   task's target branch and merge mode
+ * - A task of a wave merges into the wave's branch only until the wave's review began (`waveMergeRefusal`, invariant
+ *   2): a merge after that ends the task `blocked`, `merge_failed`, its work stays in its worktree
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
+import { waveMergeRefusal } from "../core.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
 import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "../pipeline.ts";
@@ -144,6 +147,11 @@ export default function (pi: ExtensionAPI) {
     followUps: () => followUpMessages(ctx.sessionManager.getBranch()),
     sessionModel: () => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null),
     sessionId: () => ctx.sessionManager.getSessionId(),
+    // A test double of the session manager may have no session dir: no factory session, no wave.
+    mergeRefusal: async () => {
+      const dir = ctx.sessionManager.getSessionDir?.();
+      return dir === undefined ? null : waveMergeRefusal(dir, ctx.sessionManager.getSessionId());
+    },
   });
 
   const command = (args: string, ops: OpsDeps): Promise<OpResult> => {

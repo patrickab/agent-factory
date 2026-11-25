@@ -100,6 +100,11 @@ export interface OpsDeps {
   /** The session's model as `provider/id`, the reviewer's fallback. */
   sessionModel(): string | null;
   sessionId(): string;
+  /**
+   * Why this task's merge must not land now (its wave's review began: invariant 2), null when it may. Absent: it
+   * always may.
+   */
+  mergeRefusal?(): Promise<string | null>;
 }
 
 export function newTaskSession(): TaskSession {
@@ -203,6 +208,9 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
       }),
     merge: async (config) => {
       const round = session.snapshot?.round ?? 0;
+      // Asked right before the merge, whatever started it: a task of a wave under review adds nothing to its branch.
+      const refusal = (await deps.mergeRefusal?.()) ?? null;
+      if (refusal !== null) return { gates: [], result: { kind: "failed", merge: { ok: false, commit: null, error: refusal, depsSynced: false } } };
       const mergeStatus = (text: string) => status(`round ${round}: merge, ${text}`);
       const intent = (data: MergeIntentData) => {
         if (!session.disposed) record(deps, "factory-merge-intent", data);
