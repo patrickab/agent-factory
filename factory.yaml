@@ -12,3 +12,5 @@ gates:
 merge_gates:
   - [bun, run, types]
   - [bun, run, test]
+  # The TUI's own tests, once it exists.
+  - [bash, -c, "test ! -d tui || (cd tui && uv run --quiet pytest -q)"]
