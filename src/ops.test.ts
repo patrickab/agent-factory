@@ -24,7 +24,7 @@ import {
   type OpsDeps,
 } from "./ops.ts";
 import { CommandRunner } from "./run.ts";
-import { RETRY_PROMPT, type Settings, type State, type Task } from "./state.ts";
+import { RETRY_PROMPT, roundsUsed, type Settings, type State, type Task } from "./state.ts";
 
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
@@ -257,6 +257,20 @@ describe("retryTask", () => {
     expect(pi.entries.at(-2)).toEqual({ customType: "factory-round", data: { round: 2, trigger: "retry" } });
     expect(pi.states().at(-1)).toBe("running/retry");
     expect(pi.userMessages.at(-1)).toBe(RETRY_PROMPT);
+  });
+
+  test("a task interrupted mid-round, then retried: a fresh run with the full maxRounds", async () => {
+    const pi = fake(addTaskWorktree());
+    await startTask(pi.deps, payload());
+    // Round 2 of 3 is running when the runner is killed; the next session start sets it right.
+    record(pi.deps, "factory-round", { round: 2, trigger: "gates" });
+    record(pi.deps, "factory-state", { state: "running", round: 2, reason: "gates" });
+    await resumeTask(pi.deps, pi.deps.session.snapshot!);
+    expect(pi.states().at(-1)).toBe("blocked/interrupted");
+    expect(await retryTask(pi.deps)).toEqual({ ok: true });
+    const snapshot = pi.deps.session.snapshot!;
+    expect(snapshot).toMatchObject({ state: "running", round: 3, runFirstRound: 3 });
+    expect([roundsUsed(snapshot), snapshot.task.settings.maxRounds]).toEqual([1, 3]);
   });
 });
 

@@ -94,8 +94,9 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   `failed`; `detail` is `{force: true}` on a refused `tasks.remove` that `force` would carry out. It imports only Bun
   and `node:`
 - `env` is the environment of every runner the action starts (default `process.env`): a host passes one without its
-  secrets. Under a systemd service (`INVOCATION_ID`) with `systemd-run` on PATH a runner runs in a user scope of its
-  own, so restarting the service leaves it running
+  secrets. With `systemd-run` on PATH every runner (a task's, a wave's) runs in a systemd user scope of its own
+  (`systemd-run --user --scope --quiet --collect`), else detached in its own process group: a restart of the service
+  or the terminal the caller lived in leaves it running
 - Actions: `repos.list|add|remove` (a repo's settings file is its registration; `add` -> `{repo, repos}`),
   `branches.list`, `settings.get|set` (`{stored, resolved, defaults}`; `preview` is a stored boolean only clients
   read), `config.get` (working copy, or a branch's committed `factory.yaml`, a draft when there is none),

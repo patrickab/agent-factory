@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, liveRunners, runnerSpawn, startCommand, taskInboxPath, unmergedWork } from "./launch.ts";
 import { resolveSettings, saveSettings } from "./settings.ts";
 import { parseStartPayload } from "./state.ts";
+import { spawnDetached } from "./spawn.ts";
 import { listTasks, taskLogPath } from "./tasks.ts";
 
 const savedEnv = { ...process.env };
@@ -334,16 +335,53 @@ describe("runnerSpawn", () => {
   const command = ["/bin/bun", "runner.ts", "a"];
   const env = { PATH: "/bin", FACTORY_TASK_LOCK: "/l" };
 
-  test("under a systemd service with systemd-run: a user scope of its own, the user bus reachable", () => {
-    const host = { INVOCATION_ID: "abc", XDG_RUNTIME_DIR: "/run/user/1", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1/bus", SECRET: "s" };
+  test("with systemd-run: a user scope of its own, collected, the user bus reachable", () => {
+    const host = { XDG_RUNTIME_DIR: "/run/user/1", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1/bus", SECRET: "s" };
     expect(runnerSpawn(command, env, host, "/usr/bin/systemd-run")).toEqual({
-      argv: ["/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--", ...command],
+      argv: ["/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect", "--", ...command],
       env: { ...env, XDG_RUNTIME_DIR: "/run/user/1", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1/bus" },
     });
   });
 
-  test("outside a systemd service, or without systemd-run: the command as it is", () => {
-    expect(runnerSpawn(command, env, { XDG_RUNTIME_DIR: "/run/user/1" }, "/usr/bin/systemd-run")).toEqual({ argv: command, env });
-    expect(runnerSpawn(command, env, { INVOCATION_ID: "abc" }, null)).toEqual({ argv: command, env });
+  test("without systemd-run, or no user manager to reach: the command as it is", () => {
+    expect(runnerSpawn(command, env, { XDG_RUNTIME_DIR: "/run/user/1" }, null)).toEqual({ argv: command, env });
+    expect(runnerSpawn(command, env, {}, "/usr/bin/systemd-run")).toEqual({ argv: command, env });
+  });
+});
+
+describe("spawnDetached", () => {
+  /** A bin dir with a `systemd-run` that writes its argv to `argvFile` and runs the command after `--`. */
+  function fakeSystemdRun(argvFile: string): string {
+    const bin = join(caseDir, "systemd-bin");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "systemd-run"),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`,
+    );
+    chmodSync(join(bin, "systemd-run"), 0o755);
+    return bin;
+  }
+
+  async function spawnAndWait(command: string[], done: string): Promise<number | undefined> {
+    const pid = await spawnDetached(command, { ...process.env, XDG_RUNTIME_DIR: "/run/user/test" }, join(caseDir, "log"), caseDir);
+    for (let i = 0; i < 200 && !existsSync(done); i++) await Bun.sleep(10);
+    return pid;
+  }
+
+  test("systemd-run on PATH: the runner's argv runs through it, its pid the command's", async () => {
+    const argvFile = join(caseDir, "argv");
+    const done = join(caseDir, "done");
+    process.env.PATH = `${fakeSystemdRun(argvFile)}:${process.env.PATH}`;
+    const pid = await spawnAndWait(["/bin/sh", "-c", `echo $$ > '${done}'`], done);
+    expect(readFileSync(argvFile, "utf8").trim().split("\n")).toEqual(["--user", "--scope", "--quiet", "--collect", "--", "/bin/sh", "-c", `echo $$ > '${done}'`]);
+    expect(readFileSync(done, "utf8").trim()).toBe(String(pid));
+  });
+
+  test("no systemd-run on PATH: the command alone", async () => {
+    const done = join(caseDir, "done");
+    process.env.PATH = join(caseDir, "empty");
+    const pid = await spawnAndWait(["/bin/sh", "-c", `echo $$ > '${done}'`], done);
+    expect(readFileSync(done, "utf8").trim()).toBe(String(pid));
+    expect(existsSync(join(caseDir, "argv"))).toBe(false);
   });
 });

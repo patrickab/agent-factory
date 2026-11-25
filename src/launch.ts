@@ -8,7 +8,7 @@
  *   the `TaskRecord` and starts the detached runner with `/factory start <json>`. A failing or aborted step undoes the
  *   earlier ones, through git only. A missing target branch or `factory.yaml` throws a `LaunchRefusedError`
  * - Provides `sendCommand`: one more message to a task's session, through a new detached runner (the caller's `env`;
- *   `runnerSpawn` puts it in a systemd user scope under a service) that takes over the task lock its caller holds;
+ *   `runnerSpawn` puts it in a systemd user scope when `systemd-run` is on PATH) that takes over the task lock its caller holds;
  *   `messageTask`: a message to the coder in any state but merging (`taskInboxPath` of a live runner, else a new
  *   runner); a state refusal is a `MessageRefusedError`
  * - Provides `defaultBranch`, `localBranchExists` and `startCommand` (the payload `parseStartPayload` accepts)
