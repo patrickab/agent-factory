@@ -2,6 +2,7 @@
  * The core over real git repos in a temp dir and a fake `pi` on PATH (never a model, never the real
  * `agent-worktree`). The fake answers each `/factory` command with the entries the plugin would write.
  */
+import { randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
@@ -213,9 +214,11 @@ async function expectError(promise: Promise<unknown>, code: FactoryError["code"]
   expect(error.message).toContain(message);
 }
 
-const ID_1 = "abc10000-0000-4000-8000-000000000001";
-const ID_2 = "abc20000-0000-4000-8000-000000000002";
-const ID_3 = "abc30000-0000-4000-8000-000000000003";
+/** Part of every fixed id and session id here: a concurrent test run (another worktree) never matches these runners. */
+const RUN = randomBytes(2).toString("hex");
+const ID_1 = `abc10000-${RUN}-4000-8000-000000000001`;
+const ID_2 = `abc20000-${RUN}-4000-8000-000000000002`;
+const ID_3 = `abc30000-${RUN}-4000-8000-000000000003`;
 
 function fakeRecord(id: string, repo: string): TaskRecord {
   return {
@@ -729,7 +732,7 @@ describe("tasks.import", () => {
     const repo = makeRepo();
     const worktree = join(caseDir, "task-wt");
     git(repo, "worktree", "add", "--quiet", "-b", "task", worktree);
-    const record = { id: ID, repo, worktree, branch: "task", title: "first", sessionId: "test-session-s", sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
+    const record = { id: ID, repo, worktree, branch: "task", title: "first", sessionId: `test-session-s-${RUN}`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
     expect(await callAction("tasks.import", { record })).toMatchObject({ id: ID, title: "first", state: null });
     expect(await callAction("tasks.import", { record: { ...record, title: "second" } })).toMatchObject({ title: "first" });
     await expect(callAction("tasks.import", { record: { ...record, id: "abc" } })).rejects.toMatchObject({ code: "invalid" });
@@ -743,7 +746,7 @@ describe("tasks.import", () => {
     const victim = join(caseDir, "victim-wt");
     git(repo, "worktree", "add", "--quiet", "-b", "precious", victim);
     const other = makeRepo(true, "other");
-    const base = { id: ID, repo, worktree: victim, branch: "precious", title: "t", sessionId: "test-session-s", sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
+    const base = { id: ID, repo, worktree: victim, branch: "precious", title: "t", sessionId: `test-session-s-${RUN}`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
     const refused = async (change: object, message: string) => expectError(callAction("tasks.import", { record: { ...base, ...change } }), "refused", message);
     await refused({ worktree: repo, branch: "main" }, `${repo} is not a linked worktree of ${repo}`);
     await refused({ branch: "main" }, `${victim} does not have branch main checked out`);
@@ -758,8 +761,8 @@ describe("tasks.import", () => {
     const repo = makeRepo();
     const worktree = join(caseDir, "task-wt");
     git(repo, "worktree", "add", "--quiet", "-b", "task", worktree);
-    const wave = "60000000-0000-4000-8000-000000000001";
-    const record = { id: ID, repo, worktree, branch: "task", title: "t", sessionId: "test-session-s", sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z", wave };
+    const wave = `60000000-${RUN}-4000-8000-000000000001`;
+    const record = { id: ID, repo, worktree, branch: "task", title: "t", sessionId: `test-session-s-${RUN}`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z", wave };
     expect(((await callAction("tasks.import", { record })) as TaskView).wave).toBeNull();
     expect((await listTasks()).map((task) => [task.id, task.wave])).toEqual([[ID, null]]);
   });
@@ -1216,9 +1219,9 @@ describe("waves", () => {
 
   test("waves.list filters by repository and by tag (equal or prefix + /)", async () => {
     const repo = await registeredRepo();
-    await writtenWave("10000000-0000-4000-8000-000000000001", repo, "factory/w1", "2026-01-01T00:00:01.000Z");
-    await writtenWave("10000000-0000-4000-8000-000000000002", repo, "factory/w2", "2026-01-01T00:00:02.000Z");
-    await writtenWave("10000000-0000-4000-8000-000000000003", "/elsewhere", "factorybot/w1", "2026-01-01T00:00:03.000Z");
+    await writtenWave(`10000000-${RUN}-4000-8000-000000000001`, repo, "factory/w1", "2026-01-01T00:00:01.000Z");
+    await writtenWave(`10000000-${RUN}-4000-8000-000000000002`, repo, "factory/w2", "2026-01-01T00:00:02.000Z");
+    await writtenWave(`10000000-${RUN}-4000-8000-000000000003`, "/elsewhere", "factorybot/w1", "2026-01-01T00:00:03.000Z");
     const list = async (params: object) => ((await callAction("waves.list", params, { cwd: repo })) as { waves: WaveView[] }).waves.map((wave) => wave.tag);
     expect(await list({})).toEqual(["factory/w1", "factory/w2", "factorybot/w1"]);
     expect(await list({ tag: "factory" })).toEqual(["factory/w1", "factory/w2"]);
@@ -1229,7 +1232,7 @@ describe("waves", () => {
 
   test("the view: task states and usage, counts without cancelled tasks, usage of tasks and reviews, timeline", async () => {
     const repo = makeRepo();
-    const id = "20000000-0000-4000-8000-000000000001";
+    const id = `20000000-${RUN}-4000-8000-000000000001`;
     await writtenWave(id, repo, "factory/w9");
     const usage = (input: number, output: number, total: number) => ({ type: "message", message: { role: "assistant", usage: { input, output, cost: { total } } } });
     const state = (name: string) => ({ type: "custom", customType: "factory-state", data: { state: name, round: 1, reason: "r" } });
@@ -1272,13 +1275,13 @@ describe("waves", () => {
   test("a record of the wave no task event names (its runner died after the launch) is adopted, not launched again", async () => {
     const repo = makeRepo();
     git(repo, "branch", "main-factory-w9");
-    const id = "20000000-0000-4000-8000-000000000002";
+    const id = `20000000-${RUN}-4000-8000-000000000002`;
     await createWave({ id, repo, tag: "factory/w9", plan: null, title: "w", request: "r", branch: "main-factory-w9", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
     await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a")] });
     const orphan = { ...fakeRecord(ID_1, repo), title: "Task a", tag: "factory/w9", wave: id };
     await writeTask(orphan);
     // Another wave's record and one of another title are no orphans of this task.
-    await writeTask({ ...fakeRecord(ID_2, repo), title: "Task a", wave: "20000000-0000-4000-8000-000000000003" });
+    await writeTask({ ...fakeRecord(ID_2, repo), title: "Task a", wave: `20000000-${RUN}-4000-8000-000000000003` });
     expect(await startWaveTasks(id)).toEqual(["a"]);
     expect(taskOf(await getWave(id), "a")).toMatchObject({ taskId: ID_1, sessionId: orphan.sessionId });
     expect((await listTasks()).map((record) => record.id)).toEqual([ID_1, ID_2]);
@@ -1290,7 +1293,7 @@ describe("waves", () => {
     writeFileSync(join(repo, "factory.yaml"), 'hooks:\n  after_create:\n    - ["sleep", "5"]\ngates: []\n');
     git(repo, "commit", "--quiet", "-am", "a slow hook");
     git(repo, "branch", "main-factory-w9");
-    const id = "20000000-0000-4000-8000-000000000004";
+    const id = `20000000-${RUN}-4000-8000-000000000004`;
     await createWave({ id, repo, tag: "factory/w9", plan: null, title: "w", request: "r", branch: "main-factory-w9", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
     await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a"), spec("b")] });
     const stopped = new AbortController();
@@ -1312,7 +1315,7 @@ describe("waves", () => {
   test("tasks.start (and with it factory_new_task) refuses the branch of a wave not merged or cancelled (invariant 13)", async () => {
     const repo = makeRepo();
     git(repo, "branch", "main-factory-w9");
-    const id = "20000000-0000-4000-8000-000000000005";
+    const id = `20000000-${RUN}-4000-8000-000000000005`;
     await createWave({ id, repo, tag: "factory/w9", plan: null, title: "w", request: "r", branch: "main-factory-w9", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
     const start = () => callAction("tasks.start", { title: "t", request: "r", overrides: { branch: "main-factory-w9" } }, { cwd: repo });
     for (const stage of [null, "reviewing", "rejected", "blocked", "waiting_approve", "merging"] as const) {
@@ -1331,7 +1334,7 @@ describe("waves", () => {
 
   test("waves.start that fails midway (its runner does not start) leaves no branch and no record behind", async () => {
     const repo = await registeredRepo();
-    const id = "20000000-0000-4000-8000-000000000006";
+    const id: `${string}-${string}-${string}-${string}-${string}` = `20000000-${RUN}-4000-8000-000000000006`;
     // The poke's marker cannot be written: a directory lies where it goes.
     mkdirSync(wavePokePath(id), { recursive: true });
     const uuid = spyOn(crypto, "randomUUID").mockReturnValue(id);
@@ -1354,14 +1357,14 @@ describe("waves", () => {
   test("tasks.start cannot set a wave", async () => {
     const repo = makeRepo();
     expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("wave");
-    const view = (await callAction("tasks.start", { title: "t", request: "r", wave: "20000000-0000-4000-8000-000000000001" }, { cwd: repo })) as TaskView;
+    const view = (await callAction("tasks.start", { title: "t", request: "r", wave: `20000000-${RUN}-4000-8000-000000000001` }, { cwd: repo })) as TaskView;
     expect(view.wave).toBeNull();
     expect((await recordById(view.id)).wave).toBeNull();
   });
 });
 
 describe("waiting on waves and the wave actions", () => {
-  const WAVE = "50000000-0000-4000-8000-000000000001";
+  const WAVE = `50000000-${RUN}-4000-8000-000000000001`;
   const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [] });
   const stateEntry = (state: string) => ({ type: "custom", customType: "factory-state", timestamp: "t", data: { state, round: 1, reason: "r" } });
   type WaitResult = { tasks: TaskView[]; waves: WaveView[]; attention: string[]; timedOut: boolean };

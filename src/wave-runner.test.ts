@@ -3,6 +3,7 @@
  * work commits on the wave's branch, and the reviewer is a fake `pi` on PATH (`--mode json`, a `submit_verdict` call
  * whose findings `$FAKE_VERDICT` chooses). `runWave` runs in this process; the poke tests start real detached runners.
  */
+import { randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -97,7 +98,9 @@ async function until(check: () => boolean | Promise<boolean>, timeoutMs = 15_000
   }
 }
 
-const WAVE = "30000000-0000-4000-8000-000000000001";
+/** Part of every fixed id and session id here: a concurrent test run (another worktree) never matches these runners. */
+const RUN = randomBytes(2).toString("hex");
+const WAVE = `30000000-${RUN}-4000-8000-000000000001`;
 const BRANCH = "main-factory-w1";
 const taskId = (n: number) => `40000000-0000-4000-8000-00000000000${n}`;
 
@@ -132,7 +135,7 @@ async function waveRepo(config = "gates:\n  - [\"true\"]\n", state = "done", ove
       worktree: join(caseDir, `task-${spec.key}`),
       branch: `task-${spec.key}`,
       title: spec.title,
-      sessionId: `session-${spec.key}`,
+      sessionId: `session-${RUN}-${spec.key}`,
       sessionDir: join(caseDir, "sessions"),
       createdAt: `2026-01-01T00:00:0${index + 1}.000Z`,
       tag: "factory/w1",
@@ -155,7 +158,7 @@ type WaitResult = { waves: WaveView[]; attention: string[]; timedOut: boolean };
 const waitWave = async (timeoutMs: number) => (await callAction("tasks.wait", { wave: WAVE, timeoutMs })) as WaitResult;
 /** Overwrites the session of the wave's task `key` with one state. */
 const setState = (key: string, state: string) =>
-  writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${key}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "r" } })}\n`);
+  writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${key}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "r" } })}\n`);
 /** Holds the runner's lock in this process while `act` runs: a poke leaves its marker and starts no runner. */
 async function holding<T>(act: () => Promise<T>): Promise<T> {
   await lockWave(WAVE);
@@ -408,7 +411,7 @@ describe("a wave never waits silently (invariant 8)", () => {
       worktree: join(caseDir, "task-x"),
       branch: "task-x",
       title: "Fix b",
-      sessionId: "session-x",
+      sessionId: `session-${RUN}-x`,
       sessionDir: join(caseDir, "sessions"),
       createdAt: "2026-01-01T00:00:03.000Z",
       tag: "factory/w1",

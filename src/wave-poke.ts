@@ -106,23 +106,29 @@ export async function liveWaveRunners(id: string): Promise<number[]> {
   return result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number);
 }
 
-async function runnersEnded(id: string, waitMs: number): Promise<boolean> {
+/**
+ * Waits up to `waitMs` for the wave's runners to end, sending `signal` to each one it has not signalled yet: a task's
+ * runner that ends meanwhile pokes the wave and may start a fresh runner, which must be stopped too.
+ */
+async function runnersEnded(id: string, waitMs: number, signal: NodeJS.Signals): Promise<boolean> {
+  const signalled = new Set<number>();
   const deadline = Date.now() + waitMs;
-  while ((await liveWaveRunners(id)).length > 0) {
+  for (;;) {
+    const pids = await liveWaveRunners(id);
+    if (pids.length === 0) return true;
     if (Date.now() > deadline) return false;
+    for (const pid of pids.filter((pid) => !signalled.has(pid))) {
+      signalled.add(pid);
+      signalRunner(pid, signal);
+    }
     await Bun.sleep(100);
   }
-  return true;
 }
 
 /** Ends the wave's runners: SIGTERM (the runner cancels its commands and lets the lock go), SIGKILL when that is not enough. */
 export async function stopWaveRunners(id: string): Promise<void> {
-  const pids = await liveWaveRunners(id);
-  if (pids.length === 0) return;
-  for (const pid of pids) signalRunner(pid, "SIGTERM");
-  if (await runnersEnded(id, STOP_WAIT_MS)) return;
-  for (const pid of await liveWaveRunners(id)) signalRunner(pid, "SIGKILL");
-  if (!(await runnersEnded(id, STOP_WAIT_MS))) throw new Error(`the runner of wave ${id} does not end`);
+  if (await runnersEnded(id, STOP_WAIT_MS, "SIGTERM")) return;
+  if (!(await runnersEnded(id, STOP_WAIT_MS, "SIGKILL"))) throw new Error(`the runner of wave ${id} does not end`);
 }
 
 /** Removes the wave's poke marker. */
