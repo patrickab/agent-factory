@@ -17,8 +17,7 @@
  */
 import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { FactoryError } from "./core.ts";
-import { loadModels, MODEL_ID } from "./models.ts";
-import { parseSettingsFields, RESTING_STATES, type Settings, type State } from "./state.ts";
+import { MODEL_SIZES, normalizeModels, parseSettingsFields, RESTING_STATES, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
@@ -33,13 +32,13 @@ export type WaveReason = "conflict" | "gates" | "dirty" | "infra" | "review_fail
 export type Usage = { input: number; output: number; cost: number };
 
 /**
- * `key` unique in the wave, `[A-Za-z0-9._-]+`; `after` = keys of the same wave; `model`: the coder's model of this task
- * (`provider/model`, on the factory models list), absent: the wave's coder model.
+ * `key` unique in the wave, `[A-Za-z0-9._-]+`; `after` = keys of the same wave; `model`: which of the wave's two models
+ * this task's coder runs with, absent: `big`. Resolved against the wave's stored settings when the task starts.
  */
-export type WaveTaskSpec = { key: string; title: string; request: string; after?: string[]; model?: string };
+export type WaveTaskSpec = { key: string; title: string; request: string; after?: string[]; model?: ModelSize };
 
-/** A task spec as the `tasks` event stores it; without `model` (old logs too) the task runs with the wave's coder model. */
-export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: string };
+/** A task spec as the `tasks` event stores it; without `model` (old logs too) the task runs with the `big` model. */
+export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: ModelSize };
 
 export const WAVE_STAGES: readonly WaveStage[] = ["building", "reviewing", "rejected", "merging", "waiting_approve", "merged", "blocked", "cancelled"];
 export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["rejected", "waiting_approve", "merged", "blocked", "cancelled"];
@@ -50,7 +49,7 @@ const WAVE_REASONS: readonly WaveReason[] = ["conflict", "gates", "dirty", "infr
  * them, `branch` = the wave's branch and `merge: "auto"`; `merge` is the wave's own (`review`: wait for approve), so is
  * `remote` (the wave is shown on the origin's forge, `remote.ts`; absent = off).
  */
-export type WaveOverrides = { models?: Settings["models"]; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; remote?: boolean };
+export type WaveOverrides = { models?: ModelChoice; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; remote?: boolean };
 
 /** Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. */
 export interface WaveDeclaration {
@@ -115,8 +114,8 @@ export type FoldedTask = {
   title: string;
   request: string;
   after: string[];
-  /** The coder's model of this task; null: the wave's. */
-  model: string | null;
+  /** Which of the wave's models this task's coder runs with (absent in the log: `big`). */
+  model: ModelSize;
   taskId: string | null;
   sessionId: string | null;
   dropped?: boolean;
@@ -144,7 +143,7 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides"> {
   detail: string | null;
   running: boolean;
   interrupted: boolean;
-  tasks: { key: string; title: string; after: string[]; model: string | null; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null }[];
+  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null }[];
   counts: { total: number; done: number };
   reviews: WaveReview[];
   gates: WaveGate[];
@@ -220,10 +219,12 @@ function usageOf(raw: unknown): Usage | null {
 export function parseWaveOverrides(raw: unknown, prefix = "overrides."): WaveOverrides {
   if (raw === null || raw === undefined) return {};
   if (!isRecord(raw)) throw new Error(`${prefix.slice(0, -1)} must be an object`);
-  const { branch: _branch, ...fields } = parseSettingsFields(raw, prefix);
-  if (raw.remote === undefined) return fields;
+  const { branch: _branch, models, ...fields } = parseSettingsFields(raw, prefix);
+  // Old declarations stored `{coder, reviewer}`: read as the contract's compatibility line says.
+  const parsed: WaveOverrides = models === undefined ? fields : { ...fields, models: normalizeModels(models) };
+  if (raw.remote === undefined) return parsed;
   if (typeof raw.remote !== "boolean") throw new Error(`${prefix}remote must be a boolean`);
-  return { ...fields, remote: raw.remote };
+  return { ...parsed, remote: raw.remote };
 }
 
 export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration {
@@ -251,7 +252,8 @@ function parseSpec(raw: unknown): WaveTaskEntry {
   const after = raw.after ?? [];
   if (!Array.isArray(after) || !after.every((key) => typeof key === "string")) throw new Error("after must be an array of keys");
   const model = strOrNull(raw, "model");
-  return { key: str(raw, "key"), title: str(raw, "title"), request: str(raw, "request", false), after: [...after], ...(model === null ? {} : { model }) };
+  if (model !== null && !MODEL_SIZES.includes(model as ModelSize)) throw new Error('model must be "small", "big" or null');
+  return { key: str(raw, "key"), title: str(raw, "title"), request: str(raw, "request", false), after: [...after], ...(model === null ? {} : { model: model as ModelSize }) };
 }
 
 function parseFinding(raw: unknown): WaveFinding {
@@ -490,7 +492,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         for (const spec of event.tasks) {
           // Validation keeps keys unique; a repeated key in a hand-edited log keeps its first declaration.
           if (fold.tasks.some((task) => task.key === spec.key)) continue;
-          fold.tasks.push({ key: spec.key, title: spec.title, request: spec.request, after: [...spec.after], model: spec.model ?? null, taskId: null, sessionId: null });
+          fold.tasks.push({ key: spec.key, title: spec.title, request: spec.request, after: [...spec.after], model: spec.model ?? "big", taskId: null, sessionId: null });
         }
         break;
       case "task": {
@@ -629,8 +631,8 @@ export function waveCounts(fold: WaveFold, states: TaskStates): { total: number;
 
 /**
  * Checks task specs a wave adds against the keys it has: an object each, unique key of `[A-Za-z0-9._-]+`, non-empty
- * title and request, `after` naming keys of the wave (existing or added), no cycle, `model` a `provider/model` id when
- * given (whether it is on the factory models list: `requireTaskModels`). Throws a `FactoryError` `invalid`.
+ * title and request, `after` naming keys of the wave (existing or added), no cycle, `model` `"small"` or `"big"` when
+ * given (never a concrete model: the wave's settings name those). Throws a `FactoryError` `invalid`.
  */
 export function validateTaskSpecs(raw: unknown, existing: readonly { key: string }[] = []): WaveTaskEntry[] {
   const invalid = (message: string) => new FactoryError("invalid", message);
@@ -645,9 +647,11 @@ export function validateTaskSpecs(raw: unknown, existing: readonly { key: string
     if (typeof title !== "string" || title.trim() === "") throw invalid(`tasks[${index}].title must be a non-empty string`);
     if (typeof request !== "string" || request.trim() === "") throw invalid(`tasks[${index}].request must be a non-empty string`);
     if (!Array.isArray(after) || !after.every((name) => typeof name === "string")) throw invalid(`tasks[${index}].after must be an array of keys`);
-    if (model !== null && (typeof model !== "string" || !MODEL_ID.test(model))) throw invalid(`tasks[${index}].model must be "provider/model"`);
+    if (model !== null && !MODEL_SIZES.includes(model as ModelSize)) {
+      throw invalid(`tasks[${index}].model must be "small" or "big" (the wave's settings name the models), not ${JSON.stringify(model)}`);
+    }
     keys.add(key);
-    specs.push({ key, title, request, after: [...new Set(after as string[])], ...(model === null ? {} : { model: model as string }) });
+    specs.push({ key, title, request, after: [...new Set(after as string[])], ...(model === null ? {} : { model: model as ModelSize }) });
   }
   for (const spec of specs) {
     for (const name of spec.after) {
@@ -671,20 +675,4 @@ export function validateTaskSpecs(raw: unknown, existing: readonly { key: string
   };
   for (const spec of specs) visit(spec.key, []);
   return specs;
-}
-
-/**
- * Checks that every task's own `model` is on the factory models list: a `FactoryError` `invalid` naming the list
- * otherwise. Tasks without one pass (they run with the wave's coder model, checked by `waves.start`).
- */
-export async function requireTaskModels(specs: readonly WaveTaskEntry[]): Promise<void> {
-  const wanted = specs.filter((spec) => spec.model !== undefined);
-  if (wanted.length === 0) return;
-  const allowed = await loadModels();
-  for (const spec of wanted) {
-    if (!allowed.includes(spec.model as string)) {
-      const list = allowed.length === 0 ? "none are set" : allowed.join(", ");
-      throw new FactoryError("invalid", `task ${spec.key}: the model ${spec.model} is not a factory model (factory models: ${list})`);
-    }
-  }
 }

@@ -44,7 +44,7 @@ const waveTask = (key: string, state: string, after: string[] = [], taskId: stri
   key,
   title: `the ${key}`,
   after,
-  model: null,
+  model: "big",
   taskId: state === "pending" ? null : taskId,
   sessionId: state === "pending" ? null : SESSION,
   state,
@@ -117,9 +117,23 @@ const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "settings.get": {
     params: { repo: "." },
     result: {
-      stored: { merge: "review", models: { coder: "anthropic/opus" } },
-      resolved: { branch: "master", merge: "review", maxRounds: 3, review: true, models: { coder: "anthropic/opus", reviewer: "openai/gpt" }, preview: false },
-      defaults: { branch: "master", merge: "auto", maxRounds: 3, review: true, models: {}, preview: false },
+      stored: { merge: "review", models: { big: "anthropic/opus" } },
+      resolved: {
+        branch: "master",
+        merge: "review",
+        maxRounds: 3,
+        review: true,
+        models: { small: "anthropic/sonnet", big: "anthropic/opus", coder: "anthropic/opus", reviewer: "openai/gpt" },
+        preview: false,
+      },
+      defaults: {
+        branch: "master",
+        merge: "auto",
+        maxRounds: 3,
+        review: true,
+        models: { small: "anthropic/sonnet", big: "openai/gpt", coder: "openai/gpt", reviewer: "openai/gpt" },
+        preview: false,
+      },
     },
   },
   "settings.set": {
@@ -249,11 +263,15 @@ describe("agentView", () => {
         "merge: review",
         "maxRounds: 3 (default)",
         "review: true (default)",
-        "models.coder: anthropic/opus",
+        "models.small: anthropic/sonnet (default)",
+        "models.big: anthropic/opus",
         "models.reviewer: openai/gpt (default)",
         "preview: false (default)",
       ].join("\n"),
     );
+    // coder only repeats big, and so does a reviewer equal to it: neither is shown.
+    const same = { stored: {}, resolved: { models: { small: "a/s", big: "a/b", coder: "a/b", reviewer: "a/b" } }, defaults: {} };
+    expect(agentView("settings.get", {}, same)).toBe("models.small: a/s (default)\nmodels.big: a/b (default)");
     expect(agentView("settings.set", FIXTURES["settings.set"].params, FIXTURES["settings.set"].result)).toBe("settings set:\n  merge: review");
     expect(agentView("config.get", { branch: "waves" }, FIXTURES["config.get"].result)).toBe("factory.yaml (committed on waves)\ngates:\n  - [bun, run, types]");
     expect(agentView("config.get", {}, { exists: false, text: null, draft: "gates: []\n", source: ["package.json"] })).toBe("no factory.yaml, a draft from package.json:\ngates: []");

@@ -11,7 +11,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { factoryHome } from "./settings.ts";
-import type { ROLES } from "./state.ts";
+import type { ModelSize, ROLES } from "./state.ts";
 import { errorText } from "./util.ts";
 
 type Role = (typeof ROLES)[number];
@@ -67,8 +67,11 @@ export async function saveModels(models: string[]): Promise<void> {
   }
 }
 
-/** Throws one sentence when the list is empty or a given model is not on it. A role without a model passes. */
-export async function requireModels(models: Partial<Record<Role, string>>): Promise<void> {
+/**
+ * Throws one sentence when the list is empty or a given model is not on it, naming it by its key (a role or a size).
+ * A key without a model passes.
+ */
+export async function requireModels(models: Partial<Record<Role | ModelSize, string>> | Record<string, string | undefined>): Promise<void> {
   const allowed = await loadModels();
   if (allowed.length === 0) throw new Error(NO_MODELS_MESSAGE);
   for (const [role, model] of Object.entries(models)) {

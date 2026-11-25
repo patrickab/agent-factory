@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { callAction } from "./core.ts";
 import { worktreePath } from "./launch.ts";
+import { defaultModels } from "./settings.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath, waveReviewsDir } from "./wave-poke.ts";
 import { runWave } from "./wave-runner.ts";
@@ -183,7 +184,7 @@ describe("the wave runner", () => {
     expect(git(repo, "rev-parse", `refs/heads/${BRANCH}`)).toBe(git(repo, "rev-parse", "main"));
     expect(wave.merge).toEqual({ at: expect.any(String), from: moved, to: git(repo, "rev-parse", "main"), queueMs: expect.any(Number) });
     expect(wave.reviews).toEqual([
-      { at: expect.any(String), round: 1, sessionId: "11111111-2222-4333-8444-555555555555", model: null, verdict: "approved", status: "ok", findings: [], usage: { input: 100, output: 20, cost: 0.5 }, wallMs: expect.any(Number) },
+      { at: expect.any(String), round: 1, sessionId: "11111111-2222-4333-8444-555555555555", model: defaultModels().big, verdict: "approved", status: "ok", findings: [], usage: { input: 100, output: 20, cost: 0.5 }, wallMs: expect.any(Number) },
     ]);
     expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", true]]);
     expect(wave.usage).toEqual({ input: 100, output: 20, cost: 0.5 });

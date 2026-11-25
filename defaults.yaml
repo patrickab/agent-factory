@@ -1,0 +1,6 @@
+# The factory's default models; a repository's settings resolve over them.
+# big: the coder's default and the reviewer's model.
+# small: for easy tasks (a wave's task with model: small).
+models:
+  small: anthropic/claude-sonnet-5-5
+  big: anthropic/claude-opus-5-5

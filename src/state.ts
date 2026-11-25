@@ -26,7 +26,12 @@ export interface Settings {
   merge: "auto" | "review";
   maxRounds: number;
   review: boolean;
-  models: { coder?: string; reviewer?: string };
+  /**
+   * The project's two models (`small`, `big`) and the models this task's roles run with (`coder`: the size the task
+   * asked for, `reviewer`: an explicit override or `big`). Old task records carry only `coder` and `reviewer`, and a
+   * role without a model runs with the session's.
+   */
+  models: { small?: string; big?: string; coder?: string; reviewer?: string };
 }
 
 export interface StartPayload {
@@ -368,8 +373,29 @@ export function reviewFeedback(round: number, findings: Finding[]): string {
 
 /** The highest `maxRounds` a task may run with. */
 export const MAX_ROUNDS_LIMIT = 20;
-/** The roles `Settings.models` sets a model for. */
+/** The roles a task runs a model for. */
 export const ROLES = ["coder", "reviewer"] as const;
+/** The two models a project names: `big` is the coder's default and the reviewer's model, `small` for easy tasks. */
+export const MODEL_SIZES = ["small", "big"] as const;
+export type ModelSize = (typeof MODEL_SIZES)[number];
+/** Every name `Settings.models` reads: the sizes and the roles. */
+const MODEL_NAMES = [...MODEL_SIZES, ...ROLES] as const;
+
+/** A project's models as stored or passed (`settings.set`, overrides): the sizes, and a reviewer that differs from `big`. */
+export type ModelChoice = { small?: string; big?: string; reviewer?: string };
+
+/**
+ * Old names read as the contract says: `coder` is `big` (it wins over a `big` given with it: an old client edits only
+ * `coder`), `reviewer` is dropped when equal to that layer's `big`, else kept as the reviewer's own model.
+ */
+export function normalizeModels(models: Settings["models"]): ModelChoice {
+  const big = models.coder ?? models.big;
+  const choice: ModelChoice = {};
+  if (models.small !== undefined) choice.small = models.small;
+  if (big !== undefined) choice.big = big;
+  if (models.reviewer !== undefined && models.reviewer !== big) choice.reviewer = models.reviewer;
+  return choice;
+}
 
 /**
  * The settings keys of `raw`, checked, unknown keys dropped; an absent key stays absent. Shared by the `/factory start`
@@ -398,14 +424,14 @@ export function parseSettingsFields(raw: Record<string, unknown>, prefix = ""): 
   }
   if (models !== undefined) {
     if (!isRecord(models)) throw new Error(`${prefix}models must be an object`);
-    const roleModels: Settings["models"] = {};
-    for (const role of ROLES) {
-      const model = models[role];
+    const named: Settings["models"] = {};
+    for (const name of MODEL_NAMES) {
+      const model = models[name];
       if (model === undefined) continue;
-      if (typeof model !== "string" || !model.includes("/")) throw new Error(`${prefix}models.${role} must be "provider/model"`);
-      roleModels[role] = model;
+      if (typeof model !== "string" || !model.includes("/")) throw new Error(`${prefix}models.${name} must be "provider/model"`);
+      named[name] = model;
     }
-    fields.models = roleModels;
+    fields.models = named;
   }
   return fields;
 }

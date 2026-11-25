@@ -64,6 +64,7 @@ import {
   type WaveReason,
   type WaveStage,
 } from "./waves.ts";
+import { resolveModels } from "./settings.ts";
 
 /**
  * How long a building wave waits for a poke before it looks at its tasks again. `FACTORY_WAVE_POLL_MS` (tests only)
@@ -306,7 +307,8 @@ async function review(fold: WaveFold): Promise<boolean | void> {
       task,
       followUps: [],
       diff,
-      model: fold.overrides.models?.reviewer ?? null,
+      // The wave's reviewer model: its own when it names one, else its big one (an old declaration: over the defaults).
+      model: resolveModels([fold.overrides.models]).reviewer,
       rolePrompt: prompts.reviewer,
       reviewsDir: waveReviewsDir(id),
       cancelled: () => runner.cancelled,

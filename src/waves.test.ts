@@ -163,15 +163,16 @@ describe("foldWave", () => {
     expect(foldWave(declaration(ONE), [])).toEqual({ ...declaration(ONE), stage: "building", reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null });
   });
 
-  test("a task's model: stored in the tasks event, folded; an old log without the field folds to null", () => {
+  test("a task's model: stored in the tasks event, folded; an old log without the field folds to big", () => {
     const old = `${JSON.stringify(declaration(ONE))}\n${JSON.stringify({ at: "t1", kind: "tasks", tasks: [spec("a")] })}\n`;
     const file = parseWaveFile(old, ONE);
     expect(file.events[0]).toEqual({ at: "t1", kind: "tasks", tasks: [spec("a")] });
-    expect(foldWave(file.declaration, file.events).tasks[0].model).toBeNull();
-    const withModel = parseWaveEvent({ at: "t2", kind: "tasks", tasks: [{ ...spec("b"), model: "p/m" }, { ...spec("c"), model: null }] });
-    expect(withModel).toEqual({ at: "t2", kind: "tasks", tasks: [{ ...spec("b"), model: "p/m" }, spec("c")] });
-    expect(foldWave(declaration(ONE), [withModel]).tasks.map((task) => task.model)).toEqual(["p/m", null]);
+    expect(foldWave(file.declaration, file.events).tasks[0].model).toBe("big");
+    const withModel = parseWaveEvent({ at: "t2", kind: "tasks", tasks: [{ ...spec("b"), model: "small" }, { ...spec("c"), model: null }] });
+    expect(withModel).toEqual({ at: "t2", kind: "tasks", tasks: [{ ...spec("b"), model: "small" }, spec("c")] });
+    expect(foldWave(declaration(ONE), [withModel]).tasks.map((task) => task.model)).toEqual(["small", "big"]);
     expect(() => parseWaveEvent({ at: "t3", kind: "tasks", tasks: [{ ...spec("d"), model: 4 }] })).toThrow("model must be a string or null");
+    expect(() => parseWaveEvent({ at: "t4", kind: "tasks", tasks: [{ ...spec("e"), model: "p/m" }] })).toThrow('model must be "small", "big" or null');
   });
 
   test("tasks and task: specs in order, ids once started; unknown keys and repeated keys change nothing", () => {
@@ -182,9 +183,9 @@ describe("foldWave", () => {
       { at: "t4", kind: "tasks", tasks: [spec("c", ["a", "b"]), { ...spec("a"), title: "dup" }] },
     ]);
     expect(fold.tasks).toEqual([
-      { ...spec("a"), model: null, taskId: "id-a", sessionId: "s-a" },
-      { ...spec("b", ["a"]), model: null, taskId: null, sessionId: null },
-      { ...spec("c", ["a", "b"]), model: null, taskId: null, sessionId: null },
+      { ...spec("a"), model: "big", taskId: "id-a", sessionId: "s-a" },
+      { ...spec("b", ["a"]), model: "big", taskId: null, sessionId: null },
+      { ...spec("c", ["a", "b"]), model: "big", taskId: null, sessionId: null },
     ]);
   });
 
@@ -362,12 +363,14 @@ describe("validateTaskSpecs", () => {
     ]);
   });
 
-  test("keeps a task's model, omits it when absent; refuses one that is no provider/model id", () => {
-    expect(validateTaskSpecs([{ key: "a", title: "A", request: "r", model: "p/m" }, { key: "b", title: "B", request: "r", model: null }])).toEqual([
-      { key: "a", title: "A", request: "r", after: [], model: "p/m" },
+  test("keeps a task's model, small or big, omits it when absent; refuses a concrete model id", () => {
+    expect(validateTaskSpecs([{ key: "a", title: "A", request: "r", model: "small" }, { key: "b", title: "B", request: "r", model: null }, { key: "c", title: "C", request: "r", model: "big" }])).toEqual([
+      { key: "a", title: "A", request: "r", after: [], model: "small" },
       { key: "b", title: "B", request: "r", after: [] },
+      { key: "c", title: "C", request: "r", after: [], model: "big" },
     ]);
-    invalid([{ key: "a", title: "A", request: "r", model: "sonnet" }], [], 'tasks[0].model must be "provider/model"');
+    invalid([{ key: "a", title: "A", request: "r", model: "p/m" }], [], 'tasks[0].model must be "small" or "big"');
+    invalid([{ key: "a", title: "A", request: "r", model: "sonnet" }], [], 'tasks[0].model must be "small" or "big"');
     invalid([{ key: "a", title: "A", request: "r", model: 3 }], [], "tasks[0].model");
   });
 

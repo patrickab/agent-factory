@@ -3,11 +3,25 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { factoryHome, loadSettings, parseStoredSettings, registeredRepos, resolveRepoSettings, resolveSettings, saveSettings, unregisterRepo, type StoredSettings } from "./settings.ts";
+import {
+  DEFAULTS_PATH,
+  defaultModels,
+  factoryHome,
+  loadDefaults,
+  loadSettings,
+  parseStoredSettings,
+  registeredRepos,
+  resolveRepoSettings,
+  resolveSettings,
+  saveSettings,
+  unregisterRepo,
+  type StoredSettings,
+} from "./settings.ts";
 
 const REPO = "/home/someone/git/project";
 const REPO_FILE = "%2Fhome%2Fsomeone%2Fgit%2Fproject.yaml";
-const DEFAULTS = { merge: "auto", maxRounds: 2, review: false, models: {} } as const;
+const { small: SMALL, big: BIG } = defaultModels();
+const DEFAULTS = { merge: "auto", maxRounds: 2, review: false, models: { small: SMALL, big: BIG, coder: BIG, reviewer: BIG } } as const;
 let agentDir: string;
 let previousAgentDir: string | undefined;
 
@@ -76,9 +90,21 @@ describe("loadSettings", () => {
     expect(await loadSettings(REPO)).toEqual({});
   });
 
-  test("drops unknown keys and unknown roles", async () => {
-    await writeSettingsFile("merge: review\nextra: 1\nmodels:\n  coder: a/b\n  planner: c/d\n");
-    expect(await loadSettings(REPO)).toEqual({ merge: "review", models: { coder: "a/b" } });
+  test("drops unknown keys and unknown model names", async () => {
+    await writeSettingsFile("merge: review\nextra: 1\nmodels:\n  small: a/s\n  big: a/b\n  planner: c/d\n");
+    expect(await loadSettings(REPO)).toEqual({ merge: "review", models: { small: "a/s", big: "a/b" } });
+  });
+
+  test("old names: coder is read as big, a reviewer equal to it is dropped, another one is kept as the reviewer's own", async () => {
+    await writeSettingsFile("models:\n  coder: a/b\n  reviewer: a/b\n");
+    expect(await loadSettings(REPO)).toEqual({ models: { big: "a/b" } });
+    await writeSettingsFile("models:\n  coder: a/b\n  reviewer: c/d\n");
+    expect(await loadSettings(REPO)).toEqual({ models: { big: "a/b", reviewer: "c/d" } });
+    // An old client edits only coder, sending back the big it read: coder wins.
+    await writeSettingsFile("models:\n  big: a/b\n  coder: e/f\n  reviewer: e/f\n");
+    expect(await loadSettings(REPO)).toEqual({ models: { big: "e/f" } });
+    await writeSettingsFile("models:\n  reviewer: c/d\n");
+    expect(await loadSettings(REPO)).toEqual({ models: { reviewer: "c/d" } });
   });
 
   const invalid: [string, string, string][] = [
@@ -93,6 +119,8 @@ describe("loadSettings", () => {
     ["review", "review: yes please\n", "review"],
     ["models not a mapping", "models: a/b\n", "models"],
     ["coder model without provider", "models:\n  coder: sonnet\n", "models.coder"],
+    ["small model without provider", "models:\n  small: sonnet\n", "models.small"],
+    ["big model not a string", "models:\n  big: 4\n", "models.big"],
     ["reviewer model not a string", "models:\n  reviewer: 4\n", "models.reviewer"],
     ["preview", "preview: 1\n", "preview"],
   ];
@@ -114,7 +142,7 @@ describe("loadSettings", () => {
 
 describe("saveSettings", () => {
   test("round trips, creating directories and leaving no temp file", async () => {
-    const settings: StoredSettings = { branch: "develop", merge: "review", maxRounds: 5, review: true, models: { coder: "anthropic/x", reviewer: "openai/y" } };
+    const settings: StoredSettings = { branch: "develop", merge: "review", maxRounds: 5, review: true, models: { small: "anthropic/s", big: "anthropic/x", reviewer: "openai/y" } };
     await saveSettings(REPO, settings);
     expect(await loadSettings(REPO)).toEqual(settings);
     expect(await readdir(dirname(settingsPath()))).toEqual([REPO_FILE]);
@@ -128,12 +156,12 @@ describe("saveSettings", () => {
 
   test("refuses invalid settings and writes nothing", async () => {
     await expect(saveSettings(REPO, { maxRounds: 30 })).rejects.toThrow(`${settingsPath()}: maxRounds`);
-    await expect(saveSettings(REPO, { models: { coder: "bare" } })).rejects.toThrow("models.coder");
+    await expect(saveSettings(REPO, { models: { big: "bare" } })).rejects.toThrow("models.big");
     expect(await loadSettings(REPO)).toEqual({});
   });
 
   test("two concurrent saves leave one valid file", async () => {
-    const first: StoredSettings = { merge: "review", maxRounds: 3, models: { coder: "a/one" } };
+    const first: StoredSettings = { merge: "review", maxRounds: 3, models: { big: "a/one" } };
     const second: StoredSettings = { merge: "auto", maxRounds: 7, review: true, models: { reviewer: "b/two" } };
     await Promise.all([saveSettings(REPO, first), saveSettings(REPO, second)]);
     expect([first, second]).toContainEqual(await loadSettings(REPO));
@@ -141,14 +169,38 @@ describe("saveSettings", () => {
   });
 });
 
+describe("the defaults", () => {
+  test("defaults.yaml at the package root names small and big; defaultModels reads it", async () => {
+    expect(DEFAULTS_PATH).toBe(join(import.meta.dirname, "..", "defaults.yaml"));
+    const raw = Bun.YAML.parse(await readFile(DEFAULTS_PATH, "utf8")) as { models: { small: string; big: string } };
+    expect(defaultModels()).toEqual({ small: raw.models.small, big: raw.models.big });
+    expect(loadDefaults()).toEqual(defaultModels());
+  });
+
+  test("a missing or broken file throws naming its path", async () => {
+    const path = join(agentDir, "defaults.yaml");
+    expect(() => loadDefaults(path)).toThrow(`the factory's defaults ${path}: `);
+    await writeFile(path, "models: [\n");
+    expect(() => loadDefaults(path)).toThrow(path);
+    await writeFile(path, "models:\n  big: a/b\n");
+    expect(() => loadDefaults(path)).toThrow(`${path}: models.small must be "provider/model"`);
+    await writeFile(path, "models:\n  small: a/s\n  big: opus\n");
+    expect(() => loadDefaults(path)).toThrow(`${path}: models.big must be "provider/model"`);
+    await writeFile(path, "- a/b\n");
+    expect(() => loadDefaults(path)).toThrow(path);
+    await writeFile(path, "models:\n  small: a/s\n  big: a/b\n");
+    expect(loadDefaults(path)).toEqual({ small: "a/s", big: "a/b" });
+  });
+});
+
 describe("resolveSettings", () => {
-  test("defaults when nothing is stored or overridden", () => {
+  test("defaults when nothing is stored or overridden: the models of defaults.yaml under all four names", () => {
     expect(resolveSettings({}, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
   });
 
-  test("defaults < stored < overrides, models merged per role", () => {
-    const stored: StoredSettings = { branch: "develop", merge: "review", maxRounds: 4, models: { coder: "s/coder", reviewer: "s/reviewer" } };
-    const overrides: StoredSettings = { maxRounds: 9, review: true, models: { reviewer: "o/reviewer", coder: undefined } };
+  test("defaults < stored < overrides, models merged per name", () => {
+    const stored: StoredSettings = { branch: "develop", merge: "review", maxRounds: 4, models: { small: "s/small", big: "s/big", reviewer: "s/reviewer" } };
+    const overrides: StoredSettings = { maxRounds: 9, review: true, models: { reviewer: "o/reviewer", big: undefined } };
     const storedCopy = structuredClone(stored);
     const overridesCopy = structuredClone(overrides);
     expect(resolveSettings(stored, overrides, "main")).toEqual({
@@ -156,11 +208,17 @@ describe("resolveSettings", () => {
       merge: "review",
       maxRounds: 9,
       review: true,
-      models: { coder: "s/coder", reviewer: "o/reviewer" },
+      models: { small: "s/small", big: "s/big", coder: "s/big", reviewer: "o/reviewer" },
     });
     expect(resolveSettings(stored, { branch: "release" }, "main").branch).toBe("release");
+    expect(resolveSettings({ models: { big: "s/big" } }, {}, "main").models).toEqual({ small: SMALL, big: "s/big", coder: "s/big", reviewer: "s/big" });
     expect(stored).toEqual(storedCopy);
     expect(overrides).toEqual(overridesCopy);
+  });
+
+  test("size small runs the coder on the small model; the reviewer stays big", () => {
+    expect(resolveSettings({ models: { small: "s/small", big: "s/big" } }, {}, "main", "small").models).toEqual({ small: "s/small", big: "s/big", coder: "s/small", reviewer: "s/big" });
+    expect(resolveSettings({}, {}, "main", "small").models).toEqual({ small: SMALL, big: BIG, coder: SMALL, reviewer: BIG });
   });
 
   test("preview is stored and passed through, false by default; resolveSettings leaves it out", async () => {
@@ -182,10 +240,10 @@ describe("resolveSettings", () => {
   });
 
   test("the result does not share the models object of an input", () => {
-    const stored: StoredSettings = { models: { coder: "s/coder" } };
+    const stored: StoredSettings = { models: { big: "s/big" } };
     const resolved = resolveSettings(stored, {}, "main");
     resolved.models.reviewer = "x/y";
-    expect(stored.models).toEqual({ coder: "s/coder" });
-    expect(resolveSettings({}, {}, "main").models).toEqual({});
+    expect(stored.models).toEqual({ big: "s/big" });
+    expect(resolveSettings({}, {}, "main").models).toEqual(DEFAULTS.models);
   });
 });

@@ -143,13 +143,13 @@ describe("defaultBranch", () => {
 
 describe("startCommand", () => {
   test("the payload parseStartPayload accepts", () => {
-    const settings = resolveSettings({ maxRounds: 3, models: { coder: "a/b" } }, { review: true }, "main");
+    const settings = resolveSettings({ maxRounds: 3, models: { small: "a/s", big: "a/b" } }, { review: true }, "main");
     const command = startCommand("Add x", "Please add x", settings);
     expect(command.startsWith("/factory start ")).toBe(true);
     expect(parseStartPayload(command.slice("/factory start ".length))).toEqual({
       request: "Please add x",
       title: "Add x",
-      settings: { branch: "main", merge: "auto", maxRounds: 3, review: true, models: { coder: "a/b" } },
+      settings: { branch: "main", merge: "auto", maxRounds: 3, review: true, models: { small: "a/s", big: "a/b", coder: "a/b", reviewer: "a/b" } },
     });
   });
 });

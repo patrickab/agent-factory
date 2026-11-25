@@ -26,7 +26,7 @@ import { git, primaryCheckout } from "./git.ts";
 import { inboxReadPath, lastFactoryState, taskMainBranch } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
-import type { Settings, StartPayload } from "./state.ts";
+import type { ModelSize, Settings, StartPayload } from "./state.ts";
 import { onPath, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { TASK_WAVE_ENV } from "./wave-poke.ts";
@@ -152,6 +152,8 @@ export interface LaunchInput {
   signal?: AbortSignal;
   /** The runner's environment. */
   env?: RunnerEnv;
+  /** Which of the resolved models the coder runs with; default `big`. */
+  size?: ModelSize;
   /** The wave the task belongs to: only `waves.start`/`waves.add` (the scheduler) give one, never `tasks.start`. */
   wave?: string;
   /** The Pi session that starts the task (`TaskRecord.origin`). */
@@ -173,7 +175,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
     (await defaultBranch(repo).catch(() => {
       throw new LaunchRefusedError(`${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
     }));
-  const settings = resolveSettings(stored, overrides, fallback);
+  const settings = resolveSettings(stored, overrides, fallback, input.size);
   if (!(await localBranchExists(repo, settings.branch))) throw new LaunchRefusedError(`${repo}: branch ${settings.branch} does not exist locally`);
   const config = await runCommand(["git", "cat-file", "-e", `refs/heads/${settings.branch}:factory.yaml`], { cwd: repo });
   if (config.exitCode !== 0) {

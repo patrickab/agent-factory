@@ -54,16 +54,19 @@ import {
   DEFAULT_SETTINGS,
   factoryHome,
   loadSettings,
+  modelChoice,
   parseStoredSettings,
   registeredRepos,
   resolveRepoSettings,
+  resolveModels,
   resolveSettings,
   saveSettings,
   unregisterRepo,
+  type ResolvedModels,
   type ResolvedSettings,
   type StoredSettings,
 } from "./settings.ts";
-import { COMMIT_ASK_TYPE, isFactoryPrompt, messageText, parseSettingsFields, RESTING_STATES, type Finding, type Settings, type State } from "./state.ts";
+import { COMMIT_ASK_TYPE, isFactoryPrompt, messageText, normalizeModels, parseSettingsFields, RESTING_STATES, type Finding, type Settings, type State } from "./state.ts";
 import { isTaskTag, listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import {
@@ -82,7 +85,6 @@ import {
   stuckKeys,
   unreachableKeys,
   unlockWave,
-  requireTaskModels,
   validateTaskSpecs,
   waveCounts,
   waveTaskState,
@@ -92,6 +94,7 @@ import {
   type WaveFold,
   type WaveOverrides,
   type WaveStage,
+  type WaveTaskEntry,
   type WaveView,
 } from "./waves.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
@@ -1100,11 +1103,17 @@ async function settingsOf(repo: string): Promise<{ stored: StoredSettings; resol
   const fallback = await defaultBranch(repo).catch(() => undefined);
   const branch = stored.branch ?? fallback;
   if (branch === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
-  return { stored, resolved: resolveRepoSettings(stored, {}, branch), defaults: { ...DEFAULT_SETTINGS, models: {}, branch: fallback ?? branch } };
+  return { stored, resolved: resolveRepoSettings(stored, {}, branch), defaults: { ...DEFAULT_SETTINGS, models: resolveModels([]), branch: fallback ?? branch } };
+}
+
+/** The models a wave's `specs` run with: `big` for coders and the reviewer, `small` only when a task asks for it. */
+function wantedModels(models: ResolvedModels, specs: readonly WaveTaskEntry[]): Record<string, string> {
+  const { coder, reviewer, small } = models;
+  return specs.some((spec) => spec.model === "small") ? { coder, reviewer, small } : { coder, reviewer };
 }
 
 /** `requireModels` as a `refused` error. */
-async function requireFactoryModels(models: Settings["models"]): Promise<void> {
+async function requireFactoryModels(models: Record<string, string | undefined>): Promise<void> {
   try {
     await requireModels(models);
   } catch (error) {
@@ -1325,9 +1334,12 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
   const fold = foldWave(declaration, events);
   if (fold.stage !== "building") return [];
   const { states } = await waveTaskViews(fold);
-  const { models, maxRounds, review } = declaration.overrides;
+  const { maxRounds, review } = declaration.overrides;
+  // The wave's models only (a declaration before `small` existed: over the defaults), the reviewer named, so the
+  // repository's stored settings never reach a task the wave starts.
+  const { small, big, reviewer } = resolveModels([declaration.overrides.models]);
   // A wave's task always merges into the wave branch by itself; `merge` of the overrides is the wave's.
-  const overrides: StoredSettings = { models, maxRounds, review, merge: "auto", branch: declaration.branch };
+  const overrides: StoredSettings = { models: { small, big, reviewer }, maxRounds, review, merge: "auto", branch: declaration.branch };
   const named = new Set(fold.tasks.map((task) => task.taskId));
   const orphans = (await listTasks()).filter((record) => record.wave === id && !named.has(record.id));
   const started: string[] = [];
@@ -1341,9 +1353,8 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
       [record] = orphans.splice(orphan, 1);
     } else {
       try {
-        // The task's own model is its coder's; the reviewer's stays the wave's.
-        const taskOverrides: StoredSettings = task.model === null ? overrides : { ...overrides, models: { ...models, coder: task.model } };
-        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides: taskOverrides, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal });
+        // The task's size picks its coder's model of the wave's; the reviewer's stays the wave's.
+        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, size: task.model, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal });
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
@@ -1516,13 +1527,17 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const plan = params.plan as string | undefined;
     let overrides: StoredSettings = {};
     try {
-      if (params.overrides !== undefined) overrides = parseSettingsFields(params.overrides as Params, "overrides.");
+      if (params.overrides !== undefined) {
+        const { models, ...fields } = parseSettingsFields(params.overrides as Params, "overrides.");
+        overrides = models === undefined ? fields : { ...fields, models: normalizeModels(models) };
+      }
     } catch (error) {
       throw new FactoryError("invalid", errorText(error));
     }
     const repo = await primaryOf(params.repo as string, cwd);
     const stored = await loadSettings(repo);
-    await requireFactoryModels(resolveSettings(stored, overrides, "").models);
+    const { coder, reviewer } = resolveSettings(stored, overrides, "").models;
+    await requireFactoryModels({ coder, reviewer });
     // The target as `launchTask` resolves it; a missing default branch is its refusal.
     const target = overrides.branch ?? stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target !== undefined) await requireNoOpenWaveBranch(repo, target);
@@ -1625,7 +1640,6 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     if (request === undefined) throw new FactoryError("invalid", "waves.start needs a request (the reviewer's instructions) that is not empty");
     if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "waves.start: plan must not be empty");
     const specs = validateTaskSpecs(params.tasks);
-    await requireTaskModels(specs);
     let target: string | undefined;
     let overrides: WaveOverrides;
     try {
@@ -1640,8 +1654,8 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     const stored = await loadSettings(repo);
     // Resolved once, here: the wave's tasks, review and merge read only the declaration.
     const { merge, maxRounds, review, models } = resolveSettings(stored, overrides, "");
-    overrides = { merge, maxRounds, review, models, remote: overrides.remote ?? stored.remote ?? DEFAULT_SETTINGS.remote };
-    await requireFactoryModels(models);
+    overrides = { merge, maxRounds, review, models: modelChoice(models), remote: overrides.remote ?? stored.remote ?? DEFAULT_SETTINGS.remote };
+    await requireFactoryModels(wantedModels(models, specs));
     target ??= stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
     if (!(await localBranchExists(repo, target))) throw new FactoryError("not_found", `${repo} has no local branch ${target}`);
@@ -1687,8 +1701,11 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     // Task states only move on: pending tasks that can never start now never will (a cancel is final).
     const current = foldWave(file.declaration, file.events);
     const { states } = await waveTaskViews(current);
-    // The models list is read before the log lock; the specs are checked again under it.
-    await requireTaskModels(validateTaskSpecs(params.tasks, current.tasks));
+    // The models list is read before the log lock; the specs are checked again under it. `waves.start` checked the big
+    // model; the small one only when an added task is the first to ask for it.
+    if (validateTaskSpecs(params.tasks, current.tasks).some((spec) => spec.model === "small")) {
+      await requireFactoryModels({ small: resolveModels([file.declaration.overrides.models]).small });
+    }
     // Checked and appended under the log lock: a runner's stage change after it loses, never the added tasks.
     await busyAsFactoryError(() =>
       appendWaveEvents(id, (fold) => {

@@ -8,21 +8,65 @@
  *   plus `preview`, a boolean the plugin stores for its clients and never acts on, and `remote`, whether a wave of the
  *   repository is shown on its forge (`remote.ts`; `waves.start` stores it resolved in the wave's declaration). The
  *   file is the repository's registration (`registeredRepos`, `unregisterRepo`)
- * - Provides `resolveSettings`: defaults < stored < overrides, models merged per role
+ * - Provides the default models, `defaults.yaml` at the package root (`loadDefaults`, `defaultModels`): a broken or
+ *   missing file throws naming its path
+ * - Provides `resolveSettings`: defaults < stored < overrides, models merged per name, answered with all four names
+ *   (`small`, `big`, and the roles' `coder`, `reviewer`)
  */
+import { readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { parseSettingsFields, ROLES, type Settings } from "./state.ts";
+import { MODEL_SIZES, normalizeModels, parseSettingsFields, type ModelChoice, type ModelSize, type Settings } from "./state.ts";
 import { errorText, isRecord } from "./util.ts";
 
-/** `Settings` as stored: every key optional, `branch` absent = the repository's default branch. */
-export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: Partial<Settings["models"]>; preview?: boolean; remote?: boolean };
+/**
+ * `Settings` as stored or passed: every key optional, `branch` absent = the repository's default branch; `models` in
+ * the new names only (`normalizeModels` reads the old ones).
+ */
+export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: ModelChoice; preview?: boolean; remote?: boolean };
+
+/** Every model name filled in: the project's `small` and `big`, the task's `coder` and `reviewer`. */
+export type ResolvedModels = Required<Settings["models"]>;
+
+/** The settings a task gets: every model named. */
+export type TaskSettings = Settings & { models: ResolvedModels };
 
 /** The settings a repository's task gets, with `preview` (absent = `false`), which only clients read, and `remote` (absent = `false`). */
-export type ResolvedSettings = Settings & { preview: boolean; remote: boolean };
+export type ResolvedSettings = TaskSettings & { preview: boolean; remote: boolean };
 
-export const DEFAULT_SETTINGS: Readonly<Omit<ResolvedSettings, "branch">> = { merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, remote: false };
+export const DEFAULT_SETTINGS: Readonly<Omit<ResolvedSettings, "branch" | "models">> = { merge: "auto", maxRounds: 2, review: false, preview: false, remote: false };
+
+/** `defaults.yaml` at the root of the package. */
+export const DEFAULTS_PATH = join(import.meta.dirname, "..", "defaults.yaml");
+
+/** The project models every repository's settings resolve over. */
+export type DefaultModels = { small: string; big: string };
+
+/** Reads `models: {small, big}` from `path`; a missing or broken file throws an `Error` naming it. No cache. */
+export function loadDefaults(path = DEFAULTS_PATH): DefaultModels {
+  try {
+    const raw: unknown = Bun.YAML.parse(readFileSync(path, "utf8"));
+    if (!isRecord(raw) || !isRecord(raw.models)) throw new Error("models must be a mapping of small and big");
+    const models: Partial<DefaultModels> = {};
+    for (const size of MODEL_SIZES) {
+      const model = raw.models[size];
+      if (typeof model !== "string" || !/^[^/\s]+\/\S+$/.test(model)) throw new Error(`models.${size} must be "provider/model"`);
+      models[size] = model;
+    }
+    return models as DefaultModels;
+  } catch (error) {
+    throw new Error(`the factory's defaults ${path}: ${errorText(error)}`);
+  }
+}
+
+let cachedDefaults: DefaultModels | undefined;
+
+/** `loadDefaults()`, read once per process. */
+export function defaultModels(): DefaultModels {
+  cachedDefaults ??= loadDefaults();
+  return cachedDefaults;
+}
 
 /** Pi's agent dir: `PI_CODING_AGENT_DIR` (a leading `~` expanded), else `~/.pi/agent`. Read on every call. */
 export function agentDir(): string {
@@ -49,7 +93,8 @@ function settingsPath(repo: string): string {
 export function parseStoredSettings(raw: unknown): StoredSettings {
   if (raw === null || raw === undefined) return {};
   if (!isRecord(raw)) throw new Error("settings must be a mapping");
-  const settings: StoredSettings = parseSettingsFields(raw);
+  const { models, ...fields } = parseSettingsFields(raw);
+  const settings: StoredSettings = models === undefined ? fields : { ...fields, models: normalizeModels(models) };
   for (const key of ["preview", "remote"] as const) {
     if (raw[key] === undefined) continue;
     if (typeof raw[key] !== "boolean") throw new Error(`${key} must be a boolean`);
@@ -130,23 +175,35 @@ export function resolveRepoSettings(stored: StoredSettings, overrides: StoredSet
   };
 }
 
-/** Defaults < stored < overrides, models merged per role. `branch` is used when neither sets one. Mutates nothing. */
-export function resolveSettings(stored: StoredSettings, overrides: StoredSettings, branch: string): Settings {
+/**
+ * Defaults < stored < overrides; models merged per name over `defaults.yaml`. `branch` is used when neither sets one.
+ * `size` picks the coder's model (default `big`); the reviewer's is the explicit one, else `big`. Mutates nothing.
+ */
+export function resolveSettings(stored: StoredSettings, overrides: StoredSettings, branch: string, size: ModelSize = "big"): TaskSettings {
   return {
     branch: overrides.branch ?? stored.branch ?? branch,
     merge: overrides.merge ?? stored.merge ?? DEFAULT_SETTINGS.merge,
     maxRounds: overrides.maxRounds ?? stored.maxRounds ?? DEFAULT_SETTINGS.maxRounds,
     review: overrides.review ?? stored.review ?? DEFAULT_SETTINGS.review,
-    models: { ...DEFAULT_SETTINGS.models, ...definedModels(stored.models), ...definedModels(overrides.models) },
+    models: resolveModels([stored.models, overrides.models], size),
   };
 }
 
-/** Drops roles set to `undefined`, so they do not erase a lower layer's model. */
-function definedModels(models: StoredSettings["models"]): Settings["models"] {
-  const result: Settings["models"] = {};
-  for (const role of ROLES) {
-    const model = models?.[role];
-    if (model !== undefined) result[role] = model;
+/** `layers` over `defaults.yaml`, lowest first, as all four names; `coder` = the model of `size`. */
+export function resolveModels(layers: readonly (ModelChoice | undefined)[], size: ModelSize = "big"): ResolvedModels {
+  const merged: ModelChoice = { ...defaultModels() };
+  for (const layer of layers) {
+    for (const name of ["small", "big", "reviewer"] as const) {
+      const model = layer?.[name];
+      if (model !== undefined) merged[name] = model;
+    }
   }
-  return result;
+  const small = merged.small as string;
+  const big = merged.big as string;
+  return { small, big, coder: size === "small" ? small : big, reviewer: merged.reviewer ?? big };
+}
+
+/** The stored form of resolved models: the sizes, and the reviewer only when it is not `big`. */
+export function modelChoice(models: ResolvedModels): ModelChoice {
+  return normalizeModels({ small: models.small, big: models.big, reviewer: models.reviewer });
 }
