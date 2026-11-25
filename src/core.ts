@@ -62,7 +62,7 @@ import {
   type ResolvedSettings,
   type StoredSettings,
 } from "./settings.ts";
-import { isFactoryPrompt, messageText, parseSettingsFields, RESTING_STATES, type Settings, type State } from "./state.ts";
+import { COMMIT_ASK_TYPE, isFactoryPrompt, messageText, parseSettingsFields, RESTING_STATES, type Finding, type Settings, type State } from "./state.ts";
 import { isTaskTag, listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import {
@@ -139,6 +139,17 @@ export interface TaskView {
   settings: Settings | null;
   /** Coder messages and reviews together; `input` is uncached input tokens. Null before either. */
   usage: { input: number; output: number; cost: number } | null;
+  /** The coder's last message (its text), null before one. The answer to the commit message ask does not count. Added in factory/w2. */
+  lastMessage: string | null;
+  /**
+   * Why the task is blocked, from the round it stopped in: the failed gate (`<argv> (exit N)` and its output tail) or
+   * the failed merge's error; null unless the state is `blocked` and one of them says why. Added in factory/w2.
+   */
+  failure: string | null;
+  /** The task's last review (`factory-review`), null before one. Added in factory/w2. */
+  review: { round: number; status: string; approved: boolean; findings: Finding[] } | null;
+  /** The commit the last successful merge landed, null before one. Added in factory/w2. */
+  merged: string | null;
   /** The task actions the core would accept now (`remove` maybe only with `force`). */
   actions: TaskActionName[];
 }
@@ -506,6 +517,57 @@ async function taskWaveStage(record: TaskRecord, known?: WaveStage): Promise<Wav
   }
 }
 
+/** A failed gate as `<argv> (exit N)` and its output tail; null for a passed one. */
+function failedGateText(gate: Record<string, unknown>): string | null {
+  if (!Array.isArray(gate.argv) || (gate.exitCode === 0 && gate.killed !== true)) return null;
+  const exit = gate.killed === true ? "killed" : `exit ${String(gate.exitCode)}`;
+  const tail = typeof gate.outputTail === "string" ? gate.outputTail.trimEnd() : "";
+  return `${gate.argv.join(" ")} (${exit})${tail === "" ? "" : `\n${tail}`}`;
+}
+
+function reviewOf(data: Record<string, unknown>): TaskView["review"] {
+  if (typeof data.round !== "number") return null;
+  return {
+    round: data.round,
+    status: typeof data.status === "string" ? data.status : "unknown",
+    approved: data.approved === true,
+    findings: Array.isArray(data.findings) ? (data.findings as Finding[]) : [],
+  };
+}
+
+/**
+ * What a task's session says about how its work went (the fields factory/w2 added to `TaskView`): the coder's last
+ * message (not its answer to the commit message ask), the failure of the round it stopped in when `blocked`, its last
+ * review, the commit its last merge landed.
+ */
+function taskOutcome(entries: Record<string, unknown>[], blocked: boolean): Pick<TaskView, "lastMessage" | "failure" | "review" | "merged"> {
+  let lastMessage: string | null = null;
+  let answeringCommitAsk = false;
+  let failedGate: string | null = null;
+  let mergeError: string | null = null;
+  let review: TaskView["review"] = null;
+  let merged: string | null = null;
+  for (const entry of entries) {
+    if (customData(entry, "factory-round")) {
+      // A new round: what failed before it was fed back to the coder.
+      [failedGate, mergeError, answeringCommitAsk] = [null, null, false];
+    }
+    if (entry.type === "custom_message" && entry.customType === COMMIT_ASK_TYPE) answeringCommitAsk = true;
+    const gate = customData(entry, "factory-gate");
+    if (gate) failedGate = failedGateText(gate) ?? failedGate;
+    const merge = customData(entry, "factory-merge");
+    if (merge?.ok === true && typeof merge.commit === "string") merged = merge.commit;
+    if (merge) mergeError = merge.ok !== true && typeof merge.error === "string" ? merge.error : null;
+    const reviewed = customData(entry, "factory-review");
+    if (reviewed) review = reviewOf(reviewed) ?? review;
+    if (entry.type !== "message" || !isRecord(entry.message)) continue;
+    const text = messageText(entry.message).trim();
+    if (entry.message.role === "user" && !isFactoryPrompt(text)) answeringCommitAsk = false;
+    if (entry.message.role === "assistant" && text !== "" && !answeringCommitAsk) lastMessage = text;
+  }
+  return { lastMessage, failure: blocked ? (failedGate ?? mergeError) : null, review, merged };
+}
+
 async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise<TaskView> {
   const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
   const entries = sessionPath === null ? [] : parseEntries(await readFile(sessionPath, "utf8"));
@@ -561,6 +623,7 @@ async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise
     interrupted: last !== null && !RESTING_STATES.includes(last.state) && !running,
     settings,
     usage,
+    ...taskOutcome(entries, last?.state === "blocked"),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
   const continuable = waveStage === null || waveStage === "building";
@@ -1205,7 +1268,7 @@ async function waveView(file: WaveFile): Promise<WaveView> {
 
 async function waveLook(file: WaveFile): Promise<WaveLook> {
   const full = foldWave(file.declaration, file.events);
-  const { overrides: _overrides, detail: _detail, ...fold } = full;
+  const { overrides: _overrides, ...fold } = full;
   const { states, views } = await waveTaskViews(full);
   const running = (await liveWaveRunners(fold.id)).length > 0;
   const stuck = fold.stage === "building" && stuckKeys(full, states).length > 0;

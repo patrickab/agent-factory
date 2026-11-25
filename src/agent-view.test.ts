@@ -29,6 +29,10 @@ function task(over: Partial<TaskView> = {}): TaskView {
     interrupted: false,
     settings: { branch: "master", merge: "auto", maxRounds: 3, review: true, models: { coder: "anthropic/opus", reviewer: "openai/gpt" } },
     usage: { input: 1200, output: 300, cost: 2.1 },
+    lastMessage: null,
+    failure: null,
+    review: null,
+    merged: null,
     actions: ["tasks.cancel", "tasks.message"],
     ...over,
   };
@@ -61,6 +65,7 @@ function wave(over: Partial<WaveView> = {}): WaveView {
     createdAt: "2025-01-02T10:00:00.000Z",
     stage: "building",
     reason: null,
+    detail: null,
     running: true,
     interrupted: false,
     tasks: [waveTask("record", "done"), waveTask("actions", "running", ["record"]), waveTask("docs", "pending", ["actions"])],
@@ -289,6 +294,52 @@ describe("taskBlock per state", () => {
       ["task 4ae7325b  done  round 1  factory/w1  wave 3f2a91c0  $2.10", "  feat(waves): declare a wave", "  done: merged", "  next: tasks.remove"],
     ],
     [
+      "done, with the merged commit and the coder's last message",
+      { state: "done", reason: "merged", running: false, merged: "40ca0ce1234", lastMessage: "Added b.txt.\nTypes and tests pass.", actions: ["tasks.remove"] },
+      [
+        "task 4ae7325b  done  round 1  factory/w1  $2.10",
+        "  feat(waves): declare a wave",
+        "  done: merged · merged 40ca0ce1",
+        "  last message: Added b.txt.",
+        "    Types and tests pass.",
+        "  next: tasks.remove",
+      ],
+    ],
+    [
+      "blocked by a gate: the gate and its output's last lines",
+      {
+        state: "blocked",
+        reason: "max_rounds: gates",
+        running: false,
+        failure: `bun run types (exit 2)\n${Array.from({ length: 25 }, (_v, i) => `out ${i}`).join("\n")}`,
+        actions: ["tasks.retry"],
+      },
+      [
+        "task 4ae7325b  blocked: max_rounds: gates  round 1  factory/w1  $2.10",
+        "  feat(waves): declare a wave",
+        "  failure: bun run types (exit 2)",
+        ...Array.from({ length: 20 }, (_v, i) => `    out ${i + 5}`),
+        "  next: tasks.retry",
+      ],
+    ],
+    [
+      "blocked by its review: the findings",
+      {
+        state: "blocked",
+        reason: "max_rounds: review_rejected",
+        running: false,
+        review: { round: 1, status: "ok", approved: false, findings: [{ severity: "major", file: "src/a.ts", line: 3, text: "a bug" }] },
+        actions: ["tasks.retry"],
+      },
+      [
+        "task 4ae7325b  blocked: max_rounds: review_rejected  round 1  factory/w1  $2.10",
+        "  feat(waves): declare a wave",
+        "  review 1: rejected · 1 major",
+        "    major  src/a.ts:3  a bug",
+        "  next: tasks.retry",
+      ],
+    ],
+    [
       "interrupted",
       { state: "running", running: false, interrupted: true, actions: ["tasks.retry", "tasks.cancel", "tasks.remove", "tasks.message"] },
       [
@@ -396,6 +447,11 @@ describe("waveBlock per stage", () => {
       "blocked: review failed",
       { stage: "blocked", reason: "review_failed", running: false, tasks: [waveTask("record", "done")], reviews: [review("failed")], actions: ["waves.retry"] },
       ["wave 3f2a91c0  blocked: review_failed  1/3 done  factory/w1  $18.40", head, "  tasks: record done", "  review 2: failed (malformed)", "  next: waves.retry"],
+    ],
+    [
+      "blocked: why, from the stage event's detail",
+      { stage: "blocked", reason: "conflict", detail: "rebase onto master conflicts in src/a.ts", running: false, tasks: [waveTask("record", "done")], actions: ["waves.retry"] },
+      ["wave 3f2a91c0  blocked: conflict  1/3 done  factory/w1  $18.40", head, "  tasks: record done", "  why: rebase onto master conflicts in src/a.ts", "  next: waves.retry"],
     ],
     [
       "merged",

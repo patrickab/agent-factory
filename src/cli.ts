@@ -1,18 +1,27 @@
 #!/usr/bin/env bun
 /**
- * `factory`: every core action (`core.ts`) on the command line. It only parses arguments and calls `callAction`.
+ * `factory`: every core action (`core.ts`) on the command line. It only parses arguments, calls `callAction` and
+ * prints one of the two views of the answer (`VIEWS.md`).
  *
- * - `factory <action> [<json params> | -]`: `-` reads the params from stdin, none means `{}`; the result goes to stdout
- *   as JSON, exit 0. `cwd` is the caller's directory. `hostOnly` actions are available: the CLI is the host
- * - A `FactoryError` goes to stderr as `factory: <code>: <message>`, exit 1 (`invalid`: exit 2)
- * - `factory actions`: the `ACTIONS` map as JSON. `factory --core-path`: the absolute path of `core.ts`.
+ * - `factory <action> [<json params> | -] [--json]`: `-` reads the params from stdin, none means `{}`. stdout gets the
+ *   agent view (`agent-view.ts`, text lines), or with `--json` (anywhere after the action) the full view: `callAction`'s
+ *   result as JSON. The timelines (`tasks.timeline`, `waves.timeline`) always print JSON: programs replay them. Exit 0.
+ *   `cwd` is the caller's directory. `hostOnly` actions are available: the CLI is the host
+ * - A `FactoryError` goes to stderr as `factory: <code>: <message>`, exit 1 (`invalid`: exit 2); without `--json` the
+ *   agent view's way out follows the message (` · next: ...`)
+ * - `factory actions [<name>]`: one line per action, or one action's params in full; with `--json` the `ACTIONS` map
+ *   (or the one action's spec) as JSON. `factory --core-path`: the absolute path of `core.ts`.
  *   `factory --help`: one line per action with its summary
  */
 import { join } from "node:path";
+import { agentActions, agentError, agentView, hasAgentView } from "./agent-view.ts";
 import { ACTIONS, callAction, FactoryError } from "./core.ts";
 import { errorText } from "./util.ts";
 
-const USAGE = "usage: factory <action> [<json params> | -] | factory actions | factory --core-path | factory --help";
+const USAGE = "usage: factory <action> [<json params> | -] [--json] | factory actions [<name>] [--json] | factory --core-path | factory --help";
+const JSON_FLAG = "--json";
+/** Actions whose answer is a log for programs: JSON, with or without `--json`. */
+const ALWAYS_JSON: readonly string[] = ["tasks.timeline", "waves.timeline"];
 
 function helpText(): string {
   const lines = Object.entries(ACTIONS).map(([name, spec]) => `${name}  ${spec.summary}`);
@@ -29,10 +38,23 @@ async function readParams(arg: string | undefined): Promise<unknown> {
   }
 }
 
-function fail(error: unknown): number {
+function fail(error: unknown, json: boolean): number {
   const factoryError = error instanceof FactoryError ? error : new FactoryError("failed", errorText(error));
-  process.stderr.write(`factory: ${factoryError.code}: ${factoryError.message}\n`);
+  const text = json ? `${factoryError.code}: ${factoryError.message}` : agentError({ code: factoryError.code, message: factoryError.message, detail: factoryError.detail });
+  process.stderr.write(`factory: ${text}\n`);
   return factoryError.code === "invalid" ? 2 : 1;
+}
+
+function printJson(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** `factory actions [<name>] [--json]`. */
+function actions(name: string | undefined, json: boolean): number {
+  if (name !== undefined && !Object.hasOwn(ACTIONS, name)) return fail(new FactoryError("not_found", `no action ${name}`), json);
+  if (json) printJson(name === undefined ? ACTIONS : ACTIONS[name as keyof typeof ACTIONS]);
+  else process.stdout.write(`${agentActions(ACTIONS, name)}\n`);
+  return 0;
 }
 
 async function main(args: string[]): Promise<number> {
@@ -45,23 +67,24 @@ async function main(args: string[]): Promise<number> {
     process.stdout.write(`${join(import.meta.dirname, "core.ts")}\n`);
     return 0;
   }
-  if (first === "actions") {
-    process.stdout.write(`${JSON.stringify(ACTIONS, null, 2)}\n`);
-    return 0;
-  }
-  if (first === undefined || rest.length > 1) {
+  const json = rest.includes(JSON_FLAG);
+  const positional = rest.filter((arg) => arg !== JSON_FLAG);
+  if (first === undefined || positional.length > 1) {
     process.stderr.write(`${USAGE}\n`);
     return 2;
   }
+  if (first === "actions") return actions(positional[0], json);
   // tasks.wait can block for an hour; Ctrl-C ends it through the abort signal the core honours.
   const abort = new AbortController();
   process.once("SIGINT", () => abort.abort());
   try {
-    const result = await callAction(first, await readParams(rest[0]), { cwd: process.cwd(), signal: abort.signal });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    const params = await readParams(positional[0]);
+    const result = await callAction(first, params, { cwd: process.cwd(), signal: abort.signal });
+    if (json || ALWAYS_JSON.includes(first) || !hasAgentView(first)) printJson(result);
+    else process.stdout.write(`${agentView(first, params, result)}\n`);
     return 0;
   } catch (error) {
-    return fail(error);
+    return fail(error, json);
   }
 }
 

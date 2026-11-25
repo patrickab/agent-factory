@@ -1,12 +1,13 @@
 /**
- * The `factory` tool: its schema comes from `ACTIONS`, a call goes through `callAction`, a failure is an `isError`
- * result. The actions themselves are tested in `core.test.ts`.
+ * The `factory` tool: its schema comes from `ACTIONS`, a call goes through `callAction` and answers the agent view, a
+ * failure is an `isError` result. The actions themselves are tested in `core.test.ts`, the views in `agent-view.test.ts`.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { agentError, agentView } from "../agent-view.ts";
 import { ACTIONS } from "../core.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { agentActions, factoryToolParameters } from "../factory-tool.ts";
@@ -43,10 +44,10 @@ function registered() {
 }
 
 describe("factoryToolParameters", () => {
-  test("action is the enum of the ACTIONS that are not hostOnly, every param of those is a property", () => {
+  test("action is the enum of the ACTIONS that are not hostOnly nor a timeline, every param of those is a property", () => {
     const parameters = factoryToolParameters();
     expect(parameters.required).toEqual(["action"]);
-    const offered = Object.keys(ACTIONS).filter((name) => name !== "tasks.import");
+    const offered = Object.keys(ACTIONS).filter((name) => !["tasks.import", "tasks.timeline", "waves.timeline"].includes(name));
     expect(parameters.properties.action.enum).toEqual(offered);
     expect(String(parameters.properties.action.description)).not.toContain("tasks.import");
     expect(parameters.properties.record).toBeUndefined();
@@ -55,6 +56,17 @@ describe("factoryToolParameters", () => {
     }
     expect(parameters.properties.force.type).toBe("boolean");
     expect(parameters.properties.overrides.properties).toBeDefined();
+  });
+
+  test("the timelines are not offered: not in the enum, nor their since param, nor the description", () => {
+    for (const taskSession of [false, true]) {
+      const { properties } = factoryToolParameters(taskSession);
+      expect(properties.action.enum).not.toContain("tasks.timeline");
+      expect(properties.action.enum).not.toContain("waves.timeline");
+      expect(String(properties.action.description)).not.toContain("timeline");
+      expect(properties.since).toBeUndefined();
+    }
+    expect(registered().description).not.toContain("timeline");
   });
 
   test("the tool describes tags and tasks.wait", () => {
@@ -69,7 +81,7 @@ describe("factoryToolParameters", () => {
 
   test("a param several actions share names them; one with different meanings names each", () => {
     const { properties } = factoryToolParameters();
-    expect(String(properties.since.description)).toBe("tasks.timeline, waves.timeline: The cursor an earlier answer returned as next");
+    expect(String(properties.force.description)).toBe("tasks.remove, waves.remove: Also drop commits its target branch lacks and uncommitted changes");
     // Task ids and wave ids mean different things: each action is named.
     expect(String(properties.id.description)).toContain("tasks.get: The task id");
     expect(String(properties.id.description)).toContain("waves.get: The wave id");
@@ -86,17 +98,27 @@ describe("registerFactoryTool", () => {
     expect(tool.executionMode).toBe("sequential");
   });
 
-  test("a result is JSON text and details", async () => {
+  test("a result is the agent view as text, the full view as details", async () => {
     const result = await registered().execute("call-1", { action: "repos.list" }, undefined, undefined, ctx());
-    expect(result).toEqual({ content: [{ type: "text", text: JSON.stringify({ repos: [] }, null, 2) }], details: { repos: [] } });
+    expect(result).toEqual({ content: [{ type: "text", text: agentView("repos.list", {}, { repos: [] }) }], details: { repos: [] } });
+    expect(result.content[0].text).toBe("no repositories registered (repos.add)");
   });
 
-  test("a caller error is an isError result of one sentence, not a throw", async () => {
+  test("a caller error is an isError result, the agent view's one line, not a throw", async () => {
     const tool = registered();
     const result = await tool.execute("call-2", { action: "tasks.get", id: "nothing" }, undefined, undefined, ctx());
-    expect(result).toEqual({ content: [{ type: "text", text: 'factory: no task has an id starting with "nothing"' }], details: undefined, isError: true });
+    const text = agentError({ code: "not_found", message: 'no task has an id starting with "nothing"' });
+    expect(text).toBe('not_found: no task has an id starting with "nothing" · next: tasks.list');
+    expect(result).toEqual({ content: [{ type: "text", text }], details: undefined, isError: true });
     const unknown = await tool.execute("call-3", { action: "status" }, undefined, undefined, ctx());
-    expect(unknown.content[0].text).toBe('factory: unknown action "status"');
+    expect(unknown.content[0].text).toBe(agentError({ code: "invalid", message: 'unknown action "status"' }));
+  });
+
+  test("a timeline is unknown to the agent", async () => {
+    for (const action of ["tasks.timeline", "waves.timeline"]) {
+      const result = await registered().execute("call-10", { action, id: "x" }, undefined, undefined, ctx());
+      expect(result).toEqual({ content: [{ type: "text", text: agentError({ code: "invalid", message: `unknown action "${action}"` }) }], details: undefined, isError: true });
+    }
   });
 
   test("models.get and models.set reach the core through the tool; models is an array of strings", async () => {
@@ -106,20 +128,21 @@ describe("registerFactoryTool", () => {
     expect(set.details).toEqual({ models: ["a/b"] });
     const get = await tool.execute("call-6", { action: "models.get" }, undefined, undefined, ctx());
     expect(get.details).toEqual({ models: ["a/b"] });
+    expect(get.content[0].text).toBe("a/b");
     const bad = await tool.execute("call-7", { action: "models.set", models: ["bare"] }, undefined, undefined, ctx());
-    expect(bad).toEqual({ content: [{ type: "text", text: 'factory: models.set: "bare" is not a provider/model id' }], details: undefined, isError: true });
+    expect(bad).toEqual({ content: [{ type: "text", text: agentError({ code: "invalid", message: 'models.set: "bare" is not a provider/model id' }) }], details: undefined, isError: true });
   });
 
   test("a hostOnly action is unknown to the agent", async () => {
     const record = { id: "11111111-2222-3333-4444-555555555555", repo: "/r", worktree: "/w", branch: "b", title: "t", sessionId: "s", sessionDir: "/d", createdAt: "x" };
     const result = await registered().execute("call-4", { action: "tasks.import", record }, undefined, undefined, ctx());
-    expect(result).toEqual({ content: [{ type: "text", text: 'factory: unknown action "tasks.import"' }], details: undefined, isError: true });
+    expect(result).toEqual({ content: [{ type: "text", text: agentError({ code: "invalid", message: 'unknown action "tasks.import"' }) }], details: undefined, isError: true });
   });
 });
 
 describe("the factory tool in a task session", () => {
   const taskBranch = [{ type: "custom", customType: "factory-task", data: {} }];
-  const readOnly = (Object.keys(ACTIONS) as (keyof typeof ACTIONS)[]).filter((name) => !ACTIONS[name].mutates && !ACTIONS[name].hostOnly);
+  const readOnly = (Object.keys(ACTIONS) as (keyof typeof ACTIONS)[]).filter((name) => !ACTIONS[name].mutates && !ACTIONS[name].hostOnly && !name.endsWith(".timeline"));
 
   test("a session holding a factory-task entry, or Pi started by the runner, is a task session", () => {
     expect(isTaskSession([])).toBe(false);
@@ -153,7 +176,7 @@ describe("the factory tool in a task session", () => {
     const tool = registered();
     for (const action of ["tasks.start", "models.set", "tasks.message"]) {
       const result = await tool.execute("call-8", { action, repo: scratch, title: "t", request: "r", models: ["a/b"] }, undefined, undefined, ctx(taskBranch));
-      expect(result).toEqual({ content: [{ type: "text", text: `factory: unknown action "${action}"` }], details: undefined, isError: true });
+      expect(result).toEqual({ content: [{ type: "text", text: agentError({ code: "invalid", message: `unknown action "${action}"` }) }], details: undefined, isError: true });
     }
     const list = await tool.execute("call-9", { action: "repos.list" }, undefined, undefined, ctx(taskBranch));
     expect(list.isError).toBeUndefined();

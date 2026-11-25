@@ -121,7 +121,7 @@ export type FoldedTask = {
   dropped?: boolean;
 };
 
-/** Everything of a `WaveView` that needs no task state, and the last stage event's `detail` (not part of the view). */
+/** Everything of a `WaveView` that needs no task state, and the last stage event's `detail`. */
 export interface WaveFold extends WaveDeclaration {
   stage: WaveStage;
   /** Only when `stage` is `blocked`. */
@@ -139,6 +139,8 @@ export interface WaveFold extends WaveDeclaration {
 export interface WaveView extends Omit<WaveDeclaration, "overrides"> {
   stage: WaveStage;
   reason: WaveReason | null;
+  /** Why the wave is at its stage, when its last `stage` event says (`WaveFold.detail`); null otherwise. Added in factory/w2. */
+  detail: string | null;
   running: boolean;
   interrupted: boolean;
   tasks: { key: string; title: string; after: string[]; model: string | null; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null }[];

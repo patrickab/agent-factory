@@ -11,6 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { agentError, agentView } from "./agent-view.ts";
 import { ACTIONS } from "./core.ts";
 import { agentActions, FACTORY_TOOL_DESCRIPTION, factoryToolParameters } from "./factory-tool.ts";
 import { factoryMcpServer } from "./mcp.ts";
@@ -54,6 +55,10 @@ describe("factory-mcp", () => {
     const hostOnly = Object.entries(ACTIONS).filter(([, spec]) => spec.hostOnly).map(([name]) => name);
     expect(hostOnly.length).toBeGreaterThan(0);
     for (const name of hostOnly) expect(offered).not.toContain(name);
+    // The timelines dump a log: programs replay it through the core or the CLI, an agent never calls them.
+    expect(offered).not.toContain("tasks.timeline");
+    expect(offered).not.toContain("waves.timeline");
+    expect((tools[0].inputSchema.properties as Record<string, unknown>).since).toBeUndefined();
     await client.close();
   });
 
@@ -68,15 +73,25 @@ describe("factory-mcp", () => {
     const client = await connected();
     const result = await client.callTool({ name: "nope", arguments: { action: "models.get" } });
     expect(result.isError).toBe(true);
-    expect(text(result)).toBe('factory: unknown tool "nope"');
+    expect(text(result)).toBe(agentError({ code: "invalid", message: 'unknown tool "nope"' }));
     await client.close();
   });
 
-  test("a read action answers its result as JSON text", async () => {
+  test("a read action answers the agent view", async () => {
     const client = await connected();
     const result = await client.callTool({ name: "factory", arguments: { action: "models.get" } });
     expect(result.isError).toBeFalsy();
-    expect(JSON.parse(text(result))).toEqual({ models: ["a/b"] });
+    expect(text(result)).toBe("a/b");
+    await client.close();
+  });
+
+  test("a timeline is refused as unknown", async () => {
+    const client = await connected();
+    for (const action of ["tasks.timeline", "waves.timeline"]) {
+      const result = await client.callTool({ name: "factory", arguments: { action, id: "x" } });
+      expect(result.isError).toBe(true);
+      expect(text(result)).toBe(agentError({ code: "invalid", message: `unknown action "${action}"` }));
+    }
     await client.close();
   });
 
@@ -84,7 +99,7 @@ describe("factory-mcp", () => {
     const client = await connected();
     const result = await client.callTool({ name: "factory", arguments: { action: "repos.remove", repo: scratch } });
     expect(result.isError).toBe(true);
-    expect(text(result)).toBe(`factory: ${scratch} is not inside a git repository`);
+    expect(text(result)).toBe(agentError({ code: "not_found", message: `${scratch} is not inside a git repository` }));
     await client.close();
   });
 
@@ -92,14 +107,14 @@ describe("factory-mcp", () => {
     const hostOnly = await connected();
     const imported = await hostOnly.callTool({ name: "factory", arguments: { action: "tasks.import" } });
     expect(imported).toMatchObject({ isError: true });
-    expect(text(imported)).toBe('factory: unknown action "tasks.import"');
+    expect(text(imported)).toBe(agentError({ code: "invalid", message: 'unknown action "tasks.import"' }));
     await hostOnly.close();
 
     const taskSession = await connected(true);
     const { tools } = await taskSession.listTools();
     expect((tools[0].inputSchema.properties as { action: { enum: string[] } }).action.enum).toEqual(agentActions(true));
     const set = await taskSession.callTool({ name: "factory", arguments: { action: "models.set", models: [] } });
-    expect(text(set)).toBe('factory: unknown action "models.set"');
+    expect(text(set)).toBe(agentError({ code: "invalid", message: 'unknown action "models.set"' }));
     await taskSession.close();
   });
 
@@ -119,7 +134,7 @@ describe("factory-mcp", () => {
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["factory"]);
     // No repo given: the server's directory is the repo.
     const added = await client.callTool({ name: "factory", arguments: { action: "repos.add" } });
-    expect(JSON.parse(text(added))).toEqual({ repo, repos: [repo] });
+    expect(text(added)).toBe(agentView("repos.add", {}, { repo, repos: [repo] }));
     await client.close();
   });
 });

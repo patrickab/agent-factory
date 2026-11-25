@@ -6,7 +6,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ACTIONS } from "./core.ts";
+import { agentActions, agentError, agentView } from "./agent-view.ts";
+import { ACTIONS, callAction } from "./core.ts";
 
 const CLI = join(import.meta.dirname, "cli.ts");
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-cli-test-")));
@@ -42,19 +43,36 @@ function factory(args: string[], options: { agent: string; cwd?: string; stdin?:
 }
 
 describe("factory <action>", () => {
-  test("params given as an argument run the action and print its result as JSON; no params mean {}", () => {
+  test("params given as an argument run the action; it prints the agent view; no params mean {}", () => {
     const agent = agentDir();
     const set = factory(["models.set", '{"models":["a/b","c/d"]}'], { agent });
+    expect(set).toEqual({ code: 0, stdout: "2 models set\n", stderr: "" });
+    const get = factory(["models.get"], { agent });
+    expect(get).toEqual({ code: 0, stdout: `${agentView("models.get", {}, { models: ["a/b", "c/d"] })}\n`, stderr: "" });
+    expect(get.stdout).toBe("a/b\nc/d\n");
+  });
+
+  test("--json, anywhere after the action, prints the full view: callAction's result as JSON", async () => {
+    const agent = agentDir();
+    const set = factory(["models.set", "--json", '{"models":["a/b","c/d"]}'], { agent });
     expect(set).toMatchObject({ code: 0, stderr: "" });
     expect(JSON.parse(set.stdout)).toEqual({ models: ["a/b", "c/d"] });
-    const get = factory(["models.get"], { agent });
+    const get = factory(["models.get", "--json"], { agent });
     expect(get.code).toBe(0);
-    expect(JSON.parse(get.stdout)).toEqual({ models: ["a/b", "c/d"] });
+    const saved = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agent;
+    try {
+      expect(JSON.parse(get.stdout)).toEqual(await callAction("models.get", {}));
+    } finally {
+      process.env.PI_CODING_AGENT_DIR = saved;
+    }
+    const after = factory(["models.get", "{}", "--json"], { agent });
+    expect(JSON.parse(after.stdout)).toEqual({ models: ["a/b", "c/d"] });
   });
 
   test("- reads the params from stdin", () => {
     const agent = agentDir();
-    const set = factory(["models.set", "-"], { agent, stdin: '{"models":["x/y"]}\n' });
+    const set = factory(["models.set", "-", "--json"], { agent, stdin: '{"models":["x/y"]}\n' });
     expect(set.code).toBe(0);
     expect(JSON.parse(set.stdout)).toEqual({ models: ["x/y"] });
   });
@@ -62,9 +80,10 @@ describe("factory <action>", () => {
   test("the repo defaults to the caller's directory", () => {
     const agent = agentDir();
     const repo = makeRepo();
-    const added = factory(["repos.add"], { agent, cwd: repo });
+    const added = factory(["repos.add", "--json"], { agent, cwd: repo });
     expect(added.code).toBe(0);
     expect(JSON.parse(added.stdout)).toEqual({ repo, repos: [repo] });
+    expect(factory(["repos.list"], { agent }).stdout).toBe(`${agentView("repos.list", {}, { repos: [repo] })}\n`);
   });
 
   test("invalid JSON params exit 2 with an invalid error on stderr", () => {
@@ -74,15 +93,20 @@ describe("factory <action>", () => {
     expect(result.stderr).toStartWith("factory: invalid: params are not valid JSON");
   });
 
-  test("an unknown action exits 2", () => {
+  test("an unknown action exits 2; the agent view's error names the way out, --json gives code and message only", () => {
     const result = factory(["tasks.nope"], { agent: agentDir() });
-    expect(result).toEqual({ code: 2, stdout: "", stderr: 'factory: invalid: unknown action "tasks.nope"\n' });
+    expect(result).toEqual({ code: 2, stdout: "", stderr: `factory: ${agentError({ code: "invalid", message: 'unknown action "tasks.nope"' })}\n` });
+    const json = factory(["tasks.nope", "--json"], { agent: agentDir() });
+    expect(json).toEqual({ code: 2, stdout: "", stderr: 'factory: invalid: unknown action "tasks.nope"\n' });
   });
 
   test("a FactoryError other than invalid exits 1 with its code and message on stderr", () => {
     const repo = makeRepo();
-    const result = factory(["repos.remove"], { agent: agentDir(), cwd: repo });
+    const result = factory(["repos.remove", "--json"], { agent: agentDir(), cwd: repo });
     expect(result).toEqual({ code: 1, stdout: "", stderr: `factory: not_found: ${repo} is not registered\n` });
+    const agentResult = factory(["repos.remove"], { agent: agentDir(), cwd: repo });
+    expect(agentResult.code).toBe(1);
+    expect(agentResult.stderr).toEndWith(" · next: repos.list\n");
   });
 
   test("more than one params argument is a usage error", () => {
@@ -93,10 +117,18 @@ describe("factory <action>", () => {
 });
 
 describe("factory commands", () => {
-  test("actions prints the ACTIONS map as JSON", () => {
-    const result = factory(["actions"], { agent: agentDir() });
-    expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual(JSON.parse(JSON.stringify(ACTIONS)));
+  test("actions prints one line per action; actions <name> one action in full; --json the ACTIONS map", () => {
+    const list = factory(["actions"], { agent: agentDir() });
+    expect(list).toEqual({ code: 0, stdout: `${agentActions(ACTIONS)}\n`, stderr: "" });
+    expect(list.stdout.trim().split("\n")).toHaveLength(Object.keys(ACTIONS).length);
+    const one = factory(["actions", "tasks.start"], { agent: agentDir() });
+    expect(one).toEqual({ code: 0, stdout: `${agentActions(ACTIONS, "tasks.start")}\n`, stderr: "" });
+    const unknown = factory(["actions", "tasks.nope"], { agent: agentDir() });
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toStartWith("factory: not_found: no action tasks.nope");
+    const json = factory(["actions", "--json"], { agent: agentDir() });
+    expect(json.code).toBe(0);
+    expect(JSON.parse(json.stdout)).toEqual(JSON.parse(JSON.stringify(ACTIONS)));
   });
 
   test("--core-path prints an existing file whose import exports ACTIONS", async () => {
@@ -132,17 +164,23 @@ describe("factory as the host", () => {
   test("runs the hostOnly tasks.import: refuses a record whose worktree is the primary checkout, registers a linked one", () => {
     const agent = agentDir();
     const record = importableRecord();
-    const refused = factory(["tasks.import", JSON.stringify({ record: { ...record, worktree: record.repo, branch: "main" } })], { agent });
+    const refused = factory(["tasks.import", JSON.stringify({ record: { ...record, worktree: record.repo, branch: "main" } }), "--json"], { agent });
     expect(refused).toEqual({ code: 1, stdout: "", stderr: `factory: refused: tasks.import: ${record.repo} is not a linked worktree of ${record.repo}\n` });
-    const imported = factory(["tasks.import", JSON.stringify({ record })], { agent });
+    const imported = factory(["tasks.import", JSON.stringify({ record }), "--json"], { agent });
     expect(imported.code).toBe(0);
     expect(JSON.parse(imported.stdout)).toMatchObject({ id: ID, state: null });
+    // Imported again (an existing id stays unchanged): the agent view by default.
+    expect(factory(["tasks.import", JSON.stringify({ record })], { agent }).stdout).toStartWith("imported task 11111111");
+    // The timelines print JSON without --json: programs replay them.
+    const timeline = factory(["tasks.timeline", JSON.stringify({ id: ID })], { agent });
+    expect(timeline).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(timeline.stdout)).toEqual({ entries: [], next: 0 });
   });
 
   test("SIGINT aborts a blocking tasks.wait: exit 1, failed", async () => {
     const agent = agentDir();
     expect(factory(["tasks.import", JSON.stringify({ record: importableRecord() })], { agent }).code).toBe(0);
-    const wait = Bun.spawn(["bun", CLI, "tasks.wait", JSON.stringify({ ids: [ID] })], { cwd: scratch, env: cliEnv(agent), stdout: "pipe", stderr: "pipe" });
+    const wait = Bun.spawn(["bun", CLI, "tasks.wait", JSON.stringify({ ids: [ID] }), "--json"], { cwd: scratch, env: cliEnv(agent), stdout: "pipe", stderr: "pipe" });
     await Bun.sleep(1000);
     expect(wait.exitCode).toBeNull();
     wait.kill("SIGINT");

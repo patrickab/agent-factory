@@ -2,17 +2,16 @@
  * The `factory` tool in Pi: every core action (`core.ts`) for an agent, one tool call per action. Its name, description
  * and schema come from `factory-tool.ts`, which the MCP server (`mcp.ts`) shares.
  *
- * - Provides `registerFactoryTool` (sequential: one call at a time): the answer is the action's result as JSON text
- *   and as `details`; every failure is an `isError` result of one sentence starting `factory: `
+ * - Provides `registerFactoryTool` (sequential: one call at a time): the answer is the agent view (`agent-view.ts`) as
+ *   text, the full view as `details`; every failure is an `isError` result, the agent view's one line (`agentError`)
  * - In a task session (`isTaskSession`: Pi started by the runner, or a session holding a `factory-task` entry) only the
  *   actions with `mutates: false` are offered; a mutating one answers as unknown. A task's coder starts a task only
  *   through `factory_new_task` (`followup.ts`)
  * - A call passes the session's id as `origin`: `waves.start` records the declaring session
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { callFactoryTool, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolParameters } from "../factory-tool.ts";
+import { callFactoryTool, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolError, factoryToolParameters } from "../factory-tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
-import { errorText } from "../util.ts";
 
 /** Whether the tool runs in a factory task's session: Pi started by the runner, or a session branch holding a `factory-task` entry. */
 export function isTaskSession(branch: Iterable<{ type: string }>): boolean {
@@ -32,15 +31,15 @@ export function registerFactoryTool(pi: ExtensionAPI): void {
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
-        const result = await callFactoryTool(params, isTaskSession(ctx.sessionManager.getBranch()), {
+        const { text, result } = await callFactoryTool(params, isTaskSession(ctx.sessionManager.getBranch()), {
           cwd: ctx.cwd,
           signal,
           // The declaring session of a wave (`waves.start`): Pi's public session id.
           origin: ctx.sessionManager.getSessionId(),
         });
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
+        return { content: [{ type: "text", text }], details: result };
       } catch (error) {
-        return { content: [{ type: "text", text: `factory: ${errorText(error)}` }], details: undefined, isError: true };
+        return { content: [{ type: "text", text: factoryToolError(error) }], details: undefined, isError: true };
       }
     },
   });

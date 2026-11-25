@@ -17,10 +17,12 @@ def fake_cli(tmp_path, script: str):
 
 
 def test_call_passes_action_and_json_and_reads_stdout(tmp_path):
-    binary = fake_cli(tmp_path, "print(json.dumps({'action': action, 'params': params}))")
+    binary = fake_cli(tmp_path, "print(json.dumps({'action': action, 'params': params, 'rest': sys.argv[3:]}))")
+    # `--json`: the CLI prints the full view, not the agent view.
     assert FactoryClient(binary).call("tasks.timeline", {"id": "abc"}) == {
         "action": "tasks.timeline",
         "params": {"id": "abc"},
+        "rest": ["--json"],
     }
 
 

@@ -1,29 +1,36 @@
 /**
  * The `factory` tool as every harness offers it (the Pi extension's `pi/tool.ts`, the MCP server `mcp.ts`): its name,
- * description and JSON schema, built from `ACTIONS`, so the harnesses cannot drift apart.
+ * description and JSON schema, built from `ACTIONS`, and its answer, the agent view (`agent-view.ts`), so the harnesses
+ * cannot drift apart.
  *
- * - `agentActions`: every `ACTIONS` name but the `hostOnly` ones; in a task session only those with `mutates: false`
+ * - `agentActions`: every `ACTIONS` name but the `hostOnly` ones and the timelines (`NOT_FOR_AGENTS`: they dump a
+ *   log, programs replay it through the core or the CLI); in a task session only those with `mutates: false`
  * - `factoryToolParameters`: `action` (one of them) plus the union of their params
- * - `callFactoryTool`: one tool call, `{action, ...params}`, refusing an action the agent is not offered
+ * - `callFactoryTool`: one tool call, `{action, ...params}`, refusing an action the agent is not offered. Answers the
+ *   agent view as `text` and the full view as `result`; a failure throws (`factoryToolError` renders it)
  */
+import { agentError, agentView } from "./agent-view.ts";
 import { ACTIONS, callAction, FactoryError, type ActionName, type CallOptions } from "./core.ts";
-import { isRecord } from "./util.ts";
+import { errorText, isRecord } from "./util.ts";
 
 type Schema = Record<string, unknown>;
 
 export const FACTORY_TOOL_NAME = "factory";
 
+/** Actions the agent's tool never offers: they dump a log instead of deciding or answering something. */
+const NOT_FOR_AGENTS: readonly string[] = ["tasks.timeline", "waves.timeline"];
+
 export const FACTORY_TOOL_DESCRIPTION = [
-  'Hand a self-contained coding task to a background factory run: it codes in its own git worktree, runs the repo\'s gates and merges when they pass. Use it in a git repository whose target branch has a committed factory.yaml; "tasks.start" returns at once with the task. Give related tasks one tag (path segments like "plugin/m1/w1"; default the system user) and filter "tasks.list" by a tag or its prefix.',
-  'Instead of polling "tasks.get", block on "tasks.wait" (exactly one of ids, tag or wave): it answers {tasks, waves, attention, timedOut} once everything watched rests or one needs attention (a task waiting for approve or for an answer, blocked, cancelled, interrupted; a wave rejected, blocked, waiting_approve, interrupted), or at its timeout.',
-  'For a planned set of tasks declare a wave once: "waves.start" (repo, tag, title, request = the reviewer\'s instructions, tasks [{key, title, request, after: keys}]) creates the wave\'s branch off the target, starts each task once those it waits for are done, then reviews the whole branch and merges it into the target (stage: building, reviewing, rejected, merging, waiting_approve, merged, blocked, cancelled). Then wait on it: "tasks.wait" {wave} returns when the wave is merged or cancelled or something needs you (a task\'s question: answer with tasks.message; a blocked task; the wave rejected, blocked, waiting_approve or interrupted, or building with tasks that can never start; the last stage event of waves.timeline says why); its tasks resting alone do not end the wait.',
-  'Decide after a rejection: read the findings ("waves.get" reviews), then "waves.add" fix tasks (the wave builds and is reviewed again) or "waves.cancel"; nothing moves until you act. After blocked: fix the cause, then "waves.retry"; waiting_approve: "waves.approve". "waves.remove" deletes a resting wave with its tasks (its branch only when merged).',
-  'A wave\'s record is an append-only event log: "waves.timeline" replays it, "waves.list" (by tag prefix) lists waves, and every view\'s actions name what is valid now. Use tasks.approve, tasks.retry, tasks.cancel, tasks.message and tasks.remove as a task\'s state asks.',
+  "Run coding work in the background: a task codes in its own git worktree of a repository with a committed factory.yaml, passes its gates and merges into its target.",
+  '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, reviewed as a whole and merged once.',
+  'Answers are short text: an id (8 chars are enough), the state, what matters in it, and "next:" with the actions valid now.',
+  'Tasks and waves started from a Pi session report back to it when they need you; elsewhere block on "tasks.wait" (ids, tag or wave) instead of polling.',
+  "A tag (path segments like plugin/m1/w1) groups related work for tasks.list, waves.list and tasks.wait.",
 ].join(" ");
 
-/** The actions an agent may call: every one but the `hostOnly` ones; in a task session only those with `mutates: false`. */
+/** The actions an agent may call: every one but the `hostOnly` ones and the timelines; in a task session only those with `mutates: false`. */
 export function agentActions(taskSession = false): ActionName[] {
-  return (Object.keys(ACTIONS) as ActionName[]).filter((name) => !ACTIONS[name].hostOnly && !(taskSession && ACTIONS[name].mutates));
+  return (Object.keys(ACTIONS) as ActionName[]).filter((name) => !ACTIONS[name].hostOnly && !NOT_FOR_AGENTS.includes(name) && !(taskSession && ACTIONS[name].mutates));
 }
 
 /** `action` and the union of the actions' params. A param several actions share names each of them in its description. */
@@ -51,10 +58,20 @@ export function factoryToolParameters(taskSession = false): { type: "object"; re
   return { type: "object", required: ["action"], properties };
 }
 
-/** Runs one `factory` tool call. A host-only action, or a mutating one in a task session, is as unknown as a made-up one. */
-export async function callFactoryTool(params: unknown, taskSession: boolean, options: CallOptions): Promise<unknown> {
+/**
+ * Runs one `factory` tool call: `text` is the agent view, `result` the full view. An action the agent is not offered
+ * (host-only, a timeline, a mutating one in a task session) is as unknown as a made-up one.
+ */
+export async function callFactoryTool(params: unknown, taskSession: boolean, options: CallOptions): Promise<{ text: string; result: unknown }> {
   const { action, ...rest } = isRecord(params) ? params : {};
   const name = String(action);
   if (!(agentActions(taskSession) as string[]).includes(name)) throw new FactoryError("invalid", `unknown action "${name}"`);
-  return callAction(name, rest, options);
+  const result = await callAction(name, rest, options);
+  return { text: agentView(name, rest, result), result };
+}
+
+/** A failed tool call as the agent's one line (`agentError`); an error that is not a `FactoryError` is `failed`. */
+export function factoryToolError(error: unknown): string {
+  if (error instanceof FactoryError) return agentError({ code: error.code, message: error.message, detail: error.detail });
+  return agentError({ code: "failed", message: errorText(error) });
 }

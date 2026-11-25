@@ -504,8 +504,36 @@ describe("task reads", () => {
       interrupted: false,
       settings: { branch: "main", merge: "auto", maxRounds: 2, review: true, models: {} },
       usage: { input: 111, output: 56, cost: 1.75 },
+      lastMessage: "done",
+      failure: null,
+      review: { round: 1, status: "unknown", approved: false, findings: [] },
+      merged: null,
       actions: ["tasks.retry", "tasks.cancel", "tasks.remove", "tasks.message"],
     });
+  });
+
+  test("tasks.get: the coder's last message (not its commit message), a blocked task's failure, the merged commit", async () => {
+    const record = fakeRecord(ID_1, "/r");
+    await writeTask(record);
+    const custom = (customType: string, data: object) => ({ type: "custom", customType, timestamp: "t", data });
+    const said = (role: string, text: string) => ({ type: "message", timestamp: "t", message: { role, content: [{ type: "text", text }] } });
+    const gate = (exitCode: number, outputTail: string) => custom("factory-gate", { round: 1, phase: "gates", argv: ["bun", "run", "types"], exitCode, killed: false, durationMs: 1, outputTail });
+    const head = [sessionEntries[0], sessionEntries[1], custom("factory-round", { round: 1, trigger: "start" }), said("assistant", "Added b.txt.")];
+    writeSession(record, [
+      ...head,
+      { type: "custom_message", customType: "factory-commit-ask", content: "commit message?", timestamp: "t" },
+      said("assistant", "feat: add b"),
+      custom("factory-merge", { ok: true, commit: "40ca0ce", error: null, depsSynced: false }),
+      custom("factory-state", { state: "done", round: 1, reason: "merged" }),
+    ]);
+    expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ lastMessage: "Added b.txt.", failure: null, merged: "40ca0ce", review: null });
+    writeSession(record, [...head, gate(2, "src/a.ts: error\n"), gate(0, "ok"), custom("factory-state", { state: "blocked", round: 1, reason: "max_rounds: gates" })]);
+    expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ failure: "bun run types (exit 2)\nsrc/a.ts: error", merged: null });
+    writeSession(record, [...head, custom("factory-merge", { ok: false, commit: null, error: "rebase conflicts in a.ts", depsSynced: false }), custom("factory-state", { state: "blocked", round: 1, reason: "merge_failed" })]);
+    expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ failure: "rebase conflicts in a.ts" });
+    // A failure fed back to the coder in a later round is not why the task stopped.
+    writeSession(record, [...head, gate(2, "x"), custom("factory-round", { round: 2, trigger: "gates" }), custom("factory-state", { state: "blocked", round: 2, reason: "pipeline_error: boom" })]);
+    expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ failure: null });
   });
 
   test("tasks.get before the session file exists: nulls", async () => {

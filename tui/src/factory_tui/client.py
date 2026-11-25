@@ -1,4 +1,4 @@
-"""The only door to the factory: `factory <action> '<json>'`, JSON on stdout, `factory: <code>: <message>` on stderr."""
+"""The only door to the factory: `factory <action> '<json>' --json`, the full view as JSON on stdout, `factory: <code>: <message>` on stderr."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class FactoryClient:
         self.binary = binary or factory_binary()
 
     def call(self, action: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        command = [self.binary, action, json.dumps(params or {})]
+        command = [self.binary, action, json.dumps(params or {}), "--json"]
         try:
             done = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False)
         except FileNotFoundError:

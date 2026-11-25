@@ -10,6 +10,7 @@
  *   Usage is one cost figure. Every rendering goes through `scrub`: a home directory becomes `~`, a uuid its short id
  */
 import type { ActionSpec, TaskView } from "./core.ts";
+import type { Finding } from "./state.ts";
 import type { WaveView } from "./waves.ts";
 
 const SHORT = 8;
@@ -83,6 +84,16 @@ function taskNext(view: TaskView): string {
   return `next: ${named.join(", ")}`;
 }
 
+/** `review 2: rejected · 2 major, 5 minor` and, with `findings`, one line per finding. Tasks and waves alike. */
+function reviewSummary(round: number, verdict: string, findings: readonly Finding[], withFindings: boolean): string[] {
+  const counts = (["blocker", "major", "minor"] as const)
+    .map((severity) => [severity, findings.filter((finding) => finding.severity === severity).length] as const)
+    .filter(([, count]) => count > 0)
+    .map(([severity, count]) => `${count} ${severity}`);
+  const head = `  review ${round}: ${verdict}${counts.length > 0 ? ` · ${counts.join(", ")}` : ""}`;
+  return withFindings ? [head, ...findings.map(findingLine)] : [head];
+}
+
 /** The lines of a task's state, under its header and title. */
 function taskStateLines(view: TaskView): string[] {
   const indent = "  ";
@@ -92,8 +103,19 @@ function taskStateLines(view: TaskView): string[] {
       return labelled(indent, "question: ", view.question ?? "(the question is not recorded)");
     case "waiting_approve":
       return [`${indent}waits for tasks.approve`];
-    case "done":
-      return [`${indent}done: ${view.reason ?? "unknown"}`];
+    case "blocked": {
+      const lines = view.failure === null ? [] : labelled(indent, "failure: ", tailLines(view.failure));
+      const review = view.review;
+      if (review !== null && !review.approved && (view.reason ?? "").includes("review")) {
+        lines.push(...reviewSummary(review.round, review.status === "ok" ? "rejected" : `failed (${review.status})`, review.findings, true));
+      }
+      return lines;
+    }
+    case "done": {
+      const lines = [`${indent}done: ${view.reason ?? "unknown"}${view.merged === null ? "" : ` · merged ${short(view.merged)}`}`];
+      if (view.lastMessage !== null) lines.push(...labelled(indent, "last message: ", view.lastMessage));
+      return lines;
+    }
     case "cancelled":
       return view.reason === null || view.reason === "cancelled" ? [] : [`${indent}cancelled: ${view.reason}`];
     default:
@@ -177,7 +199,7 @@ function waveTasksLine(view: WaveView): string {
   return `  tasks: ${items.join(" · ")}`;
 }
 
-function findingLine(finding: WaveView["reviews"][number]["findings"][number]): string {
+function findingLine(finding: Finding): string {
   const where = finding.line === null ? finding.file : `${finding.file}:${finding.line}`;
   return `    ${fields(finding.severity, where, finding.text.replace(/\s*\n\s*/g, " "))}`;
 }
@@ -185,12 +207,13 @@ function findingLine(finding: WaveView["reviews"][number]["findings"][number]): 
 /** `review 2: rejected · 2 major, 5 minor` and, with `findings`, one line per finding. */
 function reviewLines(review: WaveView["reviews"][number], findings: boolean): string[] {
   if (review.verdict === "failed") return [`  review ${review.round}: failed (${review.status})`];
-  const counts = (["blocker", "major", "minor"] as const)
-    .map((severity) => [severity, review.findings.filter((finding) => finding.severity === severity).length] as const)
-    .filter(([, count]) => count > 0)
-    .map(([severity, count]) => `${count} ${severity}`);
-  const head = `  review ${review.round}: ${review.verdict}${counts.length > 0 ? ` · ${counts.join(", ")}` : ""}`;
-  return findings ? [head, ...review.findings.map(findingLine)] : [head];
+  return reviewSummary(review.round, review.verdict, review.findings, findings);
+}
+
+/** A failure text: its first line (what failed), then the last `GATE_TAIL_LINES` lines of the rest (the output). */
+function tailLines(text: string): string {
+  const [first, ...rest] = text.trimEnd().split("\n");
+  return [first, ...rest.slice(-GATE_TAIL_LINES)].join("\n");
 }
 
 /** The failed gate run's last lines. */
@@ -208,6 +231,11 @@ function remoteLines(view: WaveView): string[] {
   if (view.remote.url !== null) lines.push(`  remote: ${view.remote.url}`);
   if (view.remote.error !== null) lines.push(`  remote failed: ${view.remote.error}`);
   return lines;
+}
+
+/** `why: <detail>`: the last stage event's sentence on why the wave is at its stage. */
+function detailLine(view: WaveView): string[] {
+  return view.detail === null || view.detail === undefined ? [] : labelled("  ", "why: ", view.detail);
 }
 
 /** The lines of a wave's stage, under its header and title. */
@@ -228,7 +256,7 @@ function waveStageLines(view: WaveView): string[] {
     case "waiting_approve":
       return [...(lastReview ? reviewLines(lastReview, true) : []), "  waits for waves.approve"];
     case "blocked": {
-      const lines = [waveTasksLine(view)];
+      const lines = [waveTasksLine(view), ...detailLine(view)];
       if (view.reason === "gates") lines.push(...gateTail(view));
       if (view.reason === "review_failed" && lastReview) lines.push(...reviewLines(lastReview, false));
       return lines;

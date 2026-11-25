@@ -1,35 +1,36 @@
 # Views: what the factory stores, what programs get, what agents get
 
-Draft for factory/w2. Three layers:
+As built in factory/w2. Three layers:
 
 - **Record**: the append-only logs on disk. Nobody reads them directly
 - **Full view**: JSON, stable, everything. For the board, the TUI, pi-host, scripts (`factory <action> --json`, pi-host's `callAction`)
-- **Agent view**: text lines, only what the next decision needs. For agents (the `factory` tool, MCP, and the CLI by default)
+- **Agent view**: text lines, only what the next decision needs (`src/agent-view.ts`). For agents: the `factory` tool in
+  Pi, the MCP tool, and the CLI by default
+
+One renderer serves all three interfaces; they hold no logic. The only switch is the CLI's `--json` (anywhere after
+the action): no action takes a `full` or a `show` param.
 
 Rules of the agent view:
 
 - first line: kind, short id (8 chars, every action accepts it), state. Then only the lines that matter in that state
-- never: paths, timestamps, settings, the echoed request, session ids, per-message usage
+- never: paths (a home directory reads `~`), timestamps, settings, the echoed request, session ids, per-message usage
 - usage is one cost figure
 - `next:` lists the actions valid now
-- an agent that needs more asks for it: `full: true` on any action returns the full view as JSON
+- an agent that needs more than its view holds is a program: the CLI with `--json`
 
-## Decisions that override the tables below (user, after the first draft)
+Decisions (user):
 
 - A tool call has two purposes for an agent: trigger an event in the protocol, or answer a question about what is going
-  on. `tasks.timeline` and `waves.timeline` do neither: they dump the log. They are **not in the agent's tool**. They stay
-  for programs (full view) to render and replay
+  on. `tasks.timeline` and `waves.timeline` do neither: they dump the log. They are **not in the agent's tool** (not in
+  the Pi tool, not in the MCP tool). They stay in the core and the CLI (always JSON) for programs to render and replay
 - What an agent would have looked up in a timeline is part of `tasks.get` / `waves.get`, chosen by the state:
-  blocked -> the failure (gate output tail, conflict files) · rejected -> the review's findings · done -> the coder's final
-  message · waiting_answer -> the question
+  blocked -> the failure (the failed gate and its output tail, the merge's error, the stage event's detail) · rejected ->
+  the review's findings · done -> the merged commit and the coder's last message · waiting_answer -> the question
 - A review's result goes through the protocol: a rejection is pushed to the origin session with the findings in the
   message itself (severity, file:line, text). The supervisor decides and creates the fix tasks with `waves.add`; the
   factory then reviews again by itself. The reviewer never starts tasks
-- The timelines are not tool calls at all: not in the Pi tool, not in the MCP tool. They are part of the core library and
-  the CLI (`--json`), which is what pi-host, the board and the TUI use
 - A merged wave is pushed too and starts a supervisor turn: it is the signal to declare the next wave
 - `tasks.list` / `waves.list` in the agent view show what is not finished, and a count of the rest. No `all` parameter
-- No `show` parameter anywhere
 - `tasks.diff` in the agent view: the file list with counts
 - Everything that needs attention (a question included) is pushed to the origin session; `tasks.wait` is only for callers
   without a Pi session
@@ -55,6 +56,11 @@ type TaskView = {
   settings: { branch: string; merge: "auto" | "review"; maxRounds: number; review: boolean
               models: { coder: string; reviewer: string } }
   usage: Usage | null
+  // added in factory/w2, for the agent view's state lines
+  lastMessage: string | null          // the coder's last message (not its answer to the commit message ask)
+  failure: string | null              // only in blocked: "<gate argv> (exit N)" + output tail, or the merge's error
+  review: { round: number; status: string; approved: boolean; findings: Finding[] } | null   // the last review
+  merged: string | null               // the commit the last merge landed
   actions: string[]                   // tasks.* valid now
 }
 
@@ -63,6 +69,7 @@ type WaveView = {                     // as in the contract
   branch: string; target: string; base: string; origin: string | null; createdAt: string
   stage: "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled"
   reason: "conflict" | "gates" | "dirty" | "infra" | "review_failed" | null
+  detail: string | null               // added in factory/w2: the last stage event's why
   running: boolean; interrupted: boolean
   tasks: { key: string; title: string; after: string[]; taskId: string | null; sessionId: string | null
            state: string; usage: Usage | null }[]
@@ -95,42 +102,39 @@ task 4ae7325b  waiting_answer  round 1  factory/w1  $2.10
 wave 3f2a91c0  rejected  4/5 done  factory/w1  $18.40
   the wave mechanism
   tasks: record done · actions done · runner done · wait done · docs cancelled
-  review 2: rejected · 2 major, 5 minor   (waves.timeline {id, show: "findings"})
+  review 2: rejected · 2 major, 1 minor
+    major  src/wave-runner.ts:309  A wave whose remaining tasks can never start stays building forever. Fix: ...
+    major  src/core.ts:1060  A task that fails to launch is retried every 10 s, silently. Fix: ...
+    minor  src/tasks.ts:94  tasks.import can put a task into a wave. Fix: ...
   next: waves.add, waves.cancel
 ```
 
-State-dependent lines of a task: `question:` (waiting_answer) · `blocked: <reason>` plus the failed gate's last lines or the
-conflict's files (blocked) · `interrupted` · `waits for tasks.approve` (waiting_approve) · `merged <commit>` (done).
-Of a wave: `blocked: <reason>` with its detail · `cannot start: <keys>` (unreachable tasks) · `merged <from>..<to>` ·
+State-dependent lines of a task: `question:` (waiting_answer) · `blocked: <reason>` in the header, then `failure:` (the
+failed gate and the last lines of its output, or the merge's error) and, blocked by its review, the findings ·
+`interrupted:` · `waits for tasks.approve` (waiting_approve) · `done: merged · merged <commit>` and `last message:`
+(done). Of a wave: `blocked: <reason>` with `why: <detail>`, the failed gate's last lines or the failed review ·
+the findings (rejected, waiting_approve) · `cannot start: <keys>` (unreachable tasks) · `merged <from>..<to>` ·
 `remote: <url>`.
 
 ## Tasks
 
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
-| `tasks.start` | `{repo, title, request, tag?, plan?, overrides?}` | `{task: TaskView}` | `started task 4ae7325b  running  factory/w1` |
-| `tasks.get` | `{id}` | `{task: TaskView}` | the task block above |
-| `tasks.list` | `{repo?, tag?, all?}` | `{tasks: TaskView[]}` | one line per unfinished task, then a count (below) |
-| `tasks.timeline` | `{id, since?, show?}` | `{entries: TimelineEntry[], next: number}` | by `show` (below) |
-| `tasks.diff` | `{id}` | `{base, paths: {path, added, removed}[], patch}` | file list with counts; the patch only with `full` |
-| `tasks.message` | `{id, text}` | `{task: TaskView}` | `sent to task 4ae7325b  running` (or `answered task ...`) |
-| `tasks.approve` · `tasks.retry` · `tasks.cancel` | `{id}` | `{task: TaskView}` | `task 4ae7325b  merging` · `... running  round 3` · `... cancelled` |
-| `tasks.remove` | `{id, force?}` | `{removed: string, dropped: string \| null}` | `removed task 4ae7325b` (+ `dropped: 1 unmerged commit`) |
+| `tasks.start` | `{repo, title, request, tag?, plan?, overrides?}` | `TaskView` | `started task 4ae7325b  running  factory/w1` |
+| `tasks.get` | `{id}` | `TaskView` | the task block above |
+| `tasks.list` | `{repo?, tag?}` | `{tasks: TaskView[]}` | one line per unfinished task, then a count (below) |
+| `tasks.timeline` | `{id, since?}` | `{entries: TimelineEntry[], next: number}` | none: not offered to agents; the CLI prints JSON |
+| `tasks.diff` | `{id}` | `{base, diff, files: {path, added, removed}[]}` | file list with counts; the patch only in the full view |
+| `tasks.message` | `{id, text}` | `TaskView` | `sent to task 4ae7325b  running  round 1` |
+| `tasks.approve` · `tasks.retry` · `tasks.cancel` | `{id}` | `TaskView` | `task 4ae7325b  merging` · `... running  round 3` · `... cancelled` |
+| `tasks.remove` | `{id, force?}` | `{removed: string, dropped: string \| null}` | `removed task 4ae7325b` (+ ` · dropped: 1 unmerged commit ...`) |
 | `tasks.wait` | `{ids? \| tag? \| wave?, ignore?, timeoutMs?}` | `{tasks: TaskView[], waves: WaveView[], attention: string[], timedOut: boolean}` | only what needs attention (below) |
 
 ```
 tasks.list {repo}
   task a113f7bb  running  round 1  factory/w1  $8.38  feat(waves)!: the wave runner reviews and merges
   task 7cf4e91e  blocked: review_timeout  board/w1  $0.55  feat(factory): the board shows waves
-  26 finished, not shown (all: true)
-```
-
-```
-tasks.timeline {id, show}            show: "last" (default) | "failure" | "findings" | "all"
-  last      the coder's final message, verbatim
-  failure   blocked: gates · bun run types (exit 1) + the gate's output tail
-  findings  review 1: rejected + one line per finding: major src/core.ts:816 <text>
-  all       one line per entry: 10:07:16 gate types passed 7.6s  (coder text cut to its first line)
+  26 finished, not shown
 ```
 
 ```
@@ -154,27 +158,19 @@ tasks.wait ...                       (limit reached)
 
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
-| `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], plan?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5  factory/w1` + `started: record` + `waits: actions (record) · runner (actions)` |
-| `waves.add` | `{id, tasks}` | `{wave: WaveView}` | `wave 3f2a91c0  building  4/6` + `started: fix` |
+| `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], plan?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5 done  factory/w1 · started: record · waits: actions (record), runner (actions)` |
+| `waves.add` | `{id, tasks}` | `{wave: WaveView}` | `wave 3f2a91c0  building  4/6 done  factory/w1 · added: fix running` |
 | `waves.get` | `{id}` | `{wave: WaveView}` | the wave block above |
-| `waves.list` | `{repo?, tag?, all?}` | `{waves: WaveView[]}` | one line per unfinished wave, then a count |
-| `waves.timeline` | `{id, since?, show?}` | `{events: WaveEvent[], next: number}` | `show`: `findings` (default after a review), `failure`, `all` |
-| `waves.retry` · `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  reviewing` · `... merging` · `... cancelled` |
-| `waves.remove` | `{id, force?}` | `{removed: string}` | `removed wave 3f2a91c0 and 5 tasks` |
+| `waves.list` | `{repo?, tag?}` | `{waves: WaveView[]}` | one line per unfinished wave, then a count |
+| `waves.timeline` | `{id, since?}` | `{events: WaveEvent[], next: number}` | none: not offered to agents; the CLI prints JSON |
+| `waves.retry` · `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  reviewing  5/5 done  factory/w1` · `... merging ...` · `... cancelled ...` |
+| `waves.remove` | `{id, force?}` | `{removed: string}` | `removed wave 3f2a91c0` |
 
 ```
 waves.list {repo}
-  wave 3f2a91c0  reviewing  5/5  factory/w1  $19.20
-  wave 77b0c2e1  building   1/2  factory/w2  $1.10
-  2 merged, not shown (all: true)
-```
-
-```
-waves.timeline {id, show: "findings"}
-  review 2: rejected  (opus, 6 min, $0.90)
-    major  src/wave-runner.ts:309  A wave whose remaining tasks can never start stays building forever. Fix: ...
-    major  src/core.ts:1060        A task that fails to launch is retried every 10 s, silently. Fix: ...
-    minor  src/tasks.ts:94         tasks.import can put a task into a wave. Fix: ...
+  wave 3f2a91c0  reviewing  5/5 done  factory/w1  $19.20  the wave mechanism
+  wave 77b0c2e1  building  1/2 done  factory/w2  $1.10  views and notifications
+  2 merged or cancelled, not shown
 ```
 
 ## Repositories, settings, models, config
@@ -182,7 +178,7 @@ waves.timeline {id, show: "findings"}
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
 | `repos.list` | `{}` | `{repos: string[]}` | one path per line |
-| `repos.add` · `repos.remove` | `{repo}` | `{repos: string[]}` | `registered /home/me/git/app` · `unregistered ...` |
+| `repos.add` · `repos.remove` | `{repo}` | `{repo, repos}` · `{repos}` | `registered ~/git/app` · `unregistered ...` |
 | `branches.list` | `{repo}` | `{branches: {name, default: boolean, hasConfig: boolean}[]}` | `master (default) · waves (factory.yaml)` |
 | `models.get` | `{}` | `{models: string[]}` | one id per line |
 | `models.set` | `{models}` | `{models: string[]}` | `2 models set` |
@@ -193,11 +189,13 @@ waves.timeline {id, show: "findings"}
 
 ## Errors
 
-Full view: `{error: {code, message}}` (CLI: exit 1, `invalid` exit 2). Agent view, one line with the way out:
+The core throws `FactoryError(code, message)`. The CLI with `--json` prints `factory: <code>: <message>` to stderr
+(exit 1, `invalid` exit 2); the agent view (the tools, the CLI without `--json` after `factory: `) is one line with the
+way out:
 
 ```
-refused: wave 3f2a91c0 is merged, nothing can be added · next: waves.remove
-not_found: no task matches "4ae7" (2 match "4a": 4ae7325b, 4a01c9d2)
+refused: wave 3f2a91c0 is merged, nothing can be added · next: waves.get shows the actions valid now
+not_found: no task has an id starting with "4ae7" · next: tasks.list
 ```
 
 ## Notifications (pushed into the origin session)
@@ -206,8 +204,11 @@ The same blocks, with one line on top saying why it arrived:
 
 ```
 factory: wave factory/w1 was rejected
-wave 3f2a91c0  rejected  4/5 done  $18.40
-  review 2: rejected · 2 major, 5 minor   (waves.timeline {id, show: "findings"})
+wave 3f2a91c0  rejected  4/5 done  factory/w1  $18.40
+  the wave mechanism
+  review 2: rejected · 2 major, 1 minor
+    major  src/wave-runner.ts:309  A wave whose remaining tasks can never start stays building forever. Fix: ...
+    ...
   next: waves.add, waves.cancel
 ```
 
@@ -220,5 +221,5 @@ task 4ae7325b  waiting_answer  factory/w1
 
 ## The action list itself
 
-`factory actions` in the agent view: one line per action, `name {params} - summary`. One action's full parameter schema:
-`factory actions {name}`. Full view: the JSON schema of every action, as today.
+`factory actions` in the agent view: one line per action, `name {params} - summary`. One action's params in full
+(type, bounds, description, nested fields): `factory actions <name>`. `factory actions --json`: the `ACTIONS` map as JSON.

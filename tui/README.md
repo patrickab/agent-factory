@@ -1,7 +1,7 @@
 # factory-tui
 
 A read-only terminal view of the agent factory for when no browser is open. It talks only to the `factory` CLI
-(`factory <action> '<json>'`): the binary from `PATH`, or the one in `FACTORY_CLI`.
+(`factory <action> '<json>' --json`, the full view): the binary from `PATH`, or the one in `FACTORY_CLI`.
 
 - Left: the repositories, under each its waves as a tree by tag (track > milestone > wave, with `done/total`, stage and
   cost; tracks and milestones sum their waves), and its tasks outside a wave

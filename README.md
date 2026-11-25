@@ -93,6 +93,12 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 
 ## Interface
 
+Three layers (`VIEWS.md`): the **record** (append-only logs on disk, nobody reads them directly), the **full view**
+(`callAction`'s JSON, stable, everything: board, TUI, pi-host, scripts with `factory ... --json`) and the **agent
+view** (`src/agent-view.ts`, text lines with only what the next decision needs, no paths, timestamps or session ids:
+the `factory` tool in Pi, the MCP tool and the CLI by default). One renderer serves all three interfaces; they hold no
+logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in the CLI.
+
 ### Core (`src/core.ts`)
 
 - `core.ts` is the one module clients import, the package's entry (`import { callAction } from "agent-factory"`): `ACTIONS` (name -> `{summary, params (JSON schema), mutates, hostOnly}`)
@@ -111,10 +117,13 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   `config.write` (a registered repo; checked, not committed; replaces a file only with `overwrite: true`),
   `tasks.list|get` (a `TaskView`: record fields (`tag`, `plan`, `wave` included), last state with its time, `question`
   (the coder's open question while `waiting_answer`, else null), `running` = a live runner holds it,
-  `interrupted`, the task's settings, token and cost usage of coder and reviews, `actions` = the task actions the core
-  accepts now), `tasks.timeline` (session entries as `{at, kind, data}`, `since`/`next` = a byte cursor, read from
-  `since` on), `tasks.diff` (base, patch, per-file added/removed lines), `tasks.start|approve|retry|cancel|remove|message`,
-  `tasks.wait`, `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below)
+  `interrupted`, the task's settings, token and cost usage of coder and reviews, `lastMessage` (the coder's last
+  message, not its commit message), `failure` (while `blocked`: the failed gate with its output tail, or the merge's
+  error), `review` (the last one: round, status, approved, findings), `merged` (the commit the last merge landed),
+  `actions` = the task actions the core accepts now), `tasks.timeline` (session entries as `{at, kind, data}`,
+  `since`/`next` = a byte cursor, read from `since` on), `tasks.diff` (base, patch, per-file added/removed lines),
+  `tasks.start|approve|retry|cancel|remove|message`, `tasks.wait`,
+  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below)
 - `tasks.list {repo?, tag?}`: `tag` keeps the tasks whose tag is it or starts with `tag + "/"` (`a` holds `a/b`, not
   `ab`)
 - `tasks.wait {ids? | tag? | wave?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique
@@ -202,11 +211,11 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
    task's question (`tasks.message` answers it), a blocked task (`tasks.retry`, `tasks.message` or `tasks.cancel`), a
    `rejected`, `blocked`, `waiting_approve` or interrupted wave, a building wave whose pending tasks can never start.
    Then wait again
-3. Decide after a rejection: read the findings (`waves.get` `reviews`), then `waves.add` fix tasks (the wave builds
+3. Decide after a rejection: read the findings (`waves.get` shows them), then `waves.add` fix tasks (the wave builds
    again, then is reviewed again) or `waves.cancel`. Nothing moves until then: the factory never creates fix tasks.
-   After `blocked`: read why (`waves.timeline`, the last `stage` event's `detail`), fix the cause, then `waves.retry`
-   (or `waves.add`); `waiting_approve`: `waves.approve`; tasks that can never start: `waves.add` replacements or
-   `waves.cancel`
+   After `blocked`: read why (`waves.get`: the last `stage` event's `detail` as `why:`), fix the cause, then
+   `waves.retry` (or `waves.add`); `waiting_approve`: `waves.approve`; tasks that can never start: `waves.add`
+   replacements or `waves.cancel`
 
 ### The wave runner (`src/wave-runner.ts`, `src/wave-poke.ts`)
 
@@ -243,46 +252,51 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   wall time, `merge`). The review worktree is removed when the wave leaves review and merge (unless it is dirty: then
   it stays). A runner started on a wave in `reviewing` or `merging` runs that step again from its start
 - `waves.get {id}` / `waves.list {repo?, tag?}` (tag: equal or prefix + `/`) answer `WaveView`s: the declaration
-  (without `overrides`), `stage`, each task's `state` (`pending` before it started) and `usage`, `counts`
-  (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus reviews), `reviews`, `gates`, `merge`,
-  `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}` answers `{events, next}` (`since`/`next`
-  count events)
+  (without `overrides`), `stage`, `detail` (the last `stage` event's why, else null), each task's `state` (`pending`
+  before it started) and `usage`, `counts` (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus
+  reviews), `reviews`, `gates`, `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
+  answers `{events, next}` (`since`/`next` count events)
 
 ### CLI (`factory`)
 
 ```bash
 factory --help                                          # one line per action with its summary
-factory actions                                         # the ACTIONS map as JSON
+factory actions                                         # one line per action: name {params} - summary
+factory actions tasks.start                             # one action's params in full
+factory actions --json                                  # the ACTIONS map as JSON
 factory repos.add                                       # repo = the current directory
 factory tasks.start '{"title": "feat: add b", "request": "Add b.txt", "tag": "me/w1"}'
 echo '{"tag": "me/w1"}' | factory tasks.wait -           # params from stdin
+factory tasks.list --json                               # the full view, for scripts
 factory --core-path                                     # absolute path of src/core.ts, for hosts that import it
 ```
 
-- `factory <action> [<json params> | -]`: no params means `{}`, `-` reads them from stdin. The result goes to stdout
-  as JSON, exit 0. `cwd` is the caller's directory. `hostOnly` actions are available (the CLI is the host); Ctrl-C
-  aborts a blocking `tasks.wait`
+- `factory <action> [<json params> | -] [--json]`: no params means `{}`, `-` reads them from stdin. stdout gets the
+  agent view, or with `--json` (anywhere after the action) the full view, `callAction`'s result as JSON; exit 0.
+  Scripts that parse the output pass `--json`. `tasks.timeline` and `waves.timeline` always print JSON. `cwd` is the
+  caller's directory. `hostOnly` actions are available (the CLI is the host); Ctrl-C aborts a blocking `tasks.wait`
 - The CLI is the host's interface: it is not restricted in a task session (`FACTORY_TASK_SESSION=1`), where the
   `factory` tool and the MCP server offer only the actions with `mutates: false`. A coder with a shell and `factory`
   on PATH reaches every action
-- A `FactoryError` goes to stderr as `factory: <code>: <message>`: exit 2 for `invalid` (also bad JSON, an unknown
-  action), exit 1 for the others
-- It holds no logic of its own: it parses arguments and calls `callAction`
+- A `FactoryError` goes to stderr as `factory: <code>: <message>` (without `--json` followed by ` · next: <the way
+  out>`): exit 2 for `invalid` (also bad JSON, an unknown action), exit 1 for the others
+- It holds no logic of its own: it parses arguments, calls `callAction` and prints one of the two views
 
 ### MCP server (`factory-mcp`)
 
 - stdio, one tool `factory` with the name, description and schema of the Pi tool (both come from
-  `src/factory-tool.ts`, so they cannot drift): `{action, ...params}`, `action` an `ACTIONS` name that is not
-  `hostOnly`
-- The answer is the result as JSON text; a failure is an error result `factory: <message>`. Started by a task's
-  runner (`FACTORY_TASK_SESSION=1`) it offers only the actions with `mutates: false`
+  `src/factory-tool.ts`, so they cannot drift): `{action, ...params}`, `action` an `ACTIONS` name that is neither
+  `hostOnly` nor a timeline
+- The answer is the agent view as text; a failure is an error result, the agent view's one line
+  (`<code>: <message> · next: <the way out>`). Started by a task's runner (`FACTORY_TASK_SESSION=1`) it offers only
+  the actions with `mutates: false`
 - It names itself (`serverInfo`) with the package's `name` and `version` from `package.json`
 
 ### Pi extension (`src/pi/`)
 
-- The `factory` tool for agents: `{action, ...}` with `action` an `ACTIONS` name that is not `hostOnly` and that
-  action's params. The answer is the result as JSON text and `details`; errors are error results starting `factory: `.
-  Calls run one at a time
+- The `factory` tool for agents: `{action, ...}` with `action` an `ACTIONS` name that is neither `hostOnly` nor a
+  timeline, and that action's params. The answer is the agent view as text and the full view as `details`; errors
+  are error results, the agent view's one line. Calls run one at a time
 - In a task's own session (Pi started by the runner, `FACTORY_TASK_SESSION=1`, or a session holding a `factory-task`
   entry) the tool offers only the actions with `mutates: false`; a mutating one (`tasks.start`, `models.set`, ...)
   answers as unknown. A task's coder starts a task only through `factory_new_task` (below)
@@ -384,8 +398,8 @@ Commands (inside a task's own Pi session):
 You can hand coding tasks to the factory (the `factory` tool or the `factory` CLI).
 - Give each task a self-contained request and a conventional commit title; group a wave under one tag.
 - Start with tasks.start, then block on tasks.wait (ids, tag or wave) instead of polling tasks.get.
-- When a task needs attention, read tasks.get and tasks.timeline: answer a question with tasks.message, approve,
-  retry or cancel as its actions allow.
+- When a task needs attention, read tasks.get (its question, failure, findings or last message): answer a question
+  with tasks.message, approve, retry or cancel as its next: line allows.
 - Declare a planned set of tasks as a wave (waves.start) and wait on it (tasks.wait {wave}); its runner reviews and
   merges it, never merge it yourself. After a rejection add fix tasks (waves.add) or cancel it (waves.cancel).
 ```
