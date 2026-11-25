@@ -8,7 +8,6 @@
  */
 import { existsSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { commitMessageFallback, isConventionalTitle } from "./commitmsg.ts";
 import { loadTaskFiles, type TaskFiles } from "./config.ts";
 import { initDraft } from "./draft.ts";
@@ -31,6 +30,7 @@ import { mergeTask, rebaseWorktree } from "./merge.ts";
 import { runMerge, runMergeRequest, type MergeRequestSteps, type PipelineSteps } from "./pipeline.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner, type Exec } from "./run.ts";
+import { agentDir } from "./settings.ts";
 import {
   applyEntry,
   conflictFeedback,
@@ -221,7 +221,7 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
         diff,
         model: task.settings.models.reviewer ?? deps.sessionModel(),
         rolePrompt: taskFilesNow.prompts.reviewer,
-        reviewsDir: join(getAgentDir(), "factory-reviews", deps.sessionId()),
+        reviewsDir: join(agentDir(), "factory-reviews", deps.sessionId()),
         cancelled: () => runner.cancelled,
       }),
     merge: async (config) => {

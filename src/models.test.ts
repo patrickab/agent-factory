@@ -5,7 +5,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { loadModels, modelsCommand, modelsPath, requireModels, saveModels, type ModelsCommandContext } from "./models.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-models-test-")));
@@ -29,9 +28,6 @@ function writeModelsFile(text: string): void {
   mkdirSync(dirname(modelsPath()), { recursive: true });
   writeFileSync(modelsPath(), text);
 }
-
-// Pi's command context must fit what modelsCommand takes (compile-time check for index.ts).
-const piContextFits: (ctx: ExtensionCommandContext) => Promise<void> = (ctx) => modelsCommand("", ctx);
 
 interface FakeContext extends ModelsCommandContext {
   notes: { message: string; type: string | undefined }[];

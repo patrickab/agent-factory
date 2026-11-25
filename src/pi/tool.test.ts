@@ -7,8 +7,8 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ACTIONS } from "./core.ts";
-import { TASK_SESSION_ENV } from "./runner.ts";
+import { ACTIONS } from "../core.ts";
+import { TASK_SESSION_ENV } from "../runner.ts";
 import { agentActions, factoryToolParameters, isTaskSession, registerFactoryTool } from "./tool.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tool-test-")));

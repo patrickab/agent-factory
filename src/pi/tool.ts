@@ -10,9 +10,9 @@
  *   through `factory_new_task` (`followup.ts`)
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ACTIONS, callAction, type ActionName } from "./core.ts";
-import { TASK_SESSION_ENV } from "./runner.ts";
-import { errorText, isRecord } from "./util.ts";
+import { ACTIONS, callAction, type ActionName } from "../core.ts";
+import { TASK_SESSION_ENV } from "../runner.ts";
+import { errorText, isRecord } from "../util.ts";
 
 type Schema = Record<string, unknown>;
 

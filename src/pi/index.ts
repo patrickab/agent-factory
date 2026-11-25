@@ -40,9 +40,9 @@
  */
 import type { ExtensionAPI, ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
-import { snapshotTree } from "./git.ts";
-import { modelsCommand } from "./models.ts";
-import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "./pipeline.ts";
+import { snapshotTree } from "../git.ts";
+import { modelsCommand } from "../models.ts";
+import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "../pipeline.ts";
 import {
   approveTask,
   askSupervisor,
@@ -64,10 +64,10 @@ import {
   type OpResult,
   type OpsDeps,
   type RunOpening,
-} from "./ops.ts";
-import { applyEntry, followUpMessages, isMergeRequest, messageText, rebuild, RESTING_STATES, stateDraft, wasInterrupted, type Draft, type Snapshot, type State } from "./state.ts";
+} from "../ops.ts";
+import { applyEntry, followUpMessages, isMergeRequest, messageText, rebuild, RESTING_STATES, stateDraft, wasInterrupted, type Draft, type Snapshot, type State } from "../state.ts";
 import { registerFactoryTool } from "./tool.ts";
-import { errorText } from "./util.ts";
+import { errorText } from "../util.ts";
 
 /** Tag of the system prompt section that carries `.factory/agents/coder.md`. */
 const ROLE_SECTION = "factory_role";

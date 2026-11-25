@@ -1,7 +1,10 @@
 {
-  "name": "pi-factory",
+  "name": "agent-factory",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/core.ts"
+  },
   "scripts": {
     "test": "bun test",
     "types": "tsc --noEmit"
@@ -12,6 +15,6 @@
     "typescript": "^5.8.0"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./src/pi/index.ts"]
   }
 }

@@ -127,7 +127,7 @@ describe("runReview", () => {
     expect(data.sessionFile).toBe(join(reviewsDir, "2024_abc-123.jsonl"));
     const [{ argv, options }] = calls;
     expect(argv.slice(0, 6)).toEqual(["pi", "--mode", "json", "-p", "--tools", "read,grep,find,ls,submit_verdict"]);
-    expect(argv.slice(6, 9)).toEqual(["-ne", "-e", join(import.meta.dirname, "reviewer-tool.ts")]);
+    expect(argv.slice(6, 9)).toEqual(["-ne", "-e", join(import.meta.dirname, "pi", "reviewer-tool.ts")]);
     expect(argv.join(" ")).toContain(`--session-dir ${reviewsDir} --model anthropic/claude-haiku-5-5 --append-system-prompt Be strict.`);
     expect(argv.at(-1)).toContain(join(reviewsDir, "round-2.patch"));
     expect(argv.at(-1)).not.toContain(task.request);

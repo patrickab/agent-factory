@@ -7,12 +7,16 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import factory from "./index.ts";
-import type { Draft, Settings } from "./state.ts";
+import { modelsCommand } from "../models.ts";
+import type { Draft, Settings } from "../state.ts";
 
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+
+// Pi's command context must fit what modelsCommand takes (compile-time check for index.ts).
+const piContextFits: (ctx: ExtensionCommandContext) => Promise<void> = (ctx) => modelsCommand("", ctx);
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-index-test-")));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -162,7 +166,7 @@ describe("/factory init", () => {
     rmSync(join(repo, "factory.yaml"));
     const pi = session(repo);
     await pi.command("init");
-    expect(readFileSync(join(repo, "factory.yaml"), "utf8")).toBe(readFileSync(join(import.meta.dir, "factory.template.yaml"), "utf8"));
+    expect(readFileSync(join(repo, "factory.yaml"), "utf8")).toBe(readFileSync(join(import.meta.dir, "..", "factory.template.yaml"), "utf8"));
     expect(pi.notes[0]).toContain("nothing detected");
   });
 });

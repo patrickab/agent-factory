@@ -24,7 +24,7 @@ export type ResolvedSettings = Settings & { preview: boolean };
 export const DEFAULT_SETTINGS: Readonly<Omit<ResolvedSettings, "branch">> = { merge: "auto", maxRounds: 2, review: false, models: {}, preview: false };
 
 /** Pi's agent dir: `PI_CODING_AGENT_DIR` (a leading `~` expanded), else `~/.pi/agent`. Read on every call. */
-function agentDir(): string {
+export function agentDir(): string {
   const dir = process.env.PI_CODING_AGENT_DIR;
   if (dir === undefined || dir === "") return join(homedir(), ".pi", "agent");
   if (dir === "~") return homedir();

@@ -14,7 +14,7 @@ import type { Exec } from "./run.ts";
 import { approvedFrom, isMergeRequest, type Finding, type ReviewData, type ReviewStatus, type ReviewUsage, type Severity, type Task } from "./state.ts";
 
 export const VERDICT_TOOL = "submit_verdict";
-const REVIEWER_TOOL_EXTENSION = join(import.meta.dirname, "reviewer-tool.ts");
+const REVIEWER_TOOL_EXTENSION = join(import.meta.dirname, "pi", "reviewer-tool.ts");
 const SEVERITIES: readonly Severity[] = ["blocker", "major", "minor"];
 const PATCH_MAX_CHARS = 200_000;
 const PATHS_MAX = 500;

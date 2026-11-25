@@ -11,13 +11,13 @@
  *   task in `waiting_answer` and ends the coder's turn; the next message to the task is the answer
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { COMMIT_TITLE_RE } from "./commitmsg.ts";
-import { callAction } from "./core.ts";
-import { primaryCheckout } from "./git.ts";
-import { runCommand } from "./run.ts";
-import type { StoredSettings } from "./settings.ts";
-import type { SpawnData } from "./state.ts";
-import { errorText, isRecord } from "./util.ts";
+import { COMMIT_TITLE_RE } from "../commitmsg.ts";
+import { callAction } from "../core.ts";
+import { primaryCheckout } from "../git.ts";
+import { runCommand } from "../run.ts";
+import type { StoredSettings } from "../settings.ts";
+import type { SpawnData } from "../state.ts";
+import { errorText, isRecord } from "../util.ts";
 
 /** The system prompt section of a follow-up run on the task merged as `merged`. */
 export function followUpPrompt(merged: string | null): string {
