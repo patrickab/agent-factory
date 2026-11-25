@@ -7,6 +7,7 @@
  * - In a task session (`isTaskSession`: Pi started by the runner, or a session holding a `factory-task` entry) only the
  *   actions with `mutates: false` are offered; a mutating one answers as unknown. A task's coder starts a task only
  *   through `factory_new_task` (`followup.ts`)
+ * - A call passes the session's id as `origin`: `waves.start` records the declaring session
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { callFactoryTool, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolParameters } from "../factory-tool.ts";
@@ -31,7 +32,12 @@ export function registerFactoryTool(pi: ExtensionAPI): void {
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
-        const result = await callFactoryTool(params, isTaskSession(ctx.sessionManager.getBranch()), { cwd: ctx.cwd, signal });
+        const result = await callFactoryTool(params, isTaskSession(ctx.sessionManager.getBranch()), {
+          cwd: ctx.cwd,
+          signal,
+          // The declaring session of a wave (`waves.start`): Pi's public session id.
+          origin: ctx.sessionManager.getSessionId(),
+        });
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
       } catch (error) {
         return { content: [{ type: "text", text: `factory: ${errorText(error)}` }], details: undefined, isError: true };

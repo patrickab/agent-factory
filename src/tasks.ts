@@ -13,7 +13,7 @@
  */
 import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { hostLiveness, procStart } from "./queue.ts";
 import { factoryHome } from "./settings.ts";
 import { errorText, isRecord } from "./util.ts";
@@ -170,8 +170,12 @@ async function lockHeld(path: string): Promise<boolean> {
 
 /** Takes the task's lock for this process. Throws a `TaskBusyError` of one sentence while a live process holds it. */
 export async function lockTask(id: string): Promise<void> {
-  await mkdir(tasksDir(), { recursive: true });
-  const path = taskLockPath(id);
+  await lockFile(taskLockPath(id), `task ${id.slice(0, 8)} is busy: another factory action or its runner holds it, try again once it has ended`);
+}
+
+/** Takes the lock file `path` for this process (a task's, a wave's). Throws a `TaskBusyError` `busy` while a live process holds it. */
+export async function lockFile(path: string, busy: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
   // Written in full first, then linked: `link` fails on an existing lock, and no reader sees a half-written one.
   const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await writeFile(temp, await lockOwner(process.pid), "utf8");
@@ -189,7 +193,7 @@ export async function lockTask(id: string): Promise<void> {
   } finally {
     await rm(temp, { force: true });
   }
-  throw new TaskBusyError(`task ${id.slice(0, 8)} is busy: another factory action or its runner holds it, try again once it has ended`);
+  throw new TaskBusyError(busy);
 }
 
 /** Passes the lock this process holds to the process `pid` (a runner it spawned), which removes it when it exits. */
@@ -211,7 +215,11 @@ export async function handLockFile(path: string, pid: number): Promise<void> {
 
 /** Removes the task's lock if this process holds it; a lock handed to a runner stays. */
 export async function unlockTask(id: string): Promise<void> {
-  const path = taskLockPath(id);
+  await unlockFile(taskLockPath(id));
+}
+
+/** Removes the lock file `path` if this process holds it. */
+export async function unlockFile(path: string): Promise<void> {
   const text = await readFile(path, "utf8").catch(() => "");
   if (text.split(" ")[0] === String(process.pid)) await rm(path, { force: true });
 }

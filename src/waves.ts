@@ -13,6 +13,8 @@ import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/pro
 import { join } from "node:path";
 import { FactoryError } from "./core.ts";
 import { factoryHome } from "./settings.ts";
+import { parseSettingsFields, type Settings } from "./state.ts";
+import { lockFile, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 
 export type WaveStage = "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled";
@@ -25,6 +27,12 @@ export type WaveTaskSpec = { key: string; title: string; request: string; after?
 export const WAVE_STAGES: readonly WaveStage[] = ["building", "reviewing", "rejected", "merging", "waiting_approve", "merged", "blocked", "cancelled"];
 export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["rejected", "waiting_approve", "merged", "blocked", "cancelled"];
 const WAVE_REASONS: readonly WaveReason[] = ["conflict", "gates", "dirty", "infra", "review_failed"];
+
+/**
+ * The settings `waves.start` got, stored with the wave. Its tasks start with `models`, `maxRounds` and `review` from
+ * them, `branch` = the wave's branch and `merge: "auto"`; `merge` is the wave's own (`review`: wait for approve).
+ */
+export type WaveOverrides = { models?: Settings["models"]; maxRounds?: number; merge?: Settings["merge"]; review?: boolean };
 
 /** Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. */
 export interface WaveDeclaration {
@@ -40,6 +48,8 @@ export interface WaveDeclaration {
   base: string;
   origin: string | null;
   createdAt: string;
+  /** Stored only: not part of a `WaveView`. A file without it reads as `{}`. */
+  overrides: WaveOverrides;
 }
 
 export type WaveFinding = { severity: "blocker" | "major" | "minor"; file: string; line: number | null; text: string };
@@ -94,7 +104,7 @@ export interface WaveFold extends WaveDeclaration {
 }
 
 /** A wave as every client sees it (the contract's shape); the core builds it from the fold and the tasks. */
-export interface WaveView extends WaveDeclaration {
+export interface WaveView extends Omit<WaveDeclaration, "overrides"> {
   stage: WaveStage;
   reason: WaveReason | null;
   running: boolean;
@@ -134,6 +144,16 @@ export function waveLockPath(id: string): string {
   return join(wavesDir(), `${id}.lock`);
 }
 
+/** Takes the wave's lock for this process: a `TaskBusyError` while a live process holds it. */
+export async function lockWave(id: string): Promise<void> {
+  await lockFile(waveLockPath(id), `wave ${id.slice(0, 8)} is busy: another factory action holds it, try again once it has ended`);
+}
+
+/** Removes the wave's lock if this process holds it. */
+export async function unlockWave(id: string): Promise<void> {
+  await unlockFile(waveLockPath(id));
+}
+
 // ---- parsing ----
 
 function str(raw: Record<string, unknown>, key: string, nonEmpty = true): string {
@@ -166,6 +186,13 @@ function usageOf(raw: unknown): Usage | null {
   return { input: num(raw, "input"), output: num(raw, "output"), cost: num(raw, "cost") };
 }
 
+export function parseWaveOverrides(raw: unknown, prefix = "overrides."): WaveOverrides {
+  if (raw === null || raw === undefined) return {};
+  if (!isRecord(raw)) throw new Error(`${prefix.slice(0, -1)} must be an object`);
+  const { branch: _branch, ...fields } = parseSettingsFields(raw, prefix);
+  return fields;
+}
+
 export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration {
   if (!isRecord(raw)) throw new Error("the declaration is not an object");
   const declaration: WaveDeclaration = {
@@ -180,6 +207,7 @@ export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration 
     base: str(raw, "base"),
     origin: strOrNull(raw, "origin"),
     createdAt: str(raw, "createdAt"),
+    overrides: parseWaveOverrides(raw.overrides),
   };
   if (declaration.id !== id) throw new Error(`id ${declaration.id} is not the file's name`);
   return declaration;

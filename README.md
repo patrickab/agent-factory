@@ -88,7 +88,8 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 ### Core (`src/core.ts`)
 
 - `core.ts` is the one module clients import, the package's entry (`import { callAction } from "agent-factory"`): `ACTIONS` (name -> `{summary, params (JSON schema), mutates, hostOnly}`)
-  and `callAction(name, params, {cwd?, signal?, env?})`, plain JSON in and out. A failure throws
+  and `callAction(name, params, {cwd?, signal?, env?, origin?})`, plain JSON in and out (`origin`: the calling Pi
+  session's id, which `waves.start` records; the Pi tool passes it, the CLI and MCP do not). A failure throws
   `FactoryError(code, message, detail?)`, one sentence, `code` one of `invalid`, `not_found`, `busy`, `refused`,
   `failed`; `detail` is `{force: true}` on a refused `tasks.remove` that `force` would carry out. It imports only Bun
   and `node:`
@@ -99,12 +100,12 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   `branches.list`, `settings.get|set` (`{stored, resolved, defaults}`; `preview` is a stored boolean only clients
   read), `config.get` (working copy, or a branch's committed `factory.yaml`, a draft when there is none),
   `config.write` (a registered repo; checked, not committed; replaces a file only with `overwrite: true`),
-  `tasks.list|get` (a `TaskView`: record fields (`tag`, `plan`, `kind` included), last state with its time, `question`
+  `tasks.list|get` (a `TaskView`: record fields (`tag`, `plan`, `kind`, `wave` included), last state with its time, `question`
   (the coder's open question while `waiting_answer`, else null), `running` = a live runner holds it,
   `interrupted`, the task's settings, token and cost usage of coder and reviews, `actions` = the task actions the core
   accepts now), `tasks.timeline` (session entries as `{at, kind, data}`, `since`/`next` = a byte cursor, read from
   `since` on), `tasks.diff` (base, patch, per-file added/removed lines), `tasks.start|approve|retry|cancel|remove|message`,
-  `tasks.wait`
+  `tasks.wait`, `waves.start|add|get|list|timeline` (below)
 - `tasks.list {repo?, tag?}`: `tag` keeps the tasks whose tag is it or starts with `tag + "/"` (`a` holds `a/b`, not
   `ab`)
 - `tasks.wait {ids?, tag?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique prefixes,
@@ -135,6 +136,30 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   branch is never deleted, so its commits count as nothing dropped
 - `overrides` and stored settings: `merge` (`auto` | `review`), `maxRounds` (1..20), `review` (bool), `branch`,
   `models.coder`, `models.reviewer` (`provider/model`)
+- Commands the factory runs for a task (hooks, gates, merge gates, git, the reviewer) never inherit the runner's
+  `FACTORY_TASK_SESSION` and `FACTORY_TASK_LOCK`
+
+### Waves (`src/waves.ts`, actions in `src/core.ts`)
+
+- A wave is a declared set of tasks on one branch: `waves.start {repo, tag, title, request, tasks, plan?, overrides?}`
+  (`mutates: true`) checks the specs (`tasks: [{key, title, request, after?}]`, `key` unique of `[A-Za-z0-9._-]`,
+  `after` keys of the wave, no cycle), refuses an unregistered repo, a target (`overrides.branch`, else the repo's
+  branch) without a committed `factory.yaml` and an existing wave branch `<target>-<tag with "/" as "-">`, creates that
+  branch off the target's tip (`base`), writes the record and starts every task whose `after` are all `done`.
+  `origin` is the declaring Pi session. Answers `{wave}`
+- `overrides` are stored with the wave: its tasks start with their `models`, `maxRounds`, `review`, target = the wave
+  branch and `merge: auto` (a task merges into the wave branch by itself); `merge` is the wave's own
+- The wave's tasks carry its `tag`, `plan` and `wave` id; `tasks.start` cannot set `wave` (a task joins a wave only
+  through `waves.start`/`waves.add`)
+- `waves.add {id, tasks}`: more tasks (`after` may name existing keys); a `rejected`, `blocked`, `reviewing` or
+  `waiting_approve` wave goes back to `building`; refused when `merged`, `cancelled` or `merging`
+- The scheduler (`scheduleWave`, under the wave's lock `waves/<id>.lock`) starts what can start; `waves.start` and
+  `waves.add` run it, a later wave runner pokes it as tasks finish
+- `waves.get {id}` / `waves.list {repo?, tag?}` (tag: equal or prefix + `/`) answer `WaveView`s: the declaration
+  (without `overrides`), `stage`, each task's `state` (`pending` before it started) and `usage`, `counts`
+  (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus reviews), `reviews`, `gates`, `merge`,
+  `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}` answers `{events, next}` (`since`/`next`
+  count events)
 
 ### CLI (`factory`)
 
@@ -282,14 +307,15 @@ Commands (inside a task's own Pi session):
 
 ## Where state lives (`<agent dir>/factory/`, agent dir = `PI_CODING_AGENT_DIR` or `~/.pi/agent`)
 
-- `tasks/<id>.json`: the task record (repo, worktree, branch, title, session id and dir, tag, plan, kind; a record
-  without the last three reads as the system user's, no plan, `task`); `tasks/<id>.log`: runner
+- `tasks/<id>.json`: the task record (repo, worktree, branch, title, session id and dir, tag, plan, kind, wave; a record
+  without the last four reads as the system user's, no plan, `task`, no wave); `tasks/<id>.log`: runner
   output; `tasks/<id>.lock`: `<pid> <start time>` of whoever acts on the task (a dead holder's lock is taken over); `tasks/<id>.inbox`:
   messages for the live runner (`<inbox>.read`: how far it sent them)
 - `sessions/<repo dir name>/` (`/a/b` -> `--a-b--`): the Pi session files of a repository's tasks, apart from
   Pi's own sessions (`pi -r` does not list them). The task's truth is its `factory-*` session entries
 - `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models`, `preview`); the file registers the repo
 - `models.yaml`: the factory models, a YAML list of `provider/model` ids
+- `waves/<id>.jsonl`: a wave, append-only: line 1 its declaration, every later line one event; `waves/<id>.lock` its lock
 - Reviews: `<agent dir>/factory-reviews/<session id>/`. Merge lock and queue: in the repo's git common dir
 
 ## Entry protocol

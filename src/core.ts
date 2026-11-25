@@ -62,6 +62,27 @@ import {
 import { isFactoryPrompt, messageText, parseSettingsFields, RESTING_STATES, type Settings, type State } from "./state.ts";
 import { isTaskTag, listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskKind, type TaskRecord } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
+import {
+  appendWaveEvent,
+  createWave,
+  foldWave,
+  listWaves,
+  lockWave,
+  parseWaveOverrides,
+  readWave,
+  RESTING_WAVE_STAGES,
+  startableKeys,
+  unlockWave,
+  validateTaskSpecs,
+  waveCounts,
+  waveTaskState,
+  type WaveDeclaration,
+  type WaveFile,
+  type WaveFold,
+  type WaveOverrides,
+  type WaveStage,
+  type WaveView,
+} from "./waves.ts";
 
 export type FactoryErrorCode = "invalid" | "not_found" | "busy" | "refused" | "failed";
 
@@ -90,6 +111,8 @@ export interface TaskView {
   tag: string;
   plan: string | null;
   kind: TaskKind;
+  /** The wave the task belongs to (`waves.start`, `waves.add`), null outside one. */
+  wave: string | null;
   sessionId: string;
   sessionPath: string | null;
   state: State | null;
@@ -135,6 +158,7 @@ const SHORT_ID_CHARS = 8;
 
 const REPO: Schema = { type: "string", description: "A path inside the git repository. Default: the current directory" };
 const ID: Schema = { type: "string", description: "The task id or a unique prefix of it" };
+const WAVE_ID: Schema = { type: "string", description: "The wave id or a unique prefix of it" };
 const TAG: Schema = { type: "string", description: "A task tag: segments of A-Z a-z 0-9 . _ @ + - joined by /" };
 const TAG_FILTER: Schema = { type: "string", description: "Only the tasks whose tag is this one or lies under it (a holds a/b, not ab)" };
 const WAIT_TIMEOUT_MS = { default: 600_000, minimum: 1_000, maximum: 3_600_000 };
@@ -250,23 +274,73 @@ export const ACTIONS = {
     ["id", "text"],
     true,
   ),
+  "waves.start": spec(
+    "Declare a wave: a set of tasks on one new branch (<target>-<tag with / as ->) off the target, the factory starts each task once the tasks it waits for (after) are done; answers {wave}",
+    {
+      repo: REPO,
+      tag: { ...TAG, description: "The wave's tag (its tasks carry it): segments of A-Z a-z 0-9 . _ @ + - joined by /" },
+      title: { type: "string", description: "A short title of the wave" },
+      request: { type: "string", description: "The reviewer's instructions for the wave's whole diff" },
+      tasks: {
+        type: "array",
+        description: "The wave's tasks: key unique in the wave (A-Z a-z 0-9 . _ -), title, request (full and self-contained for the coder), after: keys this task waits for",
+        items: {
+          type: "object",
+          required: ["key", "title", "request"],
+          properties: { key: { type: "string" }, title: { type: "string" }, request: { type: "string" }, after: { type: "array", items: { type: "string" } } },
+        },
+      },
+      plan: { type: "string", description: "The memory_store path of the plan the wave works from (only stored)" },
+      overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: SETTINGS_PROPERTIES },
+    },
+    ["repo", "tag", "title", "request", "tasks"],
+    true,
+  ),
+  "waves.add": spec(
+    "Add tasks to a wave (after may name its existing keys); a rejected, blocked, reviewing or waiting_approve wave builds again. Answers {wave}",
+    {
+      id: WAVE_ID,
+      tasks: { type: "array", description: "Tasks as for waves.start", items: { type: "object" } },
+    },
+    ["id", "tasks"],
+    true,
+  ),
+  "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage. Answers {wave}", { id: WAVE_ID }, ["id"], false),
+  "waves.list": spec(
+    "Every wave, or the repository's, or those under a tag. Answers {waves}",
+    { repo: { type: "string", description: "Only the waves of this repository" }, tag: { type: "string", description: "Only the waves whose tag is this one or lies under it" } },
+    [],
+    false,
+  ),
+  "waves.timeline": spec(
+    "A wave's events; poll with since = the last answer's next. Answers {events, next}",
+    { id: WAVE_ID, since: { type: "integer", minimum: 0, description: "The cursor an earlier answer returned as next" } },
+    ["id"],
+    false,
+  ),
 } satisfies Record<string, ActionSpec>;
 
 export type ActionName = keyof typeof ACTIONS;
 
 type Params = Record<string, unknown>;
 
-/** `cwd`: where relative `repo` params start. `signal`: aborts a `tasks.start` before its runner is spawned. `env`: the environment of every runner the action starts (default `process.env`). */
+/**
+ * `cwd`: where relative `repo` params start. `signal`: aborts a `tasks.start` before its runner is spawned. `env`: the
+ * environment of every runner the action starts (default `process.env`). `origin`: the calling Pi session's id
+ * (`waves.start` records it); the CLI and MCP give none.
+ */
 export interface CallOptions {
   cwd?: string;
   signal?: AbortSignal;
   env?: Record<string, string>;
+  origin?: string;
 }
 
 interface CallContext {
   cwd: string | undefined;
   signal: AbortSignal | undefined;
   env: RunnerEnv | undefined;
+  origin: string | undefined;
 }
 
 function isActionName(name: string): name is ActionName {
@@ -422,6 +496,7 @@ async function taskView(record: TaskRecord): Promise<TaskView> {
     tag: record.tag,
     plan: record.plan,
     kind: record.kind,
+    wave: record.wave,
     sessionId: record.sessionId,
     sessionPath,
     state: last?.state ?? null,
@@ -762,6 +837,135 @@ function storedSettingsParam(raw: unknown, prefix: string): StoredSettings {
   }
 }
 
+// ---- waves ----
+
+/** Stages a wave takes no tasks in: `merging` too, whose rebased branch is in the merge queue. */
+const WAVE_ADD_REFUSED: readonly WaveStage[] = ["merged", "cancelled", "merging"];
+
+/** The wave branch of `tag` on `target`: `<target>-<tag with "/" as "-">`. */
+export function waveBranchName(target: string, tag: string): string {
+  return `${target}-${tag.replaceAll("/", "-")}`;
+}
+
+/** The wave whose id is `id` or starts with it. */
+async function findWave(id: unknown): Promise<WaveFile> {
+  const wanted = nonEmpty(id)?.trim();
+  if (wanted === undefined) throw new FactoryError("invalid", "the id of a wave must not be empty");
+  const waves = await listWaves();
+  const exact = waves.find((wave) => wave.declaration.id === wanted);
+  if (exact) return exact;
+  const matches = waves.filter((wave) => wave.declaration.id.startsWith(wanted));
+  if (matches.length === 0) throw new FactoryError("not_found", `no wave has an id starting with "${wanted}"`);
+  if (matches.length > 1) throw new FactoryError("invalid", `"${wanted}" matches ${matches.length} waves, give more of the id`);
+  return matches[0];
+}
+
+/** Runs `act` holding the wave's lock; a live holder is `busy`. */
+async function withWaveLock<T>(id: string, act: () => Promise<T>): Promise<T> {
+  try {
+    await lockWave(id);
+  } catch (error) {
+    if (error instanceof TaskBusyError) throw new FactoryError("busy", error.message);
+    throw error;
+  }
+  try {
+    return await act();
+  } finally {
+    await unlockWave(id);
+  }
+}
+
+/**
+ * The views of the wave's started tasks by key. A started task whose record is gone (removed) counts as `cancelled`:
+ * it never finishes.
+ */
+async function waveTaskViews(fold: WaveFold): Promise<{ states: Map<string, string | null>; views: Map<string, TaskView> }> {
+  const records = new Map((await listTasks()).map((record) => [record.id, record]));
+  const states = new Map<string, string | null>();
+  const views = new Map<string, TaskView>();
+  await Promise.all(
+    fold.tasks.map(async (task) => {
+      if (task.taskId === null) return;
+      const record = records.get(task.taskId);
+      if (record === undefined) {
+        states.set(task.key, "cancelled");
+        return;
+      }
+      const view = await taskView(record);
+      views.set(task.key, view);
+      states.set(task.key, view.state);
+    }),
+  );
+  return { states, views };
+}
+
+function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["usage"] {
+  if (usage === null) return sum;
+  return { input: (sum?.input ?? 0) + usage.input, output: (sum?.output ?? 0) + usage.output, cost: (sum?.cost ?? 0) + usage.cost };
+}
+
+/** The wave as clients see it: its fold, its tasks' states and usage. No wave runner exists yet: `running` is false. */
+async function waveView(file: WaveFile): Promise<WaveView> {
+  const full = foldWave(file.declaration, file.events);
+  const { overrides: _overrides, ...fold } = full;
+  const { states, views } = await waveTaskViews(full);
+  const running = false;
+  const interrupted = !RESTING_WAVE_STAGES.includes(fold.stage) && fold.stage !== "building" && !running;
+  let usage: WaveView["usage"] = null;
+  const tasks = fold.tasks.map((task) => {
+    const taskUsage = views.get(task.key)?.usage ?? null;
+    usage = addUsage(usage, taskUsage);
+    return { key: task.key, title: task.title, after: task.after, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: taskUsage };
+  });
+  for (const review of fold.reviews) usage = addUsage(usage, review.usage);
+  const resting = RESTING_WAVE_STAGES.includes(fold.stage);
+  const allowed: Record<string, boolean> = {
+    "waves.add": !WAVE_ADD_REFUSED.includes(fold.stage),
+    "waves.retry": !running && (fold.stage === "blocked" || interrupted),
+    "waves.approve": !running && fold.stage === "waiting_approve",
+    "waves.cancel": fold.stage !== "merged" && fold.stage !== "cancelled",
+    "waves.remove": !running && (resting || interrupted),
+  };
+  // Only the actions the core has: one a later version adds shows up once it exists.
+  const actions = Object.keys(allowed).filter((name) => allowed[name] && isActionName(name));
+  return { ...fold, running, interrupted, tasks, counts: waveCounts(full, states), usage, actions };
+}
+
+/**
+ * The scheduler: starts every pending task of the wave whose `after` tasks are all `done`, through `launchTask` with
+ * the wave's branch as target, its tag, plan and id, and records a `task` event for each. The caller holds the wave's
+ * lock (`scheduleWave` takes it). Nothing starts unless the wave is `building`. Resolves with the started keys.
+ */
+export async function startWaveTasks(id: string, env?: RunnerEnv): Promise<string[]> {
+  const { declaration, events } = await readWave(id);
+  const fold = foldWave(declaration, events);
+  if (fold.stage !== "building") return [];
+  const { states } = await waveTaskViews(fold);
+  const { models, maxRounds, review } = declaration.overrides;
+  // A wave's task always merges into the wave branch by itself; `merge` of the overrides is the wave's.
+  const overrides: StoredSettings = { models, maxRounds, review, merge: "auto", branch: declaration.branch };
+  const started: string[] = [];
+  for (const key of startableKeys(fold, states)) {
+    const task = fold.tasks.find((candidate) => candidate.key === key);
+    if (task === undefined) continue;
+    let record: TaskRecord;
+    try {
+      record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, tag: declaration.tag, plan: declaration.plan, wave: id, env });
+    } catch (error) {
+      const why = `wave ${id.slice(0, SHORT_ID_CHARS)}: starting its task ${key} failed (${oneLine(errorText(error))}); the next waves.add or wave poke tries again`;
+      throw new FactoryError(error instanceof LaunchRefusedError ? "refused" : "failed", why);
+    }
+    await appendWaveEvent(id, { kind: "task", key, taskId: record.id, sessionId: record.sessionId });
+    started.push(key);
+  }
+  return started;
+}
+
+/** `startWaveTasks` under the wave's lock: what `waves.start`/`waves.add` run, and what a poke runs later. */
+export async function scheduleWave(id: string, env?: RunnerEnv): Promise<string[]> {
+  return withWaveLock(id, () => startWaveTasks(id, env));
+}
+
 const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Promise<unknown>> = {
   "models.get": async () => ({ models: await loadModels() }),
 
@@ -1015,6 +1219,98 @@ const HANDLERS: Record<ActionName, (params: Params, context: CallContext) => Pro
     if ((await liveRunners(record)).length === 0 && (await withdrawUnsentLine(record, text))) await deliver();
     return taskView(record);
   },
+
+  "waves.start": async (params, { cwd, env, origin }) => {
+    const tag = tagParam("waves.start", params.tag);
+    const title = nonEmpty(params.title);
+    const request = nonEmpty(params.request);
+    if (tag === undefined) throw new FactoryError("invalid", "waves.start needs a tag");
+    if (title === undefined) throw new FactoryError("invalid", "waves.start needs a title that is not empty");
+    if (request === undefined) throw new FactoryError("invalid", "waves.start needs a request (the reviewer's instructions) that is not empty");
+    if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "waves.start: plan must not be empty");
+    const specs = validateTaskSpecs(params.tasks);
+    let target: string | undefined;
+    let overrides: WaveOverrides;
+    try {
+      const fields = parseSettingsFields((params.overrides ?? {}) as Params, "overrides.");
+      target = fields.branch;
+      overrides = parseWaveOverrides(params.overrides ?? {});
+    } catch (error) {
+      throw new FactoryError("invalid", `waves.start: ${errorText(error)}`);
+    }
+    const repo = await primaryOf(params.repo as string, cwd);
+    if (!(await registeredRepos()).includes(repo)) throw new FactoryError("not_found", `${repo} is not registered, add it with repos.add first`);
+    const stored = await loadSettings(repo);
+    await requireFactoryModels(resolveSettings(stored, overrides, "").models);
+    target ??= stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
+    if (target === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
+    if (!(await localBranchExists(repo, target))) throw new FactoryError("not_found", `${repo} has no local branch ${target}`);
+    if (!(await branchHasConfig(repo, target))) {
+      throw new FactoryError("refused", `${repo}: branch ${target} has no factory.yaml (write one with /factory init or the config.write action, and commit it)`);
+    }
+    const branch = waveBranchName(target, tag);
+    if ((await runCommand(["git", "check-ref-format", "--branch", branch], { cwd: repo })).exitCode !== 0) {
+      throw new FactoryError("invalid", `waves.start: ${branch} (target and tag) is no valid branch name`);
+    }
+    if (await localBranchExists(repo, branch)) throw new FactoryError("refused", `${repo}: the wave branch ${branch} exists already (another wave of tag ${tag} on ${target}?)`);
+    const base = await git(runCommand, repo, ["rev-parse", "--verify", `refs/heads/${target}^{commit}`]);
+    await git(runCommand, repo, ["branch", branch, base]);
+    const declaration: WaveDeclaration = {
+      id: crypto.randomUUID(),
+      repo,
+      tag,
+      plan: (params.plan as string | undefined) ?? null,
+      title,
+      request,
+      branch,
+      target,
+      base,
+      origin: origin ?? null,
+      createdAt: new Date().toISOString(),
+      overrides,
+    };
+    try {
+      await createWave(declaration);
+    } catch (error) {
+      await runCommand(["git", "branch", "-D", branch], { cwd: repo });
+      throw error;
+    }
+    await withWaveLock(declaration.id, async () => {
+      await appendWaveEvent(declaration.id, { kind: "tasks", tasks: specs });
+      await startWaveTasks(declaration.id, env);
+    });
+    return { wave: await waveView(await readWave(declaration.id)) };
+  },
+
+  "waves.add": async (params, { env }) => {
+    const id = (await findWave(params.id)).declaration.id;
+    await withWaveLock(id, async () => {
+      const { declaration, events } = await readWave(id);
+      const fold = foldWave(declaration, events);
+      if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage}, it takes no more tasks`);
+      const specs = validateTaskSpecs(params.tasks, fold.tasks);
+      await appendWaveEvent(id, { kind: "tasks", tasks: specs });
+      if (fold.stage !== "building") await appendWaveEvent(id, { kind: "stage", stage: "building", reason: null });
+      await startWaveTasks(id, env);
+    });
+    return { wave: await waveView(await readWave(id)) };
+  },
+
+  "waves.get": async (params) => ({ wave: await waveView(await findWave(params.id)) }),
+
+  "waves.list": async (params, { cwd }) => {
+    const tag = tagParam("waves.list", params.tag);
+    const repo = params.repo === undefined ? undefined : await primaryOf(params.repo as string, cwd);
+    const files = (await listWaves(repo)).filter((file) => tag === undefined || tagInGroup(file.declaration.tag, tag));
+    return { waves: await Promise.all(files.map(waveView)) };
+  },
+
+  "waves.timeline": async (params) => {
+    const { events } = await findWave(params.id);
+    const since = (params.since as number | undefined) ?? 0;
+    if (since > events.length) throw new FactoryError("invalid", `since ${since} is past the wave's last event (${events.length})`);
+    return { events: events.slice(since), next: events.length };
+  },
 };
 
 /** One sentence: a multi-line error (git output) on one line. */
@@ -1024,11 +1320,11 @@ function oneLine(text: string): string {
 
 /** Runs the action `name` with `params` (`CallOptions`). Resolves with plain JSON, rejects with a `FactoryError`. */
 export async function callAction(name: string, params: unknown, options: CallOptions = {}): Promise<unknown> {
-  const { cwd, signal, env } = options;
+  const { cwd, signal, env, origin } = options;
   if (!isActionName(name)) throw new FactoryError("invalid", `unknown action "${name}"`);
   const checked = checkParams(name, params, cwd);
   try {
-    return await HANDLERS[name](checked, { cwd, signal, env });
+    return await HANDLERS[name](checked, { cwd, signal, env, origin });
   } catch (error) {
     if (error instanceof FactoryError) throw error;
     if (error instanceof TaskBusyError) throw new FactoryError("busy", error.message);

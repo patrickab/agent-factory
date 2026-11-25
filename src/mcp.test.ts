@@ -110,7 +110,7 @@ describe("factory-mcp", () => {
       command: "bun",
       args: [join(import.meta.dirname, "mcp.ts")],
       cwd: repo,
-      // Not a task session, even when the factory's gates run this inside a task's runner.
+      // Not a task session, even when a coder runs this from its task's Pi (the gates no longer inherit the variable).
       env: { ...(process.env as Record<string, string>), [TASK_SESSION_ENV]: "", PI_CODING_AGENT_DIR: agent, GIT_CONFIG_GLOBAL: "/dev/null" },
       stderr: "pipe",
     });

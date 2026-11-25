@@ -14,7 +14,7 @@ import { isTaskSession, registerFactoryTool } from "./tool.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tool-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
-// The factory's gates run these tests inside a task's runner, which sets the task-session variable.
+// A coder runs these tests from its task's Pi, which has the task-session variable (the gates no longer inherit it).
 const savedTaskSession = process.env[TASK_SESSION_ENV];
 
 beforeEach(() => {
@@ -33,7 +33,7 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 /** The tool call context: `branch` = the session's entries. */
 function ctx(branch: { type: string; customType?: string; data?: unknown }[] = []) {
-  return { cwd: scratch, sessionManager: { getBranch: () => branch } };
+  return { cwd: scratch, sessionManager: { getBranch: () => branch, getSessionId: () => "session-1" } };
 }
 
 function registered() {
@@ -69,7 +69,10 @@ describe("factoryToolParameters", () => {
 
   test("a param several actions share names them; one with different meanings names each", () => {
     const { properties } = factoryToolParameters();
-    expect(String(properties.id.description)).toContain("tasks.get, ");
+    expect(String(properties.since.description)).toBe("tasks.timeline, waves.timeline: The cursor an earlier answer returned as next");
+    // Task ids and wave ids mean different things: each action is named.
+    expect(String(properties.id.description)).toContain("tasks.get: The task id");
+    expect(String(properties.id.description)).toContain("waves.get: The wave id");
     expect(String(properties.text.description)).toContain("config.write: The factory.yaml text");
     expect(String(properties.text.description)).toContain("tasks.message: The message");
   });

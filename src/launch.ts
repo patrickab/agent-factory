@@ -182,6 +182,8 @@ export interface LaunchInput {
   signal?: AbortSignal;
   /** The runner's environment. */
   env?: RunnerEnv;
+  /** The wave the task belongs to: only `waves.start`/`waves.add` (the scheduler) give one, never `tasks.start`. */
+  wave?: string;
 }
 
 export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
@@ -240,7 +242,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
         tag: input.tag ?? systemUser(),
         plan: input.plan ?? null,
         kind,
-        wave: null,
+        wave: input.wave ?? null,
       };
       await writeTask(record);
       recorded = true;
