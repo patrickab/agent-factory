@@ -13,7 +13,7 @@
  *   runner); a state refusal is a `MessageRefusedError`
  * - Provides `defaultBranch`, `localBranchExists` and `startCommand` (the payload `parseStartPayload` accepts)
  * - Provides `liveRunners`/`stopRunners` (a task's runner processes: `pgrep -f`, then the session id as a whole argument
- *   of the command line), `unmergedWork` and
+ *   of the command line and the caller's marker, `ownRunner` of `spawn.ts`), `unmergedWork` and
  *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another;
  *   an old merge request's record names its source branch, which stays)
  * - The detached spawn itself (`runnerSpawn`, `spawnDetached`) lives in `spawn.ts`, shared with the wave runner's poke
@@ -27,7 +27,7 @@ import { inboxReadPath, lastFactoryState, taskMainBranch } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
 import type { ModelSize, Settings, StartPayload } from "./state.ts";
-import { onPath, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
+import { onPath, ownRunners, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { TASK_WAVE_ENV } from "./wave-poke.ts";
 import { outputTail } from "./util.ts";
@@ -304,9 +304,10 @@ export async function restoreWorktree(record: TaskRecord): Promise<void> {
 }
 
 /**
- * The pids of the runners of a task still alive, found by their command line (`runner.ts ... <sessionId> ...`): `pgrep`
- * finds the candidates, then the session id must be a whole argument after `runner.ts` (`/proc/<pid>/cmdline`), so a
- * short id never matches another task's runner nor a wave's (`wave-runner.ts`).
+ * The pids of this factory's runners of a task still alive, found by their command line (`runner.ts ... <sessionId> ...`):
+ * `pgrep` finds the candidates, then the session id must be a whole argument after `runner.ts` (`/proc/<pid>/cmdline`),
+ * so a short id never matches another task's runner nor a wave's (`wave-runner.ts`), and the runner must carry the
+ * caller's marker (`ownRunner`, invariant 16).
  */
 export async function liveRunners(record: Pick<TaskRecord, "sessionId">): Promise<number[]> {
   const pattern = `(^|[ /])runner\\.ts .*${record.sessionId.replace(/[^A-Za-z0-9_-]/g, ".")}`;
@@ -315,10 +316,8 @@ export async function liveRunners(record: Pick<TaskRecord, "sessionId">): Promis
   if (result.exitCode === 1) return [];
   if (result.exitCode !== 0) throw new Error(`pgrep, which finds a task's runner, failed (exit ${result.exitCode}): ${outputTail(result.output)}`);
   const pids = result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number);
-  // Without /proc (not Linux) the pattern's match is all there is.
-  if (!existsSync("/proc/self/cmdline")) return pids;
   const runs = await Promise.all(pids.map((pid) => runsSession(pid, record.sessionId)));
-  return pids.filter((_, index) => runs[index]);
+  return ownRunners(pids.filter((_, index) => runs[index]));
 }
 
 /** Whether process `pid` is a task runner (`runner.ts`) with `sessionId` as one of its arguments; false once it ended. */

@@ -6,14 +6,15 @@
  *   (the poke marker) and `<id>.reviews/` (the reviewer's sessions and patch files)
  * - `pokeWave`: writes the marker, then starts `bun wave-runner.ts <id>` detached and hands it the wave's lock, unless
  *   a live runner holds that lock: that runner sees the marker and looks again before it ends (invariant 6)
- * - `liveWaveRunners`/`stopWaveRunners`: a wave's runner processes, found by `pgrep -f` on the whole wave id argument
+ * - `liveWaveRunners`/`stopWaveRunners`: a wave's runner processes, found by `pgrep -f` on the whole wave id argument,
+ *   only those with the caller's marker (`ownRunner` of `spawn.ts`, invariant 16)
  * - Imports nothing outside node built-ins and the plain plugin modules: a task's runner pokes its wave when it ends
  */
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runCommand } from "./run.ts";
 import { factoryHome } from "./settings.ts";
-import { onPath, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
+import { onPath, ownRunners, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { handLockFile, lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { outputTail } from "./util.ts";
 
@@ -96,14 +97,14 @@ export async function pokeWave(id: string, env: RunnerEnv = process.env): Promis
   return pid !== undefined;
 }
 
-/** The pids of the wave's live runners, found by their command line (`wave-runner.ts <id>`, the whole id). */
+/** The pids of the wave's live runners with the caller's marker, found by their command line (`wave-runner.ts <id>`, the whole id). */
 export async function liveWaveRunners(id: string): Promise<number[]> {
   if (!isWaveId(id)) return [];
   const result = await runCommand(["pgrep", "-f", `wave-runner\\.ts ${id}$`], { cwd: "/", maxStdoutChars: 10_000 });
   // Exit 1 is "no match"; anything else (pgrep missing or failing) would hide a live runner.
   if (result.exitCode === 1) return [];
   if (result.exitCode !== 0) throw new Error(`pgrep, which finds a wave's runner, failed (exit ${result.exitCode}): ${outputTail(result.output)}`);
-  return result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number);
+  return ownRunners(result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number));
 }
 
 /**

@@ -6,13 +6,46 @@
  * - `spawnDetached`: its own process group, detached, stdout and stderr appended to a log file; resolves with the pid.
  *   A scope whose `systemd-run` fails at once (the user manager unreachable) is not a runner: the plain detached spawn
  *   takes its place, so the lock is never handed to a dead pid
+ * - `FACTORY_MARKER` (invariant 16): `spawnDetached` gives every runner the marker of the process that spawns it, and
+ *   `ownRunner` is the one place that decides whether a found runner process is the caller's: same marker, or both
+ *   without one (the real factory). Every search for runners (`liveRunners`, `liveWaveRunners`) filters through it
  * - Imports nothing outside node built-ins: a task's runner imports it
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, openSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 
 /** The environment of the runners a caller starts (`process.env` when it gives none). */
 export type RunnerEnv = Record<string, string | undefined>;
+
+/** The marker every runner carries: the spawning process's own (unset in the real factory, random per test run). */
+export const MARKER_ENV = "FACTORY_MARKER";
+
+/** `env` with this process's marker in place of whatever marker it held (none when this process has none). */
+export function markedEnv(env: RunnerEnv): RunnerEnv {
+  const { [MARKER_ENV]: _theirs, ...rest } = env;
+  const marker = process.env[MARKER_ENV];
+  return marker === undefined ? rest : { ...rest, [MARKER_ENV]: marker };
+}
+
+/**
+ * Whether process `pid` is a runner of this process's own factory: its environment (`/proc/<pid>/environ`) holds the
+ * same `FACTORY_MARKER` as this process's, or neither has one. An environment that cannot be read (gone, another
+ * user's, no procfs) or is empty (an ended process) is not ours: it is never listed nor signalled.
+ */
+export async function ownRunner(pid: number): Promise<boolean> {
+  const environ = await readFile(`/proc/${pid}/environ`, "utf8").catch(() => "");
+  if (environ === "") return false;
+  const prefix = `${MARKER_ENV}=`;
+  const theirs = environ.split("\0").find((entry) => entry.startsWith(prefix))?.slice(prefix.length);
+  return theirs === process.env[MARKER_ENV];
+}
+
+/** The pids among `pids` that are this process's own runners (`ownRunner`), in their order. */
+export async function ownRunners(pids: number[]): Promise<number[]> {
+  const own = await Promise.all(pids.map(ownRunner));
+  return pids.filter((_, index) => own[index]);
+}
 
 /** `Bun.which` reads the PATH the process started with unless it is given the current one. */
 export function onPath(binary: string): string | null {
@@ -79,8 +112,9 @@ async function scopeFails(child: ChildProcess, systemdRun: string): Promise<bool
 }
 
 /**
- * Starts `command` (through `runnerSpawn`) detached in `cwd` with `env`, output appended to `logPath`. Resolves with its
- * pid. A scoped spawn that fails before it execs the runner (`scopeFails`) is replaced by the plain one. `systemdRun`: for tests.
+ * Starts `command` (through `runnerSpawn`) detached in `cwd` with `env` and this process's marker (`markedEnv`), output
+ * appended to `logPath`. Resolves with its pid. A scoped spawn that fails before it execs the runner (`scopeFails`) is
+ * replaced by the plain one. `systemdRun`: for tests.
  */
 export async function spawnDetached(
   command: string[],
@@ -89,9 +123,10 @@ export async function spawnDetached(
   cwd: string,
   systemdRun: string | null = onPath("systemd-run"),
 ): Promise<number | undefined> {
-  const runner = runnerSpawn(command, env, process.env, systemdRun);
+  const marked = markedEnv(env);
+  const runner = runnerSpawn(command, marked, process.env, systemdRun);
   let child = await startChild(runner.argv, runner.env, logPath, cwd);
-  if (systemdRun !== null && runner.argv !== command && (await scopeFails(child, systemdRun))) child = await startChild(command, env, logPath, cwd);
+  if (systemdRun !== null && runner.argv !== command && (await scopeFails(child, systemdRun))) child = await startChild(command, marked, logPath, cwd);
   child.unref();
   return child.pid;
 }
