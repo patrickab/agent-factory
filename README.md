@@ -21,16 +21,25 @@ files under Pi's agent dir; there is no daemon.
 ## Install
 
 ```bash
-bun install -g git+https://github.com/patrickab/agent-factory   # the factory and factory-mcp binaries
-pi install git:github.com/patrickab/agent-factory               # the Pi extension
+git clone https://github.com/patrickab/agent-factory
+cd agent-factory
+bun install
+bun link                         # factory and factory-mcp into bun's global bin dir
+pi install "$PWD"                # Pi loads the extension from this same clone
+pi mcp add factory -- factory-mcp  # only for a harness that wants the MCP tool (below)
 ```
 
+- One copy: the CLI, the MCP server, the runners they start and the Pi extension all run from the clone, so the
+  core and the extension (which writes the entries the core reads) are always one revision. Update with `git pull`
+  in the clone (and `bun install` when `bun.lock` changed); a second install elsewhere (`bun install -g`,
+  `pi install git:...`) is a copy that drifts
+- `bun link` links the binaries into bun's global bin dir (`bun pm bin -g`, usually `~/.bun/bin`), which must be on
+  PATH
 - The Pi extension is required: a task's runner starts `pi` in the task's worktree, and the extension there runs the
   task (`/factory start`, the gates, the review, the merge). Pi loads it as an installed package
   (`package.json` `pi.extensions`: `src/pi/index.ts`); the runner passes no `-e`
 - On PATH: `pi`, `git`, `bun` (the detached task runner), `pgrep` (finds a task's runner; without it task actions
-  fail), `sh`, `awk`, `flock` and `sleep` (the merge lock and queue). `bun install -g` puts the binaries in
-  `~/.bun/bin`
+  fail), `sh`, `awk`, `flock` and `sleep` (the merge lock and queue)
 - Linux is the supported platform (`flock`, `/proc` for process liveness); macOS is untested
 - Optional: `agent-worktree` on PATH. When it is there, task worktrees are made with it, else with `git worktree add`
   into `<repo>/../worktrees/<repo name>/<task>`
@@ -40,7 +49,9 @@ pi install git:github.com/patrickab/agent-factory               # the Pi extensi
 
 ## MCP setup
 
-Pi (instead of the extension's tool, not next to it: both offer a tool `factory`):
+The MCP server is meant for harnesses other than Pi; Pi has the extension's `factory` tool. Both can coexist in Pi:
+Pi names an MCP tool `mcp__<server>__<tool>`, so the server's tool is `mcp__factory__factory` and does not clash
+with the extension's `factory`.
 
 ```bash
 pi mcp add factory -- factory-mcp
@@ -70,7 +81,7 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 - `lockfiles`: file names that trigger `after_merge` and go last in the review patch. Default:
   `uv.lock`, `package-lock.json`, `bun.lock`, `bun.lockb`
 - Role prompts: `.factory/agents/coder.md`, `.factory/agents/reviewer.md`
-- See `factory.template.yaml` for a commented example
+- See `src/factory.template.yaml` for a commented example
 
 ## Interface
 
@@ -139,6 +150,9 @@ factory --core-path                                     # absolute path of src/c
 - `factory <action> [<json params> | -]`: no params means `{}`, `-` reads them from stdin. The result goes to stdout
   as JSON, exit 0. `cwd` is the caller's directory. `hostOnly` actions are available (the CLI is the host); Ctrl-C
   aborts a blocking `tasks.wait`
+- The CLI is the host's interface: it is not restricted in a task session (`FACTORY_TASK_SESSION=1`), where the
+  `factory` tool and the MCP server offer only the actions with `mutates: false`. A coder with a shell and `factory`
+  on PATH reaches every action
 - A `FactoryError` goes to stderr as `factory: <code>: <message>`: exit 2 for `invalid` (also bad JSON, an unknown
   action), exit 1 for the others
 - It holds no logic of its own: it parses arguments and calls `callAction`
@@ -150,6 +164,7 @@ factory --core-path                                     # absolute path of src/c
   `hostOnly`
 - The answer is the result as JSON text; a failure is an error result `factory: <message>`. Started by a task's
   runner (`FACTORY_TASK_SESSION=1`) it offers only the actions with `mutates: false`
+- It names itself (`serverInfo`) with the package's `name` and `version` from `package.json`
 
 ### Pi extension (`src/pi/`)
 

@@ -4,7 +4,7 @@
  * `bun runner.ts <worktree> <sessionDir> <sessionId> <inboxPath> <message>`
  *
  * - Spawns `pi --mode rpc --session-dir <sessionDir> --session-id <sessionId>` in the worktree (Pi loads the
- *   factory plugin from its extensions dir by itself), with `TASK_SESSION_ENV=1`, and sends `message` as the prompt
+ *   agent-factory Pi package by itself), with `TASK_SESSION_ENV=1`, and sends `message` as the prompt
  * - Closes Pi's stdin once Pi answered the prompt, no agent run is active (`agent_start` .. `agent_settled`), no inbox
  *   line is unsent or unanswered and the task rests (`RESTING_STATES`). `/factory approve`, `/factory retry` and a plain
  *   message start at rest, so for them the task must first have left that rest: a `factory-state` entry written after
@@ -242,7 +242,7 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
     if (await sendInbox(last, left)) return;
     if (runActive || runExpected || unanswered.size > 0) return;
     if (plainRun && runsStarted > 0 && count === startCount) {
-      return refuse("pi ran the message without the factory plugin (no factory-state entry): is the factory plugin in its extensions dir?");
+      return refuse("pi ran the message without the factory plugin (no factory-state entry): is the agent-factory Pi package installed (`pi install <path of the agent-factory clone>`)?");
     }
     // A line that came in and cannot go out yet keeps Pi open; one that comes after `closeStdin` waits for the next runner.
     if (await inboxUnread()) return;
@@ -285,7 +285,7 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
     } else if (plain && (disposition === "started" || disposition === "queued")) {
       plainRun = true;
     } else if (disposition !== "handled") {
-      refuse(`pi did not run the prompt as a command (disposition ${String(disposition)}): is the factory plugin in its extensions dir?`);
+      refuse(`pi did not run the prompt as a command (disposition ${String(disposition)}): is the agent-factory Pi package installed (\`pi install <path of the agent-factory clone>\`)?`);
     }
   };
   const onRecord = (record: unknown) => {

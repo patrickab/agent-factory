@@ -56,6 +56,21 @@ describe("factory-mcp", () => {
     await client.close();
   });
 
+  test("names itself with the package's name and version", async () => {
+    const client = await connected();
+    const manifest = (await Bun.file(join(import.meta.dirname, "..", "package.json")).json()) as { name: string; version: string };
+    expect(client.getServerVersion()).toMatchObject({ name: manifest.name, version: manifest.version });
+    await client.close();
+  });
+
+  test("a call to a tool other than factory is an error result", async () => {
+    const client = await connected();
+    const result = await client.callTool({ name: "nope", arguments: { action: "models.get" } });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toBe('factory: unknown tool "nope"');
+    await client.close();
+  });
+
   test("a read action answers its result as JSON text", async () => {
     const client = await connected();
     const result = await client.callTool({ name: "factory", arguments: { action: "models.get" } });

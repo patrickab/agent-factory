@@ -30,10 +30,12 @@ function makeRepo(): string {
   return repo;
 }
 
+const cliEnv = (agent: string) => ({ ...process.env, PI_CODING_AGENT_DIR: agent, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" });
+
 function factory(args: string[], options: { agent: string; cwd?: string; stdin?: string }) {
   const result = Bun.spawnSync(["bun", CLI, ...args], {
     cwd: options.cwd ?? scratch,
-    env: { ...process.env, PI_CODING_AGENT_DIR: options.agent, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+    env: cliEnv(options.agent),
     stdin: options.stdin === undefined ? "ignore" : Buffer.from(options.stdin),
   });
   return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
@@ -112,5 +114,40 @@ describe("factory commands", () => {
     expect(result.code).toBe(0);
     const lines = result.stdout.trim().split("\n");
     for (const [name, spec] of Object.entries(ACTIONS)) expect(lines).toContain(`${name}  ${spec.summary}`);
+  });
+});
+
+describe("factory as the host", () => {
+  const ID = "11111111-2222-3333-4444-555555555555";
+
+  /** A task record of a linked worktree that never started: no runner, no state, so it never rests. */
+  function importableRecord() {
+    const repo = makeRepo();
+    execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", "init"]);
+    const worktree = join(scratch, `wt-${counter}`);
+    execFileSync("git", ["-C", repo, "worktree", "add", "--quiet", "-b", "task", worktree]);
+    return { id: ID, repo, worktree, branch: "task", title: "t", sessionId: "s", sessionDir: join(scratch, `sessions-${counter}`), createdAt: "2026-01-01T00:00:00.000Z" };
+  }
+
+  test("runs the hostOnly tasks.import: refuses a record whose worktree is the primary checkout, registers a linked one", () => {
+    const agent = agentDir();
+    const record = importableRecord();
+    const refused = factory(["tasks.import", JSON.stringify({ record: { ...record, worktree: record.repo, branch: "main" } })], { agent });
+    expect(refused).toEqual({ code: 1, stdout: "", stderr: `factory: refused: tasks.import: ${record.repo} is not a linked worktree of ${record.repo}\n` });
+    const imported = factory(["tasks.import", JSON.stringify({ record })], { agent });
+    expect(imported.code).toBe(0);
+    expect(JSON.parse(imported.stdout)).toMatchObject({ id: ID, state: null });
+  });
+
+  test("SIGINT aborts a blocking tasks.wait: exit 1, failed", async () => {
+    const agent = agentDir();
+    expect(factory(["tasks.import", JSON.stringify({ record: importableRecord() })], { agent }).code).toBe(0);
+    const wait = Bun.spawn(["bun", CLI, "tasks.wait", JSON.stringify({ ids: [ID] })], { cwd: scratch, env: cliEnv(agent), stdout: "pipe", stderr: "pipe" });
+    await Bun.sleep(1000);
+    expect(wait.exitCode).toBeNull();
+    wait.kill("SIGINT");
+    expect(await wait.exited).toBe(1);
+    expect(await new Response(wait.stdout).text()).toBe("");
+    expect(await new Response(wait.stderr).text()).toBe("factory: failed: tasks.wait was aborted\n");
   });
 });

@@ -13,10 +13,11 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } fr
 import { callFactoryTool, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolParameters } from "./factory-tool.ts";
 import { TASK_SESSION_ENV } from "./runner.ts";
 import { errorText } from "./util.ts";
+import manifest from "../package.json" with { type: "json" };
 
 /** The MCP server with the `factory` tool; `cwd` is where a call's repo defaults to. */
 export function factoryMcpServer(options: { cwd: string; taskSession: boolean }): Server {
-  const server = new Server({ name: "agent-factory", version: "1.0.0" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: manifest.name, version: manifest.version }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, () => ({
     tools: [{ name: FACTORY_TOOL_NAME, description: FACTORY_TOOL_DESCRIPTION, inputSchema: factoryToolParameters(options.taskSession) }],
   }));
