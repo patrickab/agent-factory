@@ -161,3 +161,46 @@ once and reused, and anyone in the run can send a scout.
 - **Prompt cache**: a stub written into the middle of a session invalidates the cache after it. Stubbing only ever touches the newest round, so the prefix before it stays
 - **A scout a coder did not wait for** can outlive the coder's turn: the factory holds the turn's end until its scouts reported
 - **memory-store as a dependency** of contracts and scouts: both features refuse cleanly without it
+
+## Settled after scouting
+
+The scouts' facts are in memory-store `agent-factory/autonomous-waves`, `map/*`. Their gaps, ruled on by the supervisor:
+
+### Waves wait for waves
+- The stage is named **`queued`** (`waiting_approve` exists, `waiting` would read like it)
+- `after` is stored in the declaration. A queued wave has no branch and no `base` yet: both are set by an event when it starts. Its branch name is reserved: taken at declaration or at the start, the wave is refused or blocks with that reason
+- A merged wave pokes every queued wave of its repository and target that names it. No polling
+- Names are tags or ids of waves of the same repository and target branch, whoever declared them. A tag carried by several waves means the newest that is not cancelled. Unknown name or the wave itself: refused
+- `waves.remove` of a wave that a queued wave names is refused. `waves.cancel` of it marks the queued wave as one that can never start: reported to the supervisor once, attention in `tasks.wait`, shown by `waves.get`
+- `waves.cancel` and `waves.remove` of a queued wave have no branch to stop or delete
+
+### Contracts
+- `plan` on a wave is the memory-store name (as `agent-factory/autonomous-waves`). `contracts` without `plan` is refused
+- The prefix is added when a task's coder is launched, not stored in the request: the wave log and the reviewer keep the supervisor's text
+- The contract hash lives on the task record. It is compared by the task's runner before each coder turn it starts, the place that has the core
+- A changed contract reaches a task in `running` as a follow-up and one in `waiting_answer` together with its answer. Resting tasks are not woken: the supervisor gets them listed
+- Tests use a fake `memory-store` on `PATH`, as they fake `pi`
+
+### Gates
+- One rerun helper for the three gate loops. No rerun after exit 75, a kill or a timeout
+- `flaky: string[]` (the step's failing test names, or its command when none can be read) on the gate records of tasks and waves
+- `gates.prove` is a record of its own beside waves, with the states `running`, `passed`, `flaky`, `failing`, reported through the same notifier. Its worktree is removed when it ends
+
+### Review per task
+- The setting is named **`reviewEach: true`** on `waves.start` (the boolean `review` keeps its meaning)
+- The reviewer's session: a stable `--session-id` per wave with a fixed working directory and session directory. One process per review, none between reviews
+- Reviews of a wave run in the wave's runner, one after another: a task's pipeline hands its round to it and waits for the verdict
+- Stubbing: the factory appends the `context_edit` lines to the session file before every resume, when no process holds it. That one path is the guarantee and the only implementation. A stub starts with `[reviewed]`, which also tells it from a real result. The first task of the wave proves it against the installed Pi with a real session
+- The request and the contracts are in the prompt, not read by tool, so stubbing every tool result loses nothing
+- Minor findings: a field on the review record, listed by `tasks.get` and `waves.get`. Only blocker and major make a verdict a rejection
+- Rounds: the task's existing `roundsUsed` and `maxRounds`
+- The cached prefix needs the same model, system prompt and tools at every resume: all three are fixed per wave
+
+### Scouts
+- A scout is a `pi -p` child in the caller's working directory with `read`, `grep`, `find`, `ls` and a `map_write` tool (which runs `memory-store apply` on the plan's store and stamps the commit). The store is the `plan` of the caller's task or wave, for a supervisor the `store` it passes
+- The reviewer's scouts always wait. A coder chooses; the end of its turn is held with `agent_before_settle` until its scouts reported
+- A waiting call ends after 15 minutes with what the scout wrote so far. A cancelled caller cancels its scouts
+- Scout records live in their own directory with caller, tokens and cost, and are summed into the caller's task and wave figures also when the scout was killed
+
+### Order of work, corrected
+`src/core.ts`, `src/waves.ts`, `src/agent-view.ts` and `VIEWS.md` are edited by every wave: the waves run one after another, `waves/1` → `gates/1` → `contracts/1` → `scouts/1` → `review/1` → `skill/1`.
