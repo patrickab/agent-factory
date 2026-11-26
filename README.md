@@ -209,6 +209,25 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   every wave it names is `merged`: their runner pokes it, nothing polls. Its branch taken by then: `blocked`
   (`waves.retry` queues it again); a branch of its name taken after the start event, before its first task launched, blocks it too (`infra`). A named wave `rejected` or `blocked` keeps it queued; `waves.cancel` of one makes it a wave that can never start (a `stage`
   event, still `queued`, its `detail` says why; reported once, attention in `tasks.wait`). `waves.remove` of a wave that any wave not yet started names is refused. `waves.add` cannot change `after`; it adds tasks to a queued wave, which stays queued
+- `reviewEach` (default false: one review per wave, as before; the `review` setting keeps its meaning for tasks outside a
+  wave): a task whose round passed its `gates` rests `reviewing` (the factory's turn, not an attention state) and the wave's
+  runner has the wave's reviewer judge that task's diff, one task at a time. Blocker and major findings start the task's
+  next round through its inbox (within `maxRounds`; out of rounds: `blocked`, reason `review`); else the task goes on to
+  `task_gates`, commit and merge. Minor findings never start a round: they are stored on the review (`minors`, listed by
+  `tasks.get` and `waves.get`). A conflict task is reviewed like any task
+- One reviewer session per wave: `--session-id` = the wave's, fixed cwd and `--session-dir`, the same model, prompt and
+  tools at every resume, `PI_CACHE_RETENTION=long`, one process per review. Before each resume the factory appends
+  `context_edit` entries to the session file that replace every earlier review's tool results by a stub starting with
+  `[reviewed]`: no earlier diff stays in context. The diff reaches the reviewer only through `read_diff {paths?}` (the
+  task's diff since the commit it last judged for that task; lockfiles last, large files cut); the request and the wave's
+  contracts (read fresh) are in the prompt
+- The reviewer's tools: `read`, `grep`, `find`, `ls`, `read_diff`, `submit_verdict`, `scout` (always waits), `feedback`
+  (role `reviewer`), `notify_supervisor {text}` (one quiet notice to the wave's origin, the review goes on),
+  `start_fix {title, request}` (adds a `fix:` task to the wave, at most three per wave; then refused, with the hint to
+  use `notify_supervisor`)
+- With `reviewEach`, after `merge_gates` the same reviewer does one pass on how the tasks fit together. Its blocker and
+  major findings become one `fix:` task (stage `building`, then reviewed again); the cap of three used up: `rejected` to
+  the supervisor as before
 - `overrides` are stored with the wave: its tasks start with their `models`, `maxRounds`, `review`, target = the wave
   branch and `merge: auto` (a task merges into the wave branch by itself); `merge` is the wave's own
 - A task's `model` (`"small"` | `"big"`, default `big`) picks which of the wave's two models its coder runs with,

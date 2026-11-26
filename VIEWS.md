@@ -28,7 +28,8 @@ Decisions (user):
   the review's findings · done -> the merged commit and the coder's last message · waiting_answer -> the question
 - A review's result goes through the protocol: a rejection is pushed to the origin session with the findings in the
   message itself (severity, file:line, text). The supervisor decides and creates the fix tasks with `waves.add`; the
-  factory then reviews again by itself. The reviewer never starts tasks
+  factory then reviews again by itself. The reviewer never starts tasks, except with `reviewEach`: there it adds `fix:` tasks itself (at most three per wave) and may send the supervisor one quiet note (`notify_supervisor`)
+- With `reviewEach` a task's review is not pushed: the verdict goes back to the task (a next round or on to the merge); only a rejection of the wave's last pass, a note or a reviewer's `fix:` task reaches the supervisor
 - A merged wave is pushed too and starts a supervisor turn: it is the signal to declare the next wave
 - `tasks.list` / `waves.list` in the agent view show what is not finished, and a count of the rest. No `all` parameter
 - `tasks.diff` in the agent view: the file list with counts
@@ -48,7 +49,7 @@ type TaskView = {
   worktree: string; branch: string
   sessionId: string; sessionPath: string
   createdAt: string; at: string       // at = last state change
-  state: "running" | "merging" | "waiting_answer" | "waiting_approve" | "blocked" | "done" | "cancelled"
+  state: "running" | "reviewing" | "merging" | "waiting_answer" | "waiting_approve" | "blocked" | "done" | "cancelled"
   round: number
   reason: string | null               // why it is in this state: "gates", "conflict", "review_rejected", "merged", ...
   question: string | null             // only in waiting_answer
