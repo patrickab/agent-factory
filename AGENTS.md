@@ -1,7 +1,6 @@
 # agent-factory
 
-What the factory is and how it works: `README.md`. Its views: `VIEWS.md`. Open work: `plan-autonomous-waves.md`,
-`backlog.md`. This file holds the rules that every change keeps.
+What the factory is and how it works: `README.md`. Its views: `VIEWS.md`. Open work: `backlog.md`. This file holds the rules that every change keeps.
 
 ## Design rules
 
@@ -61,3 +60,10 @@ What the factory is and how it works: `README.md`. Its views: `VIEWS.md`. Open w
 - Tests fake `pi`, git remotes, `memory-store` and time through the kits; none reaches a model or the network. Each
   test uses its own ids: a timed-out test must not reach into the next
 - Gates: `bun run types`, `bun scripts/changed-tests.ts` (`--all` for the whole suite)
+- Modules live flat in `src/` (and `src/pi/`): the deployed plugin is copied without other subdirectories
+- Run a single test file with `env bun test <file>`: an output filter on some machines rewrites plain `bun test` output
+  to a wrong summary
+- A process that imports the core by path (gigachad-bot's pi-host) keeps the modules it loaded: after a merge into the
+  default branch restart it, or it mixes old and new modules ("Export named ... not found")
+- A new task state, event kind or notice kind names every list that enumerates them (`MARKED_STATES`, the resting and
+  attention states, the notice keys, the views) in its contract and updates each
