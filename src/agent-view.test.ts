@@ -255,6 +255,8 @@ const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
       done: [{ wave: WAVE_ID, tag: "factory/w1", key: "docs", task: "4ae7325b-2222-4000-8000-000000000000" }],
     },
   },
+  "tasks.update": { params: { id: "4ae7325b", request: "the new request" }, result: { wave: wave(), key: "docs", changed: true, delivery: "pending" } },
+  "waves.update": { params: { id: WAVE_ID, request: "new instructions" }, result: { wave: wave(), changed: true } },
 };
 
 const FORBIDDEN = [/\/home/, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, new RegExp(SESSION.slice(0, 13)), /SECRET-REQUEST/, /secret patch/];

@@ -58,7 +58,7 @@ describe("waves", () => {
     await until(async () => (await getWave(wave.id)).tasks.filter((task) => task.taskId !== null).length === 2);
     wave = await getWave(wave.id);
     expect([wave.running, wave.interrupted]).toEqual([true, false]);
-    expect(taskOf(wave, "b")).toEqual({ key: "b", title: "Task b", after: ["a"], model: "big", taskId: null, sessionId: null, state: "pending", usage: null });
+    expect(taskOf(wave, "b")).toEqual({ key: "b", title: "Task b", after: ["a"], model: "big", taskId: null, sessionId: null, state: "pending", usage: null, id: expect.stringMatching(/^[0-9a-f-]{36}$/) });
     for (const key of ["a", "c"]) {
       const task = taskOf(wave, key);
       const record = await recordById(task.taskId);
@@ -74,7 +74,7 @@ describe("waves", () => {
     const file = await readWave(wave.id);
     // Stored resolved: the overrides over the repository's stored settings (none here) over the defaults.
     expect(file.declaration.overrides).toEqual({ ...overrides, models: { ...overrides.models, coder: "a/b" }, review: false, remote: false });
-    expect(file.events.map((event) => event.kind)).toEqual(["tasks", "task", "task"]);
+    expect(file.events.map((event) => event.kind)).toEqual(["tasks", "launch", "task", "launch", "task"]);
     expect(prompts().filter((line) => line === "prompt /factory start")).toHaveLength(2);
     // The same tag on the same target: its branch exists.
     await expectError(startWave(repo, [spec("x")]), "refused", "main-factory-w1 exists already");
@@ -110,7 +110,7 @@ describe("waves", () => {
     await until(async () => (await liveWaveRunners(wave.id)).length === 0);
     const done = await getWave(wave.id);
     expect([done.counts, done.merge, done.running, done.interrupted]).toEqual([{ total: 2, done: 2 }, null, false, false]);
-    expect((await readWave(wave.id)).events.map((event) => event.kind)).toEqual(["tasks", "task", "task", "stage", "stage"]);
+    expect((await readWave(wave.id)).events.map((event) => event.kind)).toEqual(["tasks", "launch", "task", "launch", "task", "stage", "stage"]);
   }, 30_000);
 
   test("waves.add to a rejected wave returns it to building; after may name existing keys", async () => {
@@ -131,7 +131,7 @@ describe("waves", () => {
     expect(taskOf(await getWave(wave.id), "fix").taskId).toBeNull();
     await stopWaveRunners(wave.id);
     const kinds = (await readWave(wave.id)).events.map((event) => event.kind);
-    expect(kinds).toEqual(["tasks", "task", "stage", "tasks", "stage", "task"]);
+    expect(kinds).toEqual(["tasks", "launch", "task", "stage", "tasks", "stage", "launch", "task"]);
     await expectError(callAction("waves.add", { id: wave.id, tasks: [spec("a")] }), "invalid", "task key a is not unique");
     await expectError(callAction("waves.add", { id: wave.id, tasks: [spec("x", ["nope"])] }), "invalid", "waits for nope");
     await appendWaveEvent(wave.id, { kind: "stage", stage: "merged", reason: null });
@@ -337,7 +337,7 @@ describe("waves", () => {
     expect(await listTasks()).toEqual([]);
     expect(git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
     expect(git(repo, "branch", "--format=%(refname:short)")).toBe("main\nmain-factory-w9");
-    expect((await readWave(id)).events.map((event) => event.kind)).toEqual(["tasks"]);
+    expect((await readWave(id)).events.map((event) => event.kind)).toEqual(["tasks", "launch"]);
     expect(prompts()).toEqual([]);
   });
 
@@ -447,7 +447,7 @@ describe("waves", () => {
       expect(git(repo, "show", "main-factory-w3:1.txt")).toBe("1");
       const record = await recordById(taskOf(started, "a").taskId);
       expect(git(record.worktree, "show", "HEAD:1.txt")).toBe("1");
-      expect((await readWave(queued.id)).events.map((event) => event.kind)).toEqual(["tasks", "start", "task"]);
+      expect((await readWave(queued.id)).events.map((event) => event.kind)).toEqual(["tasks", "start", "launch", "task"]);
     }, 40_000);
 
     test("after two: one merged keeps it queued, the second starts it with both in its branch", async () => {
@@ -521,7 +521,7 @@ describe("waves", () => {
       await pokeWave(id);
       await until(async () => taskOf(await getWave(id), "a").taskId !== null, 20_000);
       expect(git(repo, "rev-parse", "refs/heads/main-factory-w3")).toBe(main);
-      expect((await readWave(id)).events.map((event) => event.kind)).toEqual(["tasks", "start", "task"]);
+      expect((await readWave(id)).events.map((event) => event.kind)).toEqual(["tasks", "start", "launch", "task"]);
     }, 30_000);
 
     test("its branch taken by its start: blocked with that reason; waves.retry queues it again and it starts once the name is free", async () => {

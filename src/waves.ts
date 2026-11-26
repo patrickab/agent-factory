@@ -38,8 +38,11 @@ export type Usage = { input: number; output: number; cacheRead: number; cacheWri
  */
 export type WaveTaskSpec = { key: string; title: string; request: string; after?: string[]; model?: ModelSize };
 
-/** A task spec as the `tasks` event stores it; without `model` (old logs too) the task runs with the `big` model. */
-export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: ModelSize };
+/**
+ * A task spec as the `tasks` event stores it; without `model` (old logs too) the task runs with the `big` model. `id`:
+ * the task's id, given when it is declared and taken by its launch; absent in logs written before, then the launch makes one.
+ */
+export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: ModelSize; id?: string };
 
 export const WAVE_STAGES: readonly WaveStage[] = ["queued", "building", "reviewing", "rejected", "merging", "waiting_approve", "merged", "blocked", "cancelled"];
 /** `queued` too: no runner drives a wave that waits for others, a merge of one of them pokes it (`queuedWaves`). */
@@ -108,7 +111,17 @@ export type WaveEvent =
   | ({ kind: "merge" } & WaveMerge)
   | ({ at: string; kind: "remote" } & Partial<WaveRemote>)
   /** `contracts.apply` changed the contract `name` (its facts `paths`); `done`: the wave's done tasks, reported to the supervisor. */
-  | { at: string; kind: "contract"; name: string; paths: string[]; done: string[] };
+  | { at: string; kind: "contract"; name: string; paths: string[]; done: string[] }
+  /**
+   * `tasks.update` (with `key`) or `waves.update` (without): the fields given replace the task's spec or the wave's
+   * title and request. A started task's `after` and `model` stay what it started with.
+   */
+  | { at: string; kind: "update"; key?: string; title?: string; request?: string; after?: string[]; model?: ModelSize }
+  /** The runner launches the pending task `key` with its spec as folded now; its `task` event follows (or a `stage` event). */
+  | { at: string; kind: "launch"; key: string };
+
+/** One `update` event as `waves.get` shows it: the task's `key` (null: the wave's own) and the fields it changed. */
+export type WaveUpdate = { at: string; key: string | null; fields: string[] };
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 /** An event to append; `at` defaults to now. */
@@ -132,7 +145,11 @@ export type FoldedTask = {
   model: ModelSize;
   taskId: string | null;
   sessionId: string | null;
+  /** The id declared with its spec (absent in old logs): the started task's id too. */
+  id?: string;
   dropped?: boolean;
+  /** The runner launches it (a `launch` event), its `task` event has not come yet. */
+  launching?: boolean;
 };
 
 /** Everything of a `WaveView` that needs no task state, and the last stage event's `detail`. */
@@ -149,6 +166,8 @@ export interface WaveFold extends WaveDeclaration {
   gates: WaveGate[];
   merge: WaveMerge | null;
   remote: WaveRemote | null;
+  /** The `update` events, oldest first; absent when none (a log without them folds as before). */
+  updates?: WaveUpdate[];
 }
 
 /** A wave that has its branch: declared without `after`, or started (`start` event). */
@@ -169,12 +188,15 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   detail: string | null;
   running: boolean;
   interrupted: boolean;
-  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null }[];
+  /** `id`: the task's id, a pending one's too (declared with it); absent for a pending task of an old log. */
+  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null; id?: string }[];
   counts: { total: number; done: number };
   reviews: WaveReview[];
   gates: WaveGate[];
   merge: WaveMerge | null;
   remote: WaveRemote | null;
+  /** What `tasks.update` and `waves.update` changed, oldest first; absent when nothing did. */
+  updates?: WaveUpdate[];
   usage: Usage | null;
   /** The part of `usage.cost` the wave's and its tasks' scouts spent. Always set by the core. */
   scoutingCost?: number;
@@ -298,7 +320,8 @@ function parseSpec(raw: unknown): WaveTaskEntry {
   if (!Array.isArray(after) || !after.every((key) => typeof key === "string")) throw new Error("after must be an array of keys");
   const model = strOrNull(raw, "model");
   if (model !== null && !MODEL_SIZES.includes(model as ModelSize)) throw new Error('model must be "small", "big" or null');
-  return { key: str(raw, "key"), title: str(raw, "title"), request: str(raw, "request", false), after: [...after], ...(model === null ? {} : { model: model as ModelSize }) };
+  const id = strOrNull(raw, "id");
+  return { key: str(raw, "key"), title: str(raw, "title"), request: str(raw, "request", false), after: [...after], ...(model === null ? {} : { model: model as ModelSize }), ...(id === null ? {} : { id }) };
 }
 
 function parseFinding(raw: unknown): WaveFinding {
@@ -371,6 +394,18 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
     }
     case "contract":
       return { at, kind, name: str(raw, "name"), paths: strings(raw, "paths") ?? [], done: strings(raw, "done") ?? [] };
+    case "update": {
+      const event: WaveEvent = { at, kind };
+      if (raw.key !== undefined && raw.key !== null) event.key = str(raw, "key");
+      if (raw.title !== undefined && raw.title !== null) event.title = str(raw, "title");
+      if (raw.request !== undefined && raw.request !== null) event.request = str(raw, "request");
+      const after = strings(raw, "after");
+      if (after !== undefined) event.after = after;
+      if (raw.model !== undefined && raw.model !== null) event.model = oneOf(raw, "model", MODEL_SIZES);
+      return event;
+    }
+    case "launch":
+      return { at, kind, key: str(raw, "key") };
     default:
       throw new Error(`kind ${JSON.stringify(kind)} is no wave event`);
   }
@@ -544,7 +579,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         for (const spec of event.tasks) {
           // Validation keeps keys unique; a repeated key in a hand-edited log keeps its first declaration.
           if (fold.tasks.some((task) => task.key === spec.key)) continue;
-          fold.tasks.push({ key: spec.key, title: spec.title, request: spec.request, after: [...spec.after], model: spec.model ?? "big", taskId: null, sessionId: null });
+          fold.tasks.push({ key: spec.key, title: spec.title, request: spec.request, after: [...spec.after], model: spec.model ?? "big", taskId: null, sessionId: null, ...(spec.id === undefined ? {} : { id: spec.id }) });
         }
         break;
       case "task": {
@@ -552,13 +587,24 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         if (task) {
           task.taskId = event.taskId;
           task.sessionId = event.sessionId;
+          delete task.launching;
         }
         break;
       }
+      case "launch": {
+        const task = fold.tasks.find((candidate) => candidate.key === event.key);
+        if (task !== undefined && task.taskId === null) task.launching = true;
+        break;
+      }
+      case "update":
+        foldUpdate(fold, event);
+        break;
       case "stage":
         fold.stage = event.stage;
         fold.reason = event.stage === "blocked" ? event.reason : null;
         fold.detail = event.detail ?? null;
+        // A launch the runner did not record ended with it (failed, stopped): the task is plainly pending again.
+        for (const task of fold.tasks) delete task.launching;
         break;
       case "start":
         fold.branch = event.branch;
@@ -594,6 +640,39 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
     }
   }
   return fold;
+}
+
+/** Applies an `update` event: to the task `key` (a started one keeps its `after` and `model`), else to the wave. */
+function foldUpdate(fold: WaveFold, event: Extract<WaveEvent, { kind: "update" }>): void {
+  const fields: string[] = [];
+  if (event.key === undefined) {
+    if (event.title !== undefined) fields.push("title");
+    if (event.request !== undefined) fields.push("request");
+    fold.title = event.title ?? fold.title;
+    fold.request = event.request ?? fold.request;
+  } else {
+    const task = fold.tasks.find((candidate) => candidate.key === event.key);
+    if (task === undefined) return;
+    // `tasks.update` gives a task being launched no `after` or `model` (unless its launch died with its runner).
+    const pending = task.taskId === null;
+    if (event.title !== undefined) {
+      task.title = event.title;
+      fields.push("title");
+    }
+    if (event.request !== undefined) {
+      task.request = event.request;
+      fields.push("request");
+    }
+    if (pending && event.after !== undefined) {
+      task.after = [...event.after];
+      fields.push("after");
+    }
+    if (pending && event.model !== undefined) {
+      task.model = event.model;
+      fields.push("model");
+    }
+  }
+  (fold.updates ??= []).push({ at: event.at, key: event.key ?? null, fields });
 }
 
 /** Stages that keep what came before them: a wave blocked or cancelled is as far as it was when that happened. */

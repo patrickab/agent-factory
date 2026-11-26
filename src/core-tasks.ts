@@ -112,11 +112,27 @@ export async function findTask(id: unknown): Promise<TaskRecord> {
   const exact = tasks.find((task) => task.id === wanted);
   if (exact) return exact;
   const matches = tasks.filter((task) => task.id.startsWith(wanted));
-  if (matches.length === 0) throw new FactoryError("not_found", `no task has an id starting with "${wanted}"`);
+  if (matches.length === 0) {
+    const pending = await pendingWaveTask(wanted);
+    if (pending !== undefined) {
+      throw new FactoryError("refused", `task ${pending.id.slice(0, SHORT_ID_CHARS)} (${pending.key} of wave ${pending.wave.slice(0, SHORT_ID_CHARS)}) has not started yet: tasks.update changes it, waves.get shows it`);
+    }
+    throw new FactoryError("not_found", `no task has an id starting with "${wanted}"`);
+  }
   if (matches.length > 1) {
     throw new FactoryError("invalid", `"${wanted}" matches ${matches.length} tasks (${matches.map((task) => task.id).join(", ")}), give more of the id`);
   }
   return matches[0];
+}
+
+/** The pending task of a wave whose declared id is `wanted` or starts with it (the first such), else undefined. */
+export async function pendingWaveTask(wanted: string): Promise<{ id: string; key: string; wave: string } | undefined> {
+  for (const file of await listWaves()) {
+    for (const task of foldWave(file.declaration, file.events).tasks) {
+      if (task.taskId === null && task.id?.startsWith(wanted)) return { id: task.id, key: task.key, wave: file.declaration.id };
+    }
+  }
+  return undefined;
 }
 
 /** The session file's entries, a torn or invalid line skipped. */

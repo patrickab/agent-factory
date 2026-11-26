@@ -12,6 +12,7 @@
 import { existsSync } from "node:fs";
 import type { ActionName } from "./core.ts";
 import { waveContracts } from "./core-contracts.ts";
+import { launchSpec, recordStart } from "./core-plan.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, requireFactoryModels, wantedModels } from "./core-settings.ts";
 import { cancelTask, cents, droppedWork, FINAL_STATES, rawScoutingCost, rawUsage, removable, requireRemovable, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
@@ -44,12 +45,14 @@ import {
   waveCounts,
   waveStarted,
   waveTaskState,
+  type FoldedTask,
   type NewWaveEvent,
   type WaveDeclaration,
   type WaveFile,
   type WaveFold,
   type WaveOverrides,
   type WaveStage,
+  type WaveTaskEntry,
   type WaveView,
 } from "./waves.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
@@ -60,6 +63,11 @@ export type WaveActionName = "waves.add" | "waves.retry" | "waves.approve" | "wa
 
 /** Stages a wave takes no tasks in: `merging` too, whose rebased branch is in the merge queue. */
 const WAVE_ADD_REFUSED: readonly WaveStage[] = ["merged", "cancelled", "merging"];
+
+/** The specs with their tasks' ids: given when a task is declared, its launch takes it. */
+function withIds(specs: WaveTaskEntry[]): WaveTaskEntry[] {
+  return specs.map((spec) => ({ ...spec, id: crypto.randomUUID() }));
+}
 
 /** The wave branch of `tag` on `target`: `<target>-<tag with "/" as "-">`. */
 export function waveBranchName(target: string, tag: string): string {
@@ -283,7 +291,8 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[]): Promise<Wave
     const taskView = views.get(task.key);
     const taskUsage = taskView?.usage ?? null;
     usage = addUsage(usage, taskView ? rawUsage(taskView) : null);
-    return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: taskUsage };
+    const id = task.taskId ?? task.id;
+    return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: taskUsage, ...(id === undefined ? {} : { id }) };
   });
   for (const review of fold.reviews) usage = addUsage(usage, review.usage);
   // The wave's own scouts (its reviewer's), then its tasks' (in their usage already).
@@ -364,23 +373,35 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
   const started: string[] = [];
   for (const key of startableKeys(fold, states)) {
     if (signal?.aborted) break;
-    const task = fold.tasks.find((candidate) => candidate.key === key);
-    if (task === undefined) continue;
-    const orphan = orphans.findIndex((record) => record.title === task.title);
+    const found = fold.tasks.find((candidate) => candidate.key === key);
+    if (found === undefined) continue;
+    // A declared id names its record; else (an old log's spec, a record of an older launch) its title does.
+    const byId = found.id === undefined ? -1 : orphans.findIndex((record) => record.id === found.id);
+    const orphan = byId >= 0 ? byId : orphans.findIndex((record) => record.title === found.title);
     let record: TaskRecord;
+    // Launched with its spec as the log holds it now (`tasks.update` may have changed it since the fold above).
+    let task: Pick<FoldedTask, "title" | "request" | "model"> = found;
     if (orphan >= 0) {
       [record] = orphans.splice(orphan, 1);
     } else {
+      const spec = await launchSpec(id, key, found.after);
+      if (spec === null) continue;
+      task = spec;
+      if (spec.model === "small" && models.small === undefined) {
+        const small = await defaultSmallModel();
+        if (small !== undefined) models.small = small;
+      }
       try {
         // The task's size picks its coder's model of the wave's; the reviewer's stays the wave's.
-        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, size: task.model, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
+        record = await launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model, ...(spec.id === undefined ? {} : { id: spec.id }), tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
         throw new FactoryError(error instanceof LaunchRefusedError ? "refused" : "failed", why);
       }
     }
-    await appendWaveEvent(id, { kind: "task", key, taskId: record.id, sessionId: record.sessionId });
+    // A `tasks.update` between the launch and this event reaches the coder as a follow-up.
+    await recordStart(id, key, task, record);
     started.push(key);
   }
   return started;
@@ -395,7 +416,7 @@ export const WAVE_HANDLERS = {
     if (title === undefined) throw new FactoryError("invalid", "waves.start needs a title that is not empty");
     if (request === undefined) throw new FactoryError("invalid", "waves.start needs a request (the reviewer's instructions) that is not empty");
     if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "waves.start: plan must not be empty");
-    const specs = validateTaskSpecs(params.tasks);
+    const specs = withIds(validateTaskSpecs(params.tasks));
     const contracts = await waveContracts(params.plan as string | undefined, params.contracts);
     let target: string | undefined;
     let overrides: WaveOverrides;
@@ -476,7 +497,7 @@ export const WAVE_HANDLERS = {
     await busyAsFactoryError(() =>
       appendWaveEvents(id, (fold) => {
         if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage}, it takes no more tasks`);
-        const tasks = validateTaskSpecs(params.tasks, fold.tasks);
+        const tasks = withIds(validateTaskSpecs(params.tasks, fold.tasks));
         // The supervisor acts on a wave whose pending tasks can never start: they leave it (count as cancelled).
         const dropped = unreachableKeys(fold, states);
         const events: NewWaveEvent[] = [{ kind: "tasks", tasks, ...(dropped.length > 0 ? { dropped } : {}) }];

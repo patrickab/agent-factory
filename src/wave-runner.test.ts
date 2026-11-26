@@ -247,6 +247,26 @@ describe("the wave runner", () => {
     expect(readFileSync(promptLog, "utf8")).not.toContain("add b");
   });
 
+  test("a review after waves.update reads the new title and instructions; one that runs keeps the text it started with", async () => {
+    await waveRepo();
+    process.env.FAKE_REVIEW_SLEEP = "1500";
+    process.env.FAKE_VERDICT = "reject";
+    const running = runWave(WAVE);
+    const requestFile = (round: number) => join(waveReviewsDir(WAVE), `round-${round}.request.md`);
+    await until(() => existsSync(promptLog));
+    await callAction("waves.update", { id: WAVE, title: "Wave renamed", request: "Check the docs too." });
+    expect(await running).toBe(0);
+    expect((await getWave()).stage).toBe("rejected");
+    expect(readFileSync(requestFile(1), "utf8")).toStartWith("# Wave one\n\n## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n");
+    // The supervisor acts on the rejection: the next review reads the new text.
+    delete process.env.FAKE_REVIEW_SLEEP;
+    delete process.env.FAKE_VERDICT;
+    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
+    expect(await runWave(WAVE)).toBe(0);
+    expect(readFileSync(requestFile(2), "utf8")).toStartWith("# Wave renamed\n\n## Instructions from the supervisor\n\nCheck the docs too.\n");
+    expect((await getWave()).updates).toEqual([{ at: expect.any(String), key: null, fields: ["title", "request"] }]);
+  }, 30_000);
+
   test("merge review: an approved wave waits for approve, its worktree removed", async () => {
     const repo = await waveRepo(undefined, "done", { merge: "review" });
     await runWave(WAVE);

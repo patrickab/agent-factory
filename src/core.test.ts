@@ -53,6 +53,8 @@ describe("callAction", () => {
         "gates.prove",
         "gates.get",
         "contracts.apply",
+        "tasks.update",
+        "waves.update",
       ].sort(),
     );
     expect(ACTIONS["tasks.get"].mutates).toBe(false);

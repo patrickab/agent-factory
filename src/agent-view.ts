@@ -220,7 +220,9 @@ export function unreachableTasks(tasks: readonly WaveTask[]): string[] {
 function waveTasksLine(view: WaveView): string {
   if (view.tasks.length === 0) return "  tasks: none";
   const items = view.tasks.map((task) => {
-    const id = task.taskId !== null && TASK_ATTENTION.includes(task.state) ? ` (${short(task.taskId)})` : "";
+    // A pending task's id (declared with it) is what tasks.update takes.
+    const shown = task.taskId !== null && TASK_ATTENTION.includes(task.state) ? task.taskId : task.state === "pending" ? task.id : undefined;
+    const id = shown === undefined ? "" : ` (${short(shown)})`;
     return `${task.key} ${task.state}${id}`;
   });
   return `  tasks: ${items.join(" · ")}`;
@@ -316,11 +318,25 @@ function feedbackLines(view: WaveView): string[] {
   ];
 }
 
+/** `updated: docs (request), wave (request)`: what `tasks.update` and `waves.update` changed, each once, last change last. */
+function updateLines(view: WaveView): string[] {
+  const changed = new Map<string, Set<string>>();
+  for (const update of view.updates ?? []) {
+    const name = update.key ?? "wave";
+    const fields = changed.get(name) ?? new Set<string>();
+    changed.delete(name);
+    for (const field of update.fields) fields.add(field);
+    changed.set(name, fields);
+  }
+  if (changed.size === 0) return [];
+  return [`  updated: ${[...changed].map(([name, fields]) => `${name} (${[...fields].join(", ")})`).join(", ")}`];
+}
+
 /** One wave: header, title, the lines of its stage, `next:`. Exported for notifications. */
 export function waveBlock(view: WaveView): string {
   const next = view.actions.length === 0 ? "next: none, it runs" : `next: ${view.actions.join(", ")}`;
   const flaky = [...new Set(view.gates.flatMap((gate) => gate.flaky ?? []))];
-  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...flakyLine(flaky), ...feedbackLines(view), `  ${next}`].join("\n"));
+  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...flakyLine(flaky), ...updateLines(view), ...feedbackLines(view), `  ${next}`].join("\n"));
 }
 
 function waveList(waves: WaveView[]): string {
@@ -550,6 +566,12 @@ const RENDERERS: Record<string, Renderer> = {
   ...SCOUT_RENDERERS,
   "gates.prove": (_params, result: { proof: ProofView }) => `started ${proofHeader(result.proof)}`,
   "gates.get": (_params, result: { proof: ProofView }) => proofBlock(result.proof),
+  "tasks.update": (_params, result: { wave: WaveView; key: string; changed: boolean; delivery: string }) => {
+    if (!result.changed) return waveReceipt("", result.wave, [`task ${result.key}: nothing changed`]);
+    const told: Record<string, string> = { pending: "starts with it", sent: "its coder was told", kept: "its coder is told at its next turn", starting: "its coder is told as it starts" };
+    return waveReceipt("", result.wave, [`task ${result.key} updated, ${told[result.delivery] ?? result.delivery}`]);
+  },
+  "waves.update": (_params, result: { wave: WaveView; changed: boolean }) => waveReceipt("", result.wave, [result.changed ? "updated, the next review reads it" : "nothing changed"]),
   "contracts.apply": (_params, result: { name: string; changed: string[]; notified: ContractTask[]; kept: ContractTask[]; done: ContractTask[] }) => {
     const keys = (tasks: ContractTask[]) => tasks.map((task) => `${task.tag}:${task.key}`).join(", ");
     if (result.changed.length === 0) return `contract ${result.name}: nothing changed`;

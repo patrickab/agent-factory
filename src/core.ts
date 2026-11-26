@@ -29,6 +29,7 @@
  */
 import { FactoryError, oneLine, WAIT_TIMEOUT_MS, type Handler, type Params } from "./core-shared.ts";
 import { CONTRACT_HANDLERS } from "./core-contracts.ts";
+import { PLAN_HANDLERS } from "./core-plan.ts";
 import { SETTINGS_HANDLERS } from "./core-settings.ts";
 import { TASK_HANDLERS } from "./core-tasks.ts";
 import { WAIT_HANDLERS } from "./core-wait.ts";
@@ -296,6 +297,24 @@ export const ACTIONS = {
     ["store", "name", "op"],
     true,
   ),
+  "tasks.update": spec(
+    "Change a task of a wave: a pending one's title, request, after (keys of the wave, no cycle) and model; a running one's (or waiting_answer, blocked) title and request only, its coder is told old and new. Refused when done, cancelled or merging: add a task with waves.add. Answers {wave, key, changed, delivery}",
+    {
+      id: { ...ID, description: "The task id or a unique prefix of it, a pending task's too (waves.get shows it)" },
+      title: { type: "string" },
+      request: { type: "string", description: "The full, self-contained task for the coder" },
+      after: { type: "array", items: { type: "string" }, description: "Keys of the wave this task waits for (pending only)" },
+      model: { type: "string", enum: ["small", "big"], description: "Which of the wave's models its coder runs with (pending only)" },
+    },
+    ["id"],
+    true,
+  ),
+  "waves.update": spec(
+    "Change a wave's title or its reviewer's instructions (request) before it is merged or cancelled; a review that runs keeps the text it started with. Answers {wave, changed}",
+    { id: WAVE_ID, title: { type: "string" }, request: { type: "string", description: "The reviewer's instructions for the wave's whole diff" } },
+    ["id"],
+    true,
+  ),
 } satisfies Record<string, ActionSpec>;
 
 export type ActionName = keyof typeof ACTIONS;
@@ -353,7 +372,7 @@ let handlers: Record<ActionName, Handler> | undefined;
  * module, so an area module loaded first may not have finished when this one runs.
  */
 function handlersByName(): Record<ActionName, Handler> {
-  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS, ...SCOUT_HANDLERS, ...PROOF_HANDLERS, ...CONTRACT_HANDLERS };
+  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS, ...SCOUT_HANDLERS, ...PROOF_HANDLERS, ...CONTRACT_HANDLERS, ...PLAN_HANDLERS };
   return handlers;
 }
 

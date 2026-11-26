@@ -158,6 +158,8 @@ export interface LaunchInput {
   size?: ModelSize;
   /** The wave the task belongs to: only `waves.start`/`waves.add` (the scheduler) give one, never `tasks.start`. */
   wave?: string;
+  /** The task's id, declared with a wave's task; default a new one. */
+  id?: string;
   /** The Pi session that starts the task (`TaskRecord.origin`). */
   origin?: string | null;
   /** The wave's contracts (in the memory-store `plan`): read now, named in the coder's first message, stamped on the record. */
@@ -194,7 +196,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
   }
   const contracts = input.contracts !== undefined && input.contracts.length > 0 && input.plan ? await contractsForLaunch(input.plan, input.contracts) : undefined;
 
-  const id = crypto.randomUUID();
+  const id = input.id ?? crypto.randomUUID();
   const name = `${slug(input.title)}-${id.slice(0, 8)}`;
   const commands = new CommandRunner();
   const abort = () => commands.cancel();
