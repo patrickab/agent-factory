@@ -389,6 +389,17 @@ describe("nothing piles up", () => {
     expect(existsSync(syncLogPath(a.id))).toBe(false);
   });
 
+  test("the due lines a passed round keeps keep their `at`", async () => {
+    const { repo, branch, wave, a } = await synced();
+    const c = await runningTask(repo, wave, branch, []);
+    write(c.worktree, "other.ts", "by c\n");
+    await merge(c, branch, "feat: c");
+    const due = readFileSync(syncLogPath(a.id), "utf8").trim().split("\n").at(-1) ?? "";
+    expect(JSON.parse(due).at).toEqual(expect.any(String));
+    await syncRoundPassed(runCommand, a.worktree, a.id);
+    expect(readFileSync(syncLogPath(a.id), "utf8")).toBe(`${due}\n`);
+  });
+
   test("a removed task takes its sync log and snapshot ref with it", async () => {
     const { repo, a } = await synced();
     await deleteTask(a);

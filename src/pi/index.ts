@@ -117,7 +117,8 @@ function isMergedTask(snapshot: Snapshot): boolean {
 /** `scoutCore`: how the `scout` tool reaches the core, for tests; Pi passes nothing. */
 export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; scoutPollMs?: number } = {}) {
   const session = newTaskSession();
-  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, holds: () => session.snapshot?.state === "running", core: testing.scoutCore, pollMs: testing.scoutPollMs });
+  // A turn end with the commit message ask open waits for no scout (`agent_before_settle`): a scout then is not owed.
+  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, holds: () => session.snapshot?.state === "running" && commitAsk === undefined, core: testing.scoutCore, pollMs: testing.scoutPollMs });
   const cards = registerCardRenderers(pi);
   registerFactoryTool(pi, scouts, cards);
   registerScoutTool(pi, scouts);

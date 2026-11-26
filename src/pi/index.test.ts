@@ -176,7 +176,9 @@ describe("the commit message ask", () => {
     writeFileSync(join(worktree, "task.txt"), "done\n");
     expect(await pi.boundary()).toBe(true);
     expect(pi.of("factory-commit-ask")).toHaveLength(1);
-    await pi.tool("scout", { concern: "c" });
+    const call = await pi.tool("scout", { concern: "c" });
+    // The ask's turn end waits for no scout: its report is not promised before it.
+    expect(call.content[0].text).toContain("read its report with scouts.get");
     return { worktree, pi };
   };
 
