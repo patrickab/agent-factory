@@ -6,11 +6,12 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { REVIEWER_FIX_CAP } from "./core-waves.ts";
+import { REVIEWER_FIX_CAP, reviewerFixEvents } from "./core-waves.ts";
 import { caseDir, fakeBin, git, makeRepo, RUN, scratch, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { listTasks, writeTask, type TaskRecord } from "./tasks.ts";
 import { pokeWave } from "./wave-poke.ts";
-import { appendWaveEvent, createWave, foldWave, readWave } from "./waves.ts";
+import { afterFit } from "./wave-runner.ts";
+import { appendWaveEvent, createWave, foldWave, readWave, type StartedWaveFold } from "./waves.ts";
 
 useCoreFixture();
 
@@ -93,6 +94,8 @@ describe("the fit pass of a reviewEach wave", () => {
     expect(call!.args.at(-1)).toContain("fit together");
     expect(call!.args.at(-1)).toContain("- b: Add b");
     expect(call!.task).toBeNull();
+    // The same tools as every task's review (the prompt cache): `feedback` there is the wave's.
+    expect(call!.args[call!.args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,read_diff,scout,feedback,notify_supervisor,start_fix,submit_verdict");
     const diff = JSON.parse(readFileSync(call!.diff!, "utf8")) as { paths: string[] };
     expect(diff.paths).toEqual(["a.txt", "b.txt"]);
     const done = await fold();
@@ -131,6 +134,30 @@ describe("the fit pass of a reviewEach wave", () => {
     expect(rejected.tasks.map((task) => task.key)).toEqual(["a", ...fixes]);
     expect(rejected.fixes).toBe(REVIEWER_FIX_CAP);
     expect(git(repo, "rev-parse", "main")).toBe(main);
+  }, 60_000);
+
+  test("the fix task is chosen from the wave's log as it is when the stage moves: no duplicate key, no fix past the cap", async () => {
+    await doneWave(["a"]);
+    const before = (await fold()) as StartedWaveFold;
+    const event: Parameters<typeof afterFit>[3] = { kind: "review", round: 1, sessionId: null, model: null, verdict: "rejected", status: "ok", findings: [{ severity: "major", file: "a.txt", line: null, text: "x" }], usage: null, wallMs: 0 };
+    // A supervisor's task keyed `fix-1` lands before the pass: the reviewer's fix is fix-2.
+    await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "fix-1", title: "fix: by hand", request: "r", after: [] }] });
+    const withSupervisorFix = (await fold()) as StartedWaveFold;
+    const choice = afterFit(withSupervisorFix, withSupervisorFix, 1, event);
+    expect(choice.detail).toEndWith("task fix-2 fixes it");
+    expect(choice.events.flatMap((e) => (e.kind === "tasks" ? e.tasks.map((task) => task.key) : []))).toEqual(["fix-2"]);
+    // The fix slots used up meanwhile: rejected, no fourth fix.
+    for (let n = 0; n < REVIEWER_FIX_CAP; n++) {
+      const added = reviewerFixEvents(await fold(), { title: `fix ${n}`, request: "r" })!;
+      for (const added_ of added.events) await appendWaveEvent(WAVE, added_);
+    }
+    const full = await fold();
+    expect(full.fixes).toBe(REVIEWER_FIX_CAP);
+    expect(afterFit(full as StartedWaveFold, full, 1, event).to).toBe("rejected");
+    // Tasks added since the pass started (here every fix) build: none is keyed twice.
+    const late = afterFit(before, full, 1, event);
+    expect(late.to).toBe("building");
+    expect(late.events).toEqual([event]);
   }, 60_000);
 });
 

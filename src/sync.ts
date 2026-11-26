@@ -4,7 +4,7 @@
  *
  * - Marks: when a task merges into its wave's branch (`taskLanded`, from `merge.ts`), and when a wave merges into its
  *   target (`waveLanded`, from `wave-runner.ts`), every task below that branch in `running`, `waiting_answer`,
- *   `merging` or `waiting_approve` (`MARKED_STATES`: a coder turn may still come) gets a due mark in its sync log
+ *   `merging`, `waiting_approve` or `reviewing` (`MARKED_STATES`: a coder turn may still come) gets a due mark in its sync log
  *   `<factoryHome>/sync/<task id>.jsonl` (append-only: `due` lines, and `done` lines that consume them). For a wave's
  *   merge, the branch of every other `building` wave on the same target is rebased onto it first (`rebaseBranch`:
  *   plumbing, no worktree; a conflict or a checkout of it leaves it as it is), then its tasks marked
@@ -191,7 +191,7 @@ function samePath(a: string, b: string): boolean {
 }
 
 /** The states whose task is marked when a change lands below it: a coder turn may still follow, and its sync names it. */
-export const MARKED_STATES: readonly string[] = ["running", "waiting_answer", "merging", "waiting_approve"];
+export const MARKED_STATES: readonly string[] = ["running", "waiting_answer", "merging", "waiting_approve", "reviewing"];
 
 /** The tasks of the wave `waveId` whose last state is one of `MARKED_STATES`, but the one on `exceptBranch`. */
 async function markedTasks(waveId: string, exceptBranch?: string): Promise<TaskRecord[]> {
@@ -532,6 +532,6 @@ export function roundPassedGates(drafts: readonly Draft[], commitAsk: boolean): 
   if (commitAsk) return true;
   return drafts.some((draft) => {
     if (draft.type === "custom_message") return draft.customType === FEEDBACK_TYPE && (draft.details.trigger === "review" || draft.details.trigger === "protected");
-    return draft.customType === "factory-state" && ["merging", "waiting_approve", "done"].includes(draft.data.state);
+    return draft.customType === "factory-state" && ["merging", "waiting_approve", "reviewing", "done"].includes(draft.data.state);
   });
 }

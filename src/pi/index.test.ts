@@ -301,6 +301,33 @@ describe("how a run ends", () => {
     expect(gitIn(worktree, "status", "--porcelain")).toBe("?? task.txt");
   });
 
+  test("an abort seen after a passing round of a reviewEach wave's task: no wave review is waited for, the task is stopped", async () => {
+    const agent = join(scratch, `agent-${counter}`);
+    const saved = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agent;
+    try {
+      const { createWave } = await import("../waves.ts");
+      const { writeTask } = await import("../tasks.ts");
+      const { factoryHome } = await import("../settings.ts");
+      const wave = `33000000-${String(counter).padStart(4, "0")}-4000-8000-000000000001`;
+      await createWave({ id: wave, repo, tag: "t/each", plan: null, title: "Each", request: "r", branch: "main", target: "main", base: gitIn(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {}, reviewEach: true });
+      const worktree = addTaskWorktree();
+      const sessionDir = join(factoryHome(), "sessions", "--each--");
+      mkdirSync(sessionDir, { recursive: true });
+      await writeTask({ id: `43000000-${String(counter).padStart(4, "0")}-4000-8000-000000000001`, repo, worktree, branch: "task", title: "Each", sessionId: "test-session", sessionDir, createdAt: "2026-01-01T00:00:00.000Z", tag: "t/each", plan: null, wave, origin: null });
+      const pi = session(worktree);
+      (pi.sessionManager as { getSessionDir?: () => string }).getSessionDir = () => sessionDir;
+      await pi.start();
+      writeFileSync(join(worktree, "task.txt"), "task\n");
+      await pi.boundary();
+      await pi.settled(true);
+      expect(pi.states()).toEqual(["running/start", "reviewing/passed", "blocked/stopped"]);
+    } finally {
+      if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = saved;
+    }
+  });
+
   test("an aborted coder turn is stopped, a run that just ends is interrupted, a cancelled one is cancelled", async () => {
     const worktree = addTaskWorktree();
     const stopped = session(worktree);

@@ -221,8 +221,9 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `[reviewed]`: no earlier diff stays in context. The diff reaches the reviewer only through `read_diff {paths?}` (the
   task's diff since the commit it last judged for that task; lockfiles last, large files cut); the request and the wave's
   contracts (read fresh) are in the prompt
-- The reviewer's tools: `read`, `grep`, `find`, `ls`, `read_diff`, `submit_verdict`, `scout` (always waits), `feedback`
-  (role `reviewer`), `notify_supervisor {text}` (one quiet notice to the wave's origin, the review goes on),
+- The reviewer's tools, the same in every pass: `read`, `grep`, `find`, `ls`, `read_diff`, `submit_verdict`, `scout`
+  (always waits), `feedback` (role `reviewer`; in the fit pass the wave's, task null), `notify_supervisor {text}` (one
+  quiet notice to the wave's origin, the review goes on),
   `start_fix {title, request}` (adds a `fix:` task to the wave, at most three per wave; then refused, with the hint to
   use `notify_supervisor`)
 - With `reviewEach`, after `merge_gates` the same reviewer does one pass on how the tasks fit together. Its blocker and
@@ -470,7 +471,7 @@ Commands (inside a task's own Pi session):
 
 ## Questions to the supervisor
 
-- Coders have `feedback {kind, what, cost?, suggestion?}` (`kind`: runtime, context, request, contract, tools, environment, communication): one call per problem, returns at once, never ends the turn. The entry is a fact under `<plan>/run/feedback/` with task, wave and role, listed by `waves.get` as `feedback:`; without a plan store it stays in the task's session
+- Coders have `feedback {kind, what, cost?, suggestion?}` (`kind`: runtime, context, request, contract, tools, environment, communication): one call per problem, returns at once, never ends the turn. The entry is a fact under `<plan>/run/feedback/` with task (null in the reviewer's fit pass), wave and role, listed by `waves.get` as `feedback:`; without a plan store it stays in the task's session
 - In a task session the coder may call `factory_ask_supervisor {question}` while its task is `running`: it records a
   `factory-question {text}` entry (timeline kind `question`, `TaskView.question`) and the resting state
   `waiting_answer`, and ends the coder's turn. The round's hooks, gates and review do not run; the runner ends. It is
@@ -577,6 +578,8 @@ You can hand coding tasks to the factory (the `factory` tool or the `factory` CL
 ## Development
 
 - `bun run types`, `bun test`. Tests use temp git repos, a temp agent dir and a fake `pi`; no model is called
+- `FACTORY_TEST_REAL_PI=1` also runs the test that resumes a reviewer session with the installed `pi` (its model faked by a
+  local server)
 - Layout: `src/` the core and what it imports (Bun and `node:` only, loadable without `node_modules`), `src/pi/`
   everything that imports Pi's extension API, `src/cli.ts` and `src/mcp.ts` the binaries, tests beside their modules
 - State on disk, the entry protocol and the runner command line are a contract with tasks already running: change

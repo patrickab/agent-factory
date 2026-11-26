@@ -2,9 +2,10 @@
  * Feedback the agents give about the factory's work (`feedback {kind, what, cost?, suggestion?}`, `pi/feedback-tool.ts`).
  *
  * - An entry is one fact under `<store>/run/feedback`, a JSON line with the task, wave and role added; the store is the
- *   task's `plan`. One `memory-store apply` (with the memory's description, which its first entry needs); a store
- *   without the directory `run` gets it declared (`create`) and the apply once more. `memory-store` missing, no plan
- *   or no such store: nothing is stored, the entry stays in the task's session (the tool appends it there)
+ *   task's `plan`. The wave reviewer's pass on how the tasks fit together has no task: `task` null, the wave's `plan`.
+ *   One `memory-store apply` (with the memory's description, which its first entry needs); a store without the
+ *   directory `run` gets it declared (`create`) and the apply once more. `memory-store` missing, no plan or no such
+ *   store: nothing is stored, the entry stays in the task's session (the tool appends it there)
  * - `waveFeedback` lists a wave's entries, oldest first, for `waves.get`
  */
 import { runCommand } from "./run.ts";
@@ -18,7 +19,8 @@ export interface FeedbackEntry {
   what: string;
   cost: string | null;
   suggestion: string | null;
-  task: string;
+  /** Null: the wave's own (its reviewer's fit pass). */
+  task: string | null;
   wave: string | null;
   role: string;
 }
@@ -56,9 +58,9 @@ function parseEntry(text: string): FeedbackEntry | null {
     return null;
   }
   if (!isRecord(value) || !FEEDBACK_KINDS.includes(value.kind as FeedbackKind)) return null;
-  if (typeof value.what !== "string" || typeof value.task !== "string" || typeof value.role !== "string") return null;
+  if (typeof value.what !== "string" || (value.task !== undefined && value.task !== null && typeof value.task !== "string") || typeof value.role !== "string") return null;
   const optional = (field: unknown) => (typeof field === "string" ? field : null);
-  return { kind: value.kind as FeedbackKind, what: value.what, cost: optional(value.cost), suggestion: optional(value.suggestion), task: value.task, wave: optional(value.wave), role: value.role };
+  return { kind: value.kind as FeedbackKind, what: value.what, cost: optional(value.cost), suggestion: optional(value.suggestion), task: optional(value.task), wave: optional(value.wave), role: value.role };
 }
 
 /** The entries of the wave `wave` in the store `storeName`, oldest first; none without a store. */

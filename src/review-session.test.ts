@@ -100,8 +100,9 @@ describe("stubEarlierRounds", () => {
 
 // Against the installed Pi: a model faked by a local OpenAI-compatible server that records every request. Round n reads
 // `round<n>.patch`; before rounds 2 and 3 the session file gets its stubs from outside, then Pi resumes it by
-// `--session-id`. No request of a later round may hold an earlier round's file text. Skipped where `pi` is missing.
-const pi = Bun.which("pi");
+// `--session-id`. No request of a later round may hold an earlier round's file text. Runs only with
+// `FACTORY_TEST_REAL_PI=1` and an installed `pi`.
+const pi = process.env.FACTORY_TEST_REAL_PI === "1" ? Bun.which("pi") : null;
 describe.skipIf(!pi)("a session resumed by the installed pi", () => {
   test(
     "holds the stubs, not the earlier tool results",

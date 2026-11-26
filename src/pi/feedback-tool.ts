@@ -11,9 +11,9 @@ import { errorText, isRecord } from "../util.ts";
 
 export const FEEDBACK_TOOL = "feedback";
 
-/** Whose feedback it is: null when the session holds no task. */
+/** Whose feedback it is: null when the session holds neither task nor wave; `task` null for a wave's own. */
 export interface FeedbackContext {
-  task: string;
+  task: string | null;
   wave: string | null;
   plan: string | null;
 }
@@ -50,7 +50,7 @@ export function registerFeedbackTool(pi: ExtensionAPI, gate: FeedbackToolGate): 
       const optional = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value : null);
       try {
         const whose = await gate.context(ctx);
-        if (whose === null) return fail("this session holds no task");
+        if (whose === null || (!whose.task && !whose.wave)) return fail("this session holds no task");
         const entry: FeedbackEntry = { kind: kind as FeedbackKind, what, cost: optional(cost), suggestion: optional(suggestion), task: whose.task, wave: whose.wave, role: gate.role };
         gate.keep(entry);
         const stored = await storeFeedback(whose.plan, entry);

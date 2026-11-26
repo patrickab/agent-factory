@@ -94,7 +94,7 @@ type WaveView = {                     // as in the contract
   actions: string[]
   contracts?: string[]                // names, as declared (absent: none)
   updates?: { at: string; key: string | null; fields: string[] }[]   // tasks.update (key) and waves.update (null) events, oldest first
-  feedback?: { kind: string; what: string; cost: string | null; suggestion: string | null; task: string; wave: string | null; role: string }[]   // waves.get only, oldest first
+  feedback?: { kind: string; what: string; cost: string | null; suggestion: string | null; task: string | null; wave: string | null; role: string }[]   // waves.get only, oldest first; task null: the wave reviewer's fit pass
 }
 
 type TimelineEntry = { at: string; kind: string; data: object }   // kinds: task, round, coder, user, gate, review, question, merge, state

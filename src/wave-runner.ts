@@ -122,16 +122,33 @@ function reviewWorktree(declaration: WaveDeclaration): string {
  * a merge that landed).
  */
 async function moveStage(id: string, from: WaveStage, to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = [], done = false): Promise<boolean> {
+  return (await moveStageBy(id, from, () => ({ to, reason, detail, events }), done)) !== null;
+}
+
+/** A stage change: where to, why, and the events that go before its `stage` event. */
+export type StageChoice = { to: WaveStage; reason: WaveReason | null; detail: string | null; events: NewWaveEvent[] };
+
+/**
+ * `moveStage` with the change chosen from the wave's fold under its log lock (`appendWaveEvents`): nothing appended
+ * meanwhile can make it stale. Resolves with the recorded choice, null when the wave left `from` (or the runner stops).
+ */
+async function moveStageBy(id: string, from: WaveStage, choose: (now: WaveFold) => StageChoice, done = false): Promise<StageChoice | null> {
   // A step the stop cut short (a killed gate, an aborted reviewer or launch) says nothing about the wave.
   if (stopping && !done) {
-    log(id, `stopping: ${from} -> ${to} is not recorded, the wave stays ${from}`);
-    return false;
+    log(id, `stopping: leaving ${from} is not recorded, the wave stays ${from}`);
+    return null;
   }
-  const stage: NewWaveEvent = { kind: "stage", stage: to, reason, ...(detail === null ? {} : { detail }) };
-  const written = await appendWaveEvents(id, (fold) => (fold.stage === from ? [...events, stage] : null));
-  if (written === null) log(id, `left ${from} meanwhile: ${to} is not recorded`);
-  else log(id, `${from} -> ${to}${reason ? ` (${reason})` : ""}${detail === null ? "" : `: ${detail}`}`);
-  return written !== null;
+  let chosen: StageChoice | null = null;
+  const written = await appendWaveEvents(id, (fold) => {
+    if (fold.stage !== from) return null;
+    chosen = choose(fold);
+    const { to, reason, detail, events } = chosen;
+    return [...events, { kind: "stage", stage: to, reason, ...(detail === null ? {} : { detail }) }];
+  });
+  const recorded = written === null ? null : (chosen as StageChoice | null);
+  if (recorded === null) log(id, `left ${from} meanwhile: the stage change is not recorded`);
+  else log(id, `${from} -> ${recorded.to}${recorded.reason ? ` (${recorded.reason})` : ""}${recorded.detail === null ? "" : `: ${recorded.detail}`}`);
+  return recorded;
 }
 
 /** How many paths a `dirty` detail names. */
@@ -306,11 +323,15 @@ function sessionIdOf(sessionFile: string | null): string | null {
 async function review(fold: StartedWaveFold): Promise<boolean | void> {
   const { id } = fold;
   const task = waveTask(fold);
-  const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []): Promise<boolean> => {
-    const moved = await moveStage(id, "reviewing", to, reason, detail === null ? null : pathFree(fold, detail), events);
-    if (!stopping && (!moved || to !== "merging")) await removeWorktree(fold);
-    return moved;
+  const leaveBy = async (choose: (now: WaveFold) => StageChoice): Promise<boolean> => {
+    const chosen = await moveStageBy(id, "reviewing", (now) => {
+      const choice = choose(now);
+      return { ...choice, detail: choice.detail === null ? null : pathFree(fold, choice.detail) };
+    });
+    if (!stopping && (chosen === null || chosen.to !== "merging")) await removeWorktree(fold);
+    return chosen !== null;
   };
+  const leave = (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []): Promise<boolean> => leaveBy(() => ({ to, reason, detail, events }));
   let remote = fold.remote;
   let root: string;
   try {
@@ -414,7 +435,7 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
     };
     let moved: boolean;
     if (verdict === "failed") moved = await leave("blocked", "review_failed", `the reviewer gave no verdict (${data.status})`, [event]);
-    else if (fold.reviewEach === true) moved = await afterFit(fold, round, event, leave);
+    else if (fold.reviewEach === true) moved = await leaveBy((now) => afterFit(fold, now, round, event));
     else if (verdict === "rejected") moved = await leave("rejected", null, null, [event]);
     else moved = await leave(fold.overrides.merge === "review" ? "waiting_approve" : "merging", null, null, [event]);
     // Only a recorded verdict reaches the forge.
@@ -437,25 +458,19 @@ function rejecting(findings: readonly { severity: string }[]): string {
 }
 
 /**
- * The stage after a `reviewEach` wave's fit pass: approved goes on to merge; its blocker and major findings become one
- * `fix:` task (`reviewerFixEvents`, counted against `REVIEWER_FIX_CAP`) and the wave builds again; with the cap used up
- * the wave is `rejected` to the supervisor. A task the reviewer added during the pass (`start_fix`) builds too.
+ * The stage after a `reviewEach` wave's fit pass, chosen from `now`, the wave's fold under its log lock: approved goes on
+ * to merge; its blocker and major findings become one `fix:` task (`reviewerFixEvents`, counted against
+ * `REVIEWER_FIX_CAP`) and the wave builds again; with the cap used up the wave is `rejected` to the supervisor. A task
+ * added since `fold` (the reviewer's `start_fix` during the pass, a supervisor's `waves.add`) builds too.
  */
-async function afterFit(
-  fold: StartedWaveFold,
-  round: number,
-  event: Extract<NewWaveEvent, { kind: "review" }>,
-  leave: (to: WaveStage, reason: WaveReason | null, detail: string | null, events: NewWaveEvent[]) => Promise<boolean>,
-): Promise<boolean> {
-  const file = await readWave(fold.id);
-  const now = foldWave(file.declaration, file.events);
+export function afterFit(fold: StartedWaveFold, now: WaveFold, round: number, event: Extract<NewWaveEvent, { kind: "review" }>): StageChoice {
   const added = now.tasks.filter((spec) => !fold.tasks.some((before) => before.key === spec.key)).map((spec) => spec.key);
-  if (added.length > 0) return leave("building", null, `the reviewer added ${added.join(", ")} in its pass on how the tasks fit together`, [event]);
-  if (event.verdict === "approved") return leave(fold.overrides.merge === "review" ? "waiting_approve" : "merging", null, null, [event]);
+  if (added.length > 0) return { to: "building", reason: null, detail: `the reviewer added ${added.join(", ")} in its pass on how the tasks fit together`, events: [event] };
+  if (event.verdict === "approved") return { to: fold.overrides.merge === "review" ? "waiting_approve" : "merging", reason: null, detail: null, events: [event] };
   const found = `the pass on how the tasks fit together found ${rejecting(event.findings)}`;
   const fix = reviewerFixEvents(now, fitFix(round, event.findings));
-  if (fix === null) return leave("rejected", null, `${found}; the wave's ${REVIEWER_FIX_CAP} fix tasks are used up`, [event]);
-  return leave("building", null, `${found}: task ${fix.key} fixes it`, [event, ...fix.events]);
+  if (fix === null) return { to: "rejected", reason: null, detail: `${found}; the wave's ${REVIEWER_FIX_CAP} fix tasks are used up`, events: [event] };
+  return { to: "building", reason: null, detail: `${found}: task ${fix.key} fixes it`, events: [event, ...fix.events] };
 }
 
 /** How often a merge resolves additions-only conflicts and tries again (the target moves on meanwhile). */

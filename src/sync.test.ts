@@ -16,7 +16,7 @@ import { deleteTask } from "./launch.ts";
 import { mergeTask } from "./merge.ts";
 import { runCommand, type Exec } from "./run.ts";
 import { factoryHome } from "./settings.ts";
-import type { Settings, Task } from "./state.ts";
+import type { Draft, Settings, Task } from "./state.ts";
 import { pendingMarks, roundPassedGates, sessionTask, snapshotRef, SYNC_TYPE, syncAtTurnEnd, syncLeftOf, syncLogPath, syncRoundPassed, waveLanded, type SyncDraft } from "./sync.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { appendWaveEvent, createWave } from "./waves.ts";
@@ -206,6 +206,22 @@ describe("a sibling's merge reaches a running task", () => {
       expect(message).toContain("- shared.ts: feat: b");
       expect(message).toContain("- other.ts: feat: c");
     }
+  });
+
+  test("a task waiting for its wave's reviewer is marked: rejected, its next round syncs to a sibling's merge", async () => {
+    const { repo, branch, wave } = await waveRepo();
+    const b = await runningTask(repo, wave, branch, ["shared.ts"], "reviewing");
+    const a = await runningTask(repo, wave, branch, []);
+    write(b.worktree, "mine.ts", "mine\n");
+    // A is approved and merges while b waits for its review.
+    write(a.worktree, "shared.ts", "by a\n");
+    await merge(a, branch, "feat: a");
+    expect(await pendingMarks(b.id)).toHaveLength(1);
+    // B is rejected: the end of its next coder round syncs onto a's change.
+    const [message] = messages((await syncAtTurnEnd(runCommand, b.worktree, b, branch, undefined)).drafts);
+    expect(message).toContain("- shared.ts: feat: a");
+    expect(git(b.worktree, "rev-parse", "HEAD")).toBe(git(repo, "rev-parse", branch));
+    expect(readFileSync(join(b.worktree, "mine.ts"), "utf8")).toBe("mine\n");
   });
 
   test("HEAD holding the tip already: synced without a message", async () => {
@@ -400,6 +416,15 @@ describe("nothing piles up", () => {
     expect(readFileSync(syncLogPath(a.id), "utf8")).toBe(`${due}\n`);
   });
 
+  test("a round that rests waiting for its wave's reviewer passed: once approved, no snapshot ref and no sync log lines stay", async () => {
+    const { repo, a } = await synced();
+    const drafts: Draft[] = [{ type: "custom", customType: "factory-state", data: { state: "reviewing", round: 1, reason: "passed" } }];
+    expect(roundPassedGates(drafts, false)).toBe(true);
+    await syncRoundPassed(runCommand, a.worktree, a.id);
+    expect(hasRef(repo, snapshotRef(a.id))).toBe(false);
+    expect(existsSync(syncLogPath(a.id))).toBe(false);
+  });
+
   test("a removed task takes its sync log and snapshot ref with it", async () => {
     const { repo, a } = await synced();
     await deleteTask(a);
@@ -420,7 +445,9 @@ test("sessionTask: the task of a session the factory keeps, none outside its hom
 });
 
 test("a round passed its gates once a later step judged it", () => {
-  expect(roundPassedGates([{ type: "custom", customType: "factory-state", data: { state: "merging", round: 1, reason: "passed" } }], false)).toBe(true);
+  for (const state of ["merging", "waiting_approve", "reviewing", "done"] as const) {
+    expect(roundPassedGates([{ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "passed" } }], false)).toBe(true);
+  }
   expect(roundPassedGates([{ type: "custom_message", customType: "factory-feedback", content: "", display: true, details: { round: 1, trigger: "gates" } }], false)).toBe(false);
   expect(roundPassedGates([{ type: "custom_message", customType: "factory-feedback", content: "", display: true, details: { round: 1, trigger: "review" } }], false)).toBe(true);
 });

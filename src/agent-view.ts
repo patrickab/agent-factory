@@ -340,7 +340,7 @@ function feedbackLines(view: WaveView): string[] {
   if (entries.length === 0) return [];
   return [
     `  feedback: ${entries.length}`,
-    ...entries.flatMap((entry) => labelled("    ", `${entry.kind} (${entry.role}, task ${short(entry.task)}): `, [entry.what, entry.cost && `cost: ${entry.cost}`, entry.suggestion && `suggestion: ${entry.suggestion}`].filter(Boolean).join(" · ")))
+    ...entries.flatMap((entry) => labelled("    ", `${entry.kind} (${entry.role}, ${entry.task === null ? "the wave" : `task ${short(entry.task)}`}): `, [entry.what, entry.cost && `cost: ${entry.cost}`, entry.suggestion && `suggestion: ${entry.suggestion}`].filter(Boolean).join(" · ")))
   ];
 }
 

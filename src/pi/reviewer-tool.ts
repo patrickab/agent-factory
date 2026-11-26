@@ -12,7 +12,7 @@
  *   loaded here) also gets `registerReviewerTools`:
  *   - `scout`: always waits for the report; it explores the worktree of the task under review (else the wave's review
  *     worktree), so its cost and store are the task's (the wave's)
- *   - `feedback`: role `reviewer`, stored under the plan with the task and wave
+ *   - `feedback`: role `reviewer`, stored under the plan with the task and wave (task null in the fit pass)
  *   - `notify_supervisor {text}`: one quiet notice to the wave's origin (`noteToSupervisor`); the review goes on
  *   - `start_fix {title, request}`: a `fix:` task in the wave (`startReviewerFix`), at most `REVIEWER_FIX_CAP` per wave,
  *     then refused with the hint to notify the supervisor
@@ -91,7 +91,7 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds, core: 
   });
   registerFeedbackTool(pi, {
     role: "reviewer",
-    context: async () => (ids.task === null ? null : { task: ids.task, wave: ids.wave, plan: ids.plan }),
+    context: async () => ({ task: ids.task, wave: ids.wave, plan: ids.plan }),
     keep: () => {},
   });
   pi.registerTool({

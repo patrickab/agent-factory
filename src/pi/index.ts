@@ -445,8 +445,8 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     const ended = roundEnd === current.state ? roundEnd : undefined;
     roundEnd = undefined;
     // `running`: no step ended the run. `merging`: the round passed and its merge is due. An aborted run keeps neither,
-    // and no approve either: the abort may have come while the round's steps ran, which they cannot see.
-    const open = current.state === "running" || ended === "merging" || (ended === "waiting_approve" && event.aborted);
+    // and no approve or wave review either: the abort may have come while the round's steps ran, which they cannot see.
+    const open = current.state === "running" || ended === "merging" || ((ended === "waiting_approve" || ended === "reviewing") && event.aborted);
     if (open && session.runner.cancelled) endState(ops, current, "cancelled", "cancelled");
     else if (open && event.aborted) endState(ops, current, "blocked", "stopped");
     else if (ended === "merging") {

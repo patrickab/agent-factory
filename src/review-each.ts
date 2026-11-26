@@ -99,6 +99,12 @@ export function taskReviewPrompt(input: {
   return lines.join("\n");
 }
 
+/**
+ * The reviewer's tools, the same in every pass (the prompt cache): `feedback` in the fit pass is the wave's (task null),
+ * `start_fix` and `notify_supervisor` work in both.
+ */
+export const REVIEWER_TOOLS = `read,grep,find,ls,read_diff,scout,feedback,notify_supervisor,start_fix,${VERDICT_TOOL}`;
+
 /** One run of the wave's reviewer session: the same argv, directory, model and tools at every resume. */
 interface ReviewerRun {
   status: ReviewStatus;
@@ -121,7 +127,7 @@ async function runWaveReviewer(fold: StartedWaveFold, prompt: string, diffFile: 
   const existing = await sessionFile(dir, fold.id);
   if (existing !== undefined) stubEarlierRounds(existing);
   const model = resolveModels([fold.overrides.models]).reviewer ?? null;
-  const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,read_diff,scout,feedback,notify_supervisor,start_fix,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
+  const argv = ["pi", "--mode", "json", "-p", "--tools", REVIEWER_TOOLS, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
   argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", dir, "--session-id", fold.id);
   if (model) argv.push("--model", model);
   if (prompts.reviewer) argv.push("--append-system-prompt", prompts.reviewer);

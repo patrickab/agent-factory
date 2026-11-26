@@ -2,16 +2,19 @@
  * The tools of a wave's reviewer (`reviewer-tool.ts`): `scout` (a fake scout core), `feedback`, `notify_supervisor`
  * and `start_fix` against a wave written into the core fixture. None ends the review.
  */
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { agentView } from "../agent-view.ts";
+import { callAction, noticeInputs } from "../core.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { noticeInputs } from "../core.ts";
 import { noteToSupervisor, REVIEWER_FIX_CAP, startReviewerFix } from "../core-waves.ts";
-import { makeRepo, useCoreFixture } from "../core-test-kit.ts";
+import { caseDir, makeRepo, useCoreFixture } from "../core-test-kit.ts";
 import { pendingNotices } from "../notify.ts";
 import type { ScoutView } from "../scouts.ts";
 import { lockFile, unlockFile } from "../tasks.ts";
 import { waveLockPath } from "../wave-poke.ts";
-import { createWave, foldWave, readWave } from "../waves.ts";
+import { createWave, foldWave, readWave, type WaveView } from "../waves.ts";
 import defaultExtension, { FIX_TOOL, NOTIFY_TOOL, registerReviewerTools, type ReviewerCore, type ReviewerIds } from "./reviewer-tool.ts";
 
 useCoreFixture();
@@ -99,7 +102,38 @@ describe("reviewer tools", () => {
     const result = await call(feedback, { kind: "context", what: "the diff held a lockfile" });
     expect([result.isError, result.terminate]).toEqual([undefined, undefined]);
     expect(result.details).toMatchObject({ role: "reviewer", task: "task-9", wave: "wave-9", what: "the diff held a lockfile" });
-    expect((await call(tools({ wave: "wave-9", task: null, plan: null }, fakeCore()).get("feedback"), { kind: "context", what: "x" })).isError).toBe(true);
+    expect((await call(tools({ wave: "", task: null, plan: null }, fakeCore()).get("feedback"), { kind: "context", what: "x" })).isError).toBe(true);
+  });
+
+  test("feedback in the fit pass (no task) is the wave's: stored with task null and listed by waves.get", async () => {
+    const bin = join(caseDir, "store-bin");
+    const root = join(caseDir, "stores");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(root, "plan-rt"), { recursive: true });
+    // ls: the store exists; apply: appends the op's text; read: "- [n] text", newest first.
+    writeFileSync(
+      join(bin, "memory-store"),
+      `#!/bin/sh
+dir="${root}/$2"
+case "$1" in
+  ls) [ -d "$dir" ] || exit 1;;
+  create) mkdir -p "$dir";;
+  apply) printf '%s\\n' "$4" | bun -e 'const ops=JSON.parse(require("fs").readFileSync(0,"utf8"));require("fs").appendFileSync(process.argv[1],ops.map((o)=>o.text).join("\\n")+"\\n")' "$dir/log";;
+  read) [ -f "$dir/log" ] || exit 0; n=0; tac "$dir/log" | while read -r line; do n=$((n+1)); echo "- [f$n] $line"; done;;
+esac
+`,
+    );
+    chmodSync(join(bin, "memory-store"), 0o755);
+    process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+    const id = crypto.randomUUID();
+    await createWave({ id, repo: makeRepo(), tag: "rt/fb", plan: "plan-rt", title: "wave", request: "r", branch: "main-rt-fb", target: "main", base: "abc", origin: null, createdAt: new Date().toISOString(), overrides: {} });
+    const feedback = tools({ wave: id, task: null, plan: "plan-rt" }, fakeCore()).get("feedback")!;
+    const result = await call(feedback, { kind: "context", what: "the fit pass read every task's diff again" });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]!.text).toBe("Feedback recorded.");
+    const { wave } = (await callAction("waves.get", { id })) as { wave: WaveView };
+    expect(wave.feedback).toEqual([{ kind: "context", what: "the fit pass read every task's diff again", cost: null, suggestion: null, task: null, wave: id, role: "reviewer" }]);
+    expect(agentView("waves.get", {}, { wave })).toContain("context (reviewer, the wave): the fit pass read every task's diff again");
   });
 
   test("notify_supervisor sends one quiet notice to the wave's origin and the review goes on", async () => {

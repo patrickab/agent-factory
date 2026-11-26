@@ -183,7 +183,7 @@ describe("review per task", () => {
     expect(call!.args).toContain("--session-id");
     expect(call!.args[call!.args.indexOf("--session-id") + 1]).toBe(WAVE);
     expect(call!.args[call!.args.indexOf("--session-dir") + 1]).toBe(waveReviewsDir(WAVE));
-    expect(call!.args[call!.args.indexOf("--tools") + 1]).toContain("read_diff");
+    expect(call!.args[call!.args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,read_diff,scout,feedback,notify_supervisor,start_fix,submit_verdict");
     expect(call!.cwd).toBe(realpathSync(waveReviewsDir(WAVE)));
     expect(call!.cache).toBe("long");
     expect(readDiffText(call!.diff!)).toContain("+a one");
