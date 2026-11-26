@@ -304,6 +304,61 @@ proof 9c1d2e3f  flaky  master 0ab12cd
   next: waves.start on it
 ```
 
+## Cards
+
+Fourth form, for people: next to the agent's text, every notice (`details {key, card}`) and every `factory` tool result
+(`details {result, card}`, none on an error) carries a `FactoryCard`, computed by the factory in `src/cards.ts` from the
+event's view object (each feature registers a builder per action). A surface (Pi's TUI, gigachad-bot) renders it and
+never parses the agent's text. No undefined field, no empty list: it survives JSON unchanged.
+
+```ts
+interface FactoryCard {
+  v: 1;                              // unknown fields are ignored by a renderer
+  kind: "wave" | "task" | "scout" | "proof" | "contract" | "decision" | "action";
+  tone: "attention" | "quiet";       // attention: needs a ruling (question, rejected, blocked, waiting for approve,
+                                     //   interrupted, can never start, failing gates)
+  title: string;                     // one line, no "factory:" prefix
+  tag?: string; id?: string;         // the wave's tag; the short id
+  state?: string;
+  cost?: number;                     // cents
+  progress?: { done: number; total: number };
+  rows?: { label: string; text: string }[];
+  findings?: { severity: "blocker" | "major" | "minor"; file?: string; line?: number; text: string }[];
+  text?: string;                     // markdown: question, message sent, report; failures and logs fenced
+  answers?: string;                  // decision: the notice key it settles
+}
+```
+
+Kinds, each with an example (JSON abridged):
+
+- `wave`: tag, id, stage as state, cost, task progress; rows wave, why, waits for, can never start, merged, pull request,
+  tasks; the last review's findings unless approved
+  `{kind:"wave", tone:"attention", title:"wave factory/w1 was rejected", tag:"factory/w1", id:"3f2a91c0", state:"rejected", cost:1840, progress:{done:4,total:5}, rows:[{label:"why",text:"review 2 rejected"}], findings:[{severity:"major", file:"src/wave-runner.ts", line:309, text:"..."}]}`
+- `task`: id, tag, state, cost; rows task, round, why, merged, flaky; text is the question, the failure (fenced) or the coder's last message
+  `{kind:"task", tone:"attention", title:"a coder asks", id:"4ae7325b", state:"waiting_answer", tag:"factory/w1", text:"waves.start takes overrides ..."}`
+- `scout`: id, state, cost; rows concern, questions, error, report; text is the report
+  `{kind:"scout", tone:"quiet", title:"scout 5c0a7d21 reported", id:"5c0a7d21", state:"done", cost:12, text:"MISSING ..."}`
+- `proof`: id, state; rows branch, steps, flaky, failing, log; text is the failing step's tail (fenced)
+  `{kind:"proof", tone:"quiet", title:"the gates of master pass, flaky", id:"9c1d2e3f", state:"flaky", rows:[{label:"flaky",text:"the wave merges"}]}`
+- `contract`: a contract change that reached done tasks; rows changed, done tasks, next
+  `{kind:"contract", tone:"quiet", title:"contract core changed", tag:"factory/w1", rows:[{label:"done tasks",text:"docs"}]}`
+- `decision`: the card of a supervisor's settling action; `text` is what was sent or changed, `answers` the notice key
+  `{kind:"decision", tone:"quiet", title:"updated task docs of wave factory/w1", text:"<the new request>", answers:"task:4ae7325b:waiting_answer:1@..."}`
+- `action`: any other action's result (lists, settings, models, timelines); rows hold the entries
+  `{kind:"action", tone:"quiet", title:"2 tasks", rows:[{label:"4ae7325b", text:"running  factory/w1  the wave mechanism"}]}`
+
+Decisions: `tasks.message` (to a task in `waiting_answer` or `blocked`), `tasks.update`, `waves.update`, `waves.add` (to a
+rejected or blocked wave), `tasks.retry`, `waves.retry`, `tasks.cancel`, `waves.cancel`, `contracts.apply`. The factory
+reads the cause from state at call time (the task's open question, block or rejection; for `contracts.apply` the latest
+rejection or block of a wave listing the contract) and the agent passes nothing. With nothing open the card is a
+decision without `answers`. Each is appended to `decisions/<origin>.jsonl` under the factory home;
+`decisions.list {origin?}` answers `{decisions: {at, key?, answers?, card}[]}` in order.
+
+Pi: notices (`factory-notice`) and the `factory` tool's call and result are drawn as cards: icon `◆`, title, tag, state,
+cost, progress, rows, findings grouped by severity (collapsed to counts, expanded shows all), text. Readable is the
+default; **Alt+V** toggles all factory cards of the session to the agent's text. The widget above the editor counts the
+cards waiting for a ruling: the latest attention notice per task, wave, scout or proof that no later decision answered.
+
 ## The action list itself
 
 `factory actions` in the agent view: one line per action, `name {params} - summary`. One action's params in full

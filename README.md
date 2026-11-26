@@ -392,15 +392,27 @@ factory --core-path                                     # absolute path of src/c
 ### Pi extension (`src/pi/`)
 
 - The `factory` tool for agents: `{action, ...}` with `action` an `ACTIONS` name that is neither `hostOnly` nor a
-  timeline, and that action's params. The answer is the agent view as text and the full view as `details`; errors
-  are error results, the agent view's one line. Calls run one at a time
+  timeline, and that action's params. The answer is the agent view as text and `details {result, card}`: the full
+  view and the card (below); errors are error results with no details, the agent view's one line. Calls run one at a time
 - In a task's own session (Pi started by the runner, `FACTORY_TASK_SESSION=1`, or a session holding a `factory-task`
   entry) the tool offers only the actions with `mutates: false`; a mutating one (`tasks.start`, `models.set`, ...)
   answers as unknown. A task's coder starts a task only through `factory_new_task` (below)
 - The `scout` tool (Scouts, below)
+- Cards (`src/cards.ts`, `VIEWS.md` "Cards"): every notice (`details {key, card}`) and every `factory` tool result
+  carries a `FactoryCard`, the readable form computed from the same view object; the text the agent reads is
+  unchanged. A surface renders a card and never parses text. Pi draws them (`src/pi/cards-tui.ts`): icon `◆`, title
+  (toned when it needs a ruling), tag, state, cost, progress, rows, findings by severity (collapsed to counts,
+  expanded shows all), text. **Alt+V** toggles every factory card of the session between readable and the agent's text
+  (no per-card toggle: Pi has no focus per message)
+- Decisions (`src/decisions.ts`): a supervisor's action that settles something (`tasks.message` to a task in
+  `waiting_answer` or `blocked`, `tasks.update`, `waves.update`, `waves.add` to a rejected or blocked wave,
+  `tasks.retry`, `waves.retry`, `tasks.cancel`, `waves.cancel`, `contracts.apply`) returns a card of kind `decision`
+  with `answers`, the notice key it settles, read from state at call time (the agent passes nothing). Logged per
+  origin in `decisions/<origin>.jsonl` under the factory home; `decisions.list {origin?}` lists them
 - In a session that declared waves (their `origin`), the interactive terminal UI shows them above the editor
   (`src/session-widget.ts`): a header with the active count, how many need the supervisor and their cost, then the
-  active waves (those that need the supervisor first, then newest first) and a `<n> finished` line.
+  active waves (those that need the supervisor first, then newest first) and a `<n> finished` line. The header adds
+  `<n> cards to rule on`: the latest attention notice per task, wave, scout or proof that no decision answered yet.
   `/factory waves` opens or closes the finished ones. The notifier's looks refresh it; RPC, JSON and print mode and
   a task's own session show nothing
 

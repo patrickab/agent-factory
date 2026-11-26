@@ -42,7 +42,7 @@ test("the tool's description, pinned: its sentences in the features' order (chan
     "\"scouts.start\" sends a read-only scout that answers a concern from the map of a memory store (wait: true for its report, else it reports back).",
     "Answers are short text: an id (8 chars are enough), the state, what matters in it, and \"next:\" with the actions valid now.",
     "Tasks and waves started from a Pi session report back to it when they need you; elsewhere block on \"tasks.wait\" (ids, tag or wave) instead of polling.",
-    "A tag (path segments like plugin/m1/w1) groups related work for tasks.list, waves.list and tasks.wait.",
+    "A tag (path segments like plugin/m1/w1) groups related work for tasks.list, waves.list and tasks.wait. Every answer and notice also carries a card for the user, never in your context; an action that settles a question, rejection or block is recorded as a decision on its own: pass nothing for it.",
     ].join(" "),
   );
 });
