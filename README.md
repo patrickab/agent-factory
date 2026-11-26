@@ -562,3 +562,15 @@ You can hand coding tasks to the factory (the `factory` tool or the `factory` CL
   everything that imports Pi's extension API, `src/cli.ts` and `src/mcp.ts` the binaries, tests beside their modules
 - State on disk, the entry protocol and the runner command line are a contract with tasks already running: change
   them only with a migration
+
+## Troubleshooting
+
+- A restart of a service that hosts the declaring Pi (`gigachad-bot-dev`) interrupts every runner although each runs
+  in a `run-p…scope` of its own: a runner stays the child (ppid) of the Pi process that spawned it while that lives,
+  and the service's stop (`run.sh`'s `cleanup`) snapshots its whole ppid tree (`descendants $$`) and sends TERM, then
+  KILL, to all of it. The cgroup does not protect against a signal sent by pid; a runner whose spawner ended before is a
+  child of `systemd --user` and outside that tree. The service has to skip
+  descendants outside its own cgroup: signal only pids whose `/proc/<pid>/cgroup` equals its own (or use
+  `KillMode=control-group` and no tree walk)
+- A review blocked `infra` on `fatal: not a git repository` in the review worktree: a runner killed while git added or
+  removed it. The next review removes such a directory and prunes the worktree list itself; `waves.retry`

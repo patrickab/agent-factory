@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runGateStep } from "./flaky-rerun.ts";
@@ -117,6 +117,17 @@ await takeSlot(${JSON.stringify(slots)}); console.log("held"); await Bun.sleep(6
     writeFileSync(live, "");
     expect(await slotWaiting([dead.pid, process.pid], slots.dir)).toBe(true);
     expect(existsSync(live)).toBe(true);
+  });
+
+  test("a waiting marker older than the start of the process that has its pid now is stale: ignored and removed", async () => {
+    const slots = pool(1);
+    mkdirSync(join(slots.dir, "waiting"), { recursive: true });
+    // A marker left by an earlier process of this pid: written before this process started.
+    const old = join(slots.dir, "waiting", `${process.pid}.${crypto.randomUUID()}`);
+    writeFileSync(old, "");
+    utimesSync(old, new Date("2000-01-01T00:00:00Z"), new Date("2000-01-01T00:00:00Z"));
+    expect(await slotWaiting([process.pid], slots.dir)).toBe(false);
+    expect(existsSync(old)).toBe(false);
   });
 
   test("FACTORY_TEST_JOBS and FACTORY_SLOT_HELD reach the command", async () => {

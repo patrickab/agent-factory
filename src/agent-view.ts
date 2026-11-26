@@ -138,12 +138,12 @@ function taskStateLines(view: TaskView): string[] {
   }
 }
 
-/** One task: header, title, the lines of its state, `next:`. Exported for notifications. */
 /** `waiting for a test slot` while its runner waits for one to run a gate. */
 function slotLine(view: { waitingForSlot?: true }): string[] {
   return view.waitingForSlot ? ["  waiting for a test slot"] : [];
 }
 
+/** One task: header, title, the lines of its state, `next:`. Exported for notifications. */
 export function taskBlock(view: TaskView): string {
   return scrub([taskHeader(view), `  ${view.title}`, ...taskStateLines(view), ...slotLine(view), ...flakyLine(view.flaky), `  ${taskNext(view)}`].join("\n"));
 }

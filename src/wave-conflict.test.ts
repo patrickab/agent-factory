@@ -148,6 +148,17 @@ describe("a wave's rebase conflict", () => {
     expect(git(repo, "rev-parse", "main")).toBe(main);
   }, 60_000);
 
+  test("waves.cancel while its conflict task runs: the wave's branch goes back to its own head", async () => {
+    const { repo, wave, main } = await conflictingWave();
+    await pokeWave(WAVE);
+    await startedTask();
+    expect(git(repo, "rev-parse", BRANCH)).toBe(main);
+    await callAction("waves.cancel", { id: WAVE });
+    expect((await fold()).stage).toBe("cancelled");
+    expect(git(repo, "rev-parse", BRANCH)).toBe(wave);
+    expect(git(repo, "rev-parse", "main")).toBe(main);
+  }, 60_000);
+
   test("a conflict task that fails: the wave keeps building on the target's tip, nothing merges", async () => {
     const { repo, main } = await conflictingWave();
     await pokeWave(WAVE);
@@ -194,7 +205,8 @@ describe("a wave's rebase conflict", () => {
     const building = await fold();
     expect(building.conflicts?.[0]?.files).toEqual(["a.txt"]);
     const spec = building.tasks.find((task) => task.key === "conflict-1");
-    expect(spec?.request).toContain("- a.txt");
+    expect(spec?.request).toContain("- a.txt: main deleted it, the wave changed it; your worktree holds the wave's version");
+    expect(spec?.request).not.toContain("conflict markers (");
     expect(spec?.request).toContain("Commits of main on them since the wave branched off:\n- main: remove a");
     expect(git(repo, "rev-parse", BRANCH)).toBe(main);
     // The wave's version of the file the target removed is in the worktree for the coder to judge.

@@ -452,9 +452,21 @@ export async function conflictTask(fold: StartedWaveFold, phase: "review" | "mer
   let n = count + 1;
   while (fold.tasks.some((task) => task.key === `conflict-${n}`)) n++;
   const key = `conflict-${n}`;
+  // A file one side deleted holds no markers: the merge keeps the other side's version.
+  const has = async (rev: string, file: string) => (await runCommand(["git", "cat-file", "-e", `${rev}:${file}`], { cwd: repo })).exitCode === 0;
+  const marked: string[] = [];
+  const deleted: string[] = [];
+  for (const file of files) {
+    const [inOnto, inHead] = [await has(onto, file), await has(head, file)];
+    if (inOnto && inHead) marked.push(`- ${file}`);
+    else if (inHead) deleted.push(`- ${file}: ${target} deleted it, the wave changed it; your worktree holds the wave's version`);
+    else if (inOnto) deleted.push(`- ${file}: the wave deleted it, ${target} changed it; your worktree holds ${target}'s version`);
+    else marked.push(`- ${file}`);
+  }
   const request = [
     `The wave's branch ${branch} conflicts with ${target}. Your worktree is on ${target}'s tip ${onto.slice(0, 12)} with the wave's whole change (${head.slice(0, 12)}) on it, uncommitted.`,
-    `These files hold both versions between conflict markers (<<<<<<< ${onto.slice(0, 12)}… is ${target}, >>>>>>> ${head.slice(0, 12)}… is the wave):\n${files.map((file) => `- ${file}`).join("\n")}`,
+    ...(marked.length === 0 ? [] : [`These files hold both versions between conflict markers (<<<<<<< ${onto.slice(0, 12)}… is ${target}, >>>>>>> ${head.slice(0, 12)}… is the wave):\n${marked.join("\n")}`]),
+    ...(deleted.length === 0 ? [] : [`One side deleted these files, the other changed them (no markers): keep, delete or move what the change meant:\n${deleted.join("\n")}`]),
     `Commits of ${target} on them since the wave branched off:\n${await subjects(onto)}`,
     `Commits of the wave on them:\n${await subjects(head)}`,
     "Resolve every conflict keeping what both sides meant, remove the markers, leave the rest of the wave's change as it is.",
@@ -698,7 +710,18 @@ export const WAVE_HANDLERS = {
         failures.push(`${shortId(record)}: ${oneLine(errorText(error))}`);
       }
     }
-    if (failures.length > 0) throw new FactoryError("failed", `wave ${id.slice(0, SHORT_ID_CHARS)} is cancelled, but cancelling its tasks failed (${failures.join("; ")}); cancel them with tasks.cancel`);
+    // A conflict task that did not finish moved the wave's branch onto the target's tip: back to the wave's own commits.
+    const after = await readWave(id);
+    const fold = foldWave(after.declaration, after.events);
+    if (waveStarted(fold)) {
+      try {
+        const undone = await undoConflictBranch(fold, (await waveTaskViews(fold)).states);
+        if (undone !== null && undone.includes("checked out")) failures.push(`its branch ${fold.branch}: ${undone}`);
+      } catch (error) {
+        failures.push(`its branch ${fold.branch}: ${oneLine(errorText(error))}`);
+      }
+    }
+    if (failures.length > 0) throw new FactoryError("failed", `wave ${id.slice(0, SHORT_ID_CHARS)} is cancelled, but cleaning up after it failed (${failures.join("; ")}); cancel its tasks with tasks.cancel, put its branch back by hand`);
     return { wave: await waveView(await readWave(id)) };
   },
 

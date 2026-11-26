@@ -715,6 +715,18 @@ describe("resuming from the log", () => {
     expect((await getWave()).stage).toBe("merged");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
   });
+
+  test("a leftover review worktree directory git does not know (a runner killed mid-way): removed, pruned, the review runs", async () => {
+    const repo = await waveRepo();
+    // Its `.git` file names a worktree entry that is gone: `git rev-parse` there fails with not a git repository.
+    git(repo, "worktree", "add", "--quiet", reviewWorktree(repo), BRANCH);
+    rmSync(join(repo, ".git", "worktrees"), { recursive: true, force: true });
+    writeFileSync(join(reviewWorktree(repo), "left.txt"), "x\n");
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+    await runWave(WAVE());
+    expect((await getWave()).stage).toBe("merged");
+    expect(existsSync(reviewWorktree(repo))).toBe(false);
+  });
 });
 
 /** The log of a wave whose review approved it: the runner resumes at the merge. */

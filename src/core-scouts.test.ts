@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { callAction, type TaskView } from "./core.ts";
@@ -207,12 +207,19 @@ describe("scouts.start", () => {
   test("a timed-out wait answers with what the scout wrote so far", async () => {
     const repo = makeRepo();
     createStore("team/plan");
-    // Long enough for the scout (three bun starts) to write under a loaded gate run.
-    process.env.FACTORY_SCOUT_WAIT_MS = "3000";
+    process.env.FACTORY_SCOUT_WAIT_MS = "600000";
     scoutPlan({ writes: [{ path: "map/a", description: "a", text: "a.txt:1" }], hold: true });
-    const result = (await callAction("scouts.start", { concern: "a", store: "team/plan", wait: true }, { cwd: repo })) as { scout: ScoutView; timedOut: boolean };
-    expect(result.timedOut).toBe(true);
-    expect(result.scout).toMatchObject({ state: "running", report: null, written: ["map/a"] });
+    const waiting = callAction("scouts.start", { concern: "a", store: "team/plan", wait: true }, { cwd: repo }) as Promise<{ scout: ScoutView; timedOut: boolean }>;
+    // The deadline passes once the scout wrote, however long its start takes on a loaded machine.
+    await until(async () => (await scouts()).some((scout) => scout.written.includes("map/a")), 25_000);
+    setSystemTime(new Date(Date.now() + 3_600_000));
+    try {
+      const result = await waiting;
+      expect(result.timedOut).toBe(true);
+      expect(result.scout).toMatchObject({ state: "running", report: null, written: ["map/a"] });
+    } finally {
+      setSystemTime();
+    }
   });
 });
 

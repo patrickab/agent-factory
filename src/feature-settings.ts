@@ -83,7 +83,6 @@ export const SETTINGS = feature({
   renderers: {
     "models.get": (_params, result: { models: string[] }) => (result.models.length === 0 ? "no models set (models.set)" : result.models.join("\n")),
     "models.set": (_params, result: { models: string[] }) => `${plural(result.models.length, "model")} set`,
-  
     "repos.list": (_params, result: { repos: string[] }) => (result.repos.length === 0 ? "no repositories registered (repos.add)" : result.repos.join("\n")),
     "repos.add": (_params, result: { repo: string }) => `registered ${result.repo}`,
     "repos.remove": (params) => `unregistered ${String(params.repo)}`,
@@ -96,7 +95,6 @@ export const SETTINGS = feature({
               return marks.length === 0 ? branch.name : `${branch.name} (${marks.join(", ")})`;
             })
             .join(" · "),
-  
     "settings.get": (_params, result: SettingsAnswer) => settingsLines(result).join("\n"),
     "settings.set": (params, result: SettingsAnswer) => {
       const changed = new Set(Object.keys((params.settings ?? {}) as Params));

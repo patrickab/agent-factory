@@ -36,8 +36,8 @@
  *   change (a step its stop cut short says nothing about the wave: it stays where it was, `interrupted`, and a
  *   resume runs that step again) and leaves the review worktree for that resume
  */
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
+import { readFile, rm } from "node:fs/promises";
 import { basename } from "node:path";
 import { withoutPaths } from "./agent-view.ts";
 import { loadTaskFiles, type FactoryConfig } from "./config.ts";
@@ -215,10 +215,16 @@ async function targetConfig(declaration: WaveDeclaration, root: string) {
  * The review worktree on the wave's branch: the existing one (a run before this one left it), else a new one with the
  * `after_create` hooks of the target's tip. A new one whose hooks fail is removed again (as `launchTask` does for a
  * task): a later run prepares a fresh one rather than reuse one the hooks never finished. A rebase a dead run left in
- * progress is aborted.
+ * progress is aborted. A directory at its path that is no valid worktree of the repository (a runner killed while git
+ * added or removed it left it without a usable `.git`) is removed first and the worktree list pruned.
  */
 async function ensureWorktree(declaration: StartedWaveFold): Promise<string> {
   const path = reviewWorktree(declaration);
+  if (existsSync(path) && !(await validWorktree(declaration.repo, path))) {
+    log(declaration.id, `the review worktree ${path} is no valid worktree of the repository: removed`);
+    await rm(path, { recursive: true, force: true });
+    await git(runner.cleanup, declaration.repo, ["worktree", "prune"]);
+  }
   if (!existsSync(path)) {
     await git(runner.cleanup, declaration.repo, ["worktree", "prune"]);
     await git(runner.cleanup, declaration.repo, ["worktree", "add", "--quiet", path, declaration.branch]);
@@ -233,6 +239,19 @@ async function ensureWorktree(declaration: StartedWaveFold): Promise<string> {
   }
   await abortLeftoverRebase(runner.cleanup, path);
   return path;
+}
+
+/** Whether `path` is a worktree git lists for `repo` (not prunable) and whose top level git resolves to `path`. */
+async function validWorktree(repo: string, path: string): Promise<boolean> {
+  const real = realpathSync(path);
+  const list = await git(runner.cleanup, repo, ["worktree", "list", "--porcelain"]);
+  const entry = list.split("\n\n").find((block) => {
+    const listed = block.split("\n")[0].replace(/^worktree /, "");
+    return existsSync(listed) && realpathSync(listed) === real;
+  });
+  if (entry === undefined || entry.split("\n").some((line) => line.startsWith("prunable"))) return false;
+  const top = await git(runner.cleanup, path, ["rev-parse", "--show-toplevel"]).catch(() => null);
+  return top !== null && top !== "" && existsSync(top) && realpathSync(top) === real;
 }
 
 /**

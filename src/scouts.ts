@@ -296,7 +296,28 @@ export async function cancelScouts(caller: ScoutCaller): Promise<void> {
   for (const dir of await scoutDirs(caller)) await cancelScout(dir).catch(() => undefined);
 }
 
-/** Writes the scout's record (`queued`) and spawns its runner detached; resolves with its directory. */
+/** How long the starter waits for the spawned runner to exec (its command line to name the scout's directory). */
+const EXEC_WAIT_MS = 30_000;
+
+/**
+ * Whether the spawned `pid` became the runner of `dir` (its command line names `dir`): false once the process is gone
+ * or after `EXEC_WAIT_MS`. A pid recorded before its exec is the spawner's fork, which a waiter under load would take
+ * for an interrupted scout.
+ */
+async function execed(pid: number, dir: string): Promise<boolean> {
+  const deadline = Date.now() + EXEC_WAIT_MS;
+  for (;;) {
+    const argv = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
+    if (argv.split("\0").includes(dir)) return true;
+    if (!(await processExists(pid)) || Date.now() >= deadline) return false;
+    await Bun.sleep(ALIVE_RETRY_MS);
+  }
+}
+
+/**
+ * Writes the scout's record (`queued`) and spawns its runner detached; resolves with its directory. The runner's pid
+ * is recorded once it exec'd (`execed`): until then the scout counts as starting, never as interrupted.
+ */
 export async function startScout(declaration: ScoutDeclaration, env: RunnerEnv = process.env): Promise<string> {
   const bun = onPath("bun");
   if (bun === null) throw new Error("bun is not on PATH: the scout's runner needs it");
@@ -310,6 +331,8 @@ export async function startScout(declaration: ScoutDeclaration, env: RunnerEnv =
     await appendScoutEvent(dir, { kind: "state", state: "failed", error: "its runner did not start" });
     throw new Error("the scout's runner did not start");
   }
+  // A runner that ended before its exec was seen (fast, or it failed) still gets its pid: its own events tell the rest.
+  await execed(pid, dir);
   await appendScoutEvent(dir, { kind: "runner", pid });
   return dir;
 }
