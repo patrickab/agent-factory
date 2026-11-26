@@ -57,7 +57,7 @@ import {
   type WaveTaskEntry,
   type WaveView,
 } from "./waves.ts";
-import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
+import { liveWaveRunners, pokeWave, runnerSnapshot, stopWaveRunners, type RunnerSnapshot } from "./wave-poke.ts";
 import { cancelScouts, scoutUsage } from "./scouts.ts";
 import { waveFeedback } from "./feedback.ts";
 import { slotWaiting } from "./test-slots.ts";
@@ -149,8 +149,8 @@ async function pokeWaveRunner(id: string, env?: RunnerEnv): Promise<void> {
  * The views of the wave's started tasks by key. A started task whose record is gone (removed) counts as `cancelled`:
  * it never finishes.
  */
-export async function waveTaskViews(fold: WaveFold): Promise<{ states: Map<string, string | null>; views: Map<string, TaskView> }> {
-  const records = new Map((await listTasks()).map((record) => [record.id, record]));
+export async function waveTaskViews(fold: WaveFold, read: ListingReads = {}): Promise<{ states: Map<string, string | null>; views: Map<string, TaskView> }> {
+  const records = read.records ?? new Map((await listTasks()).map((record) => [record.id, record]));
   const states = new Map<string, string | null>();
   const views = new Map<string, TaskView>();
   await Promise.all(
@@ -161,13 +161,16 @@ export async function waveTaskViews(fold: WaveFold): Promise<{ states: Map<strin
         states.set(task.key, "cancelled");
         return;
       }
-      const view = await taskView(record, fold.stage);
+      const view = await taskView(record, fold.stage, read.snapshot);
       views.set(task.key, view);
       states.set(task.key, view.state);
     }),
   );
   return { states, views };
 }
+
+/** What a listing reads once for all its waves: every task record by id, the live runners (`runnerSnapshot`). */
+type ListingReads = { records?: ReadonlyMap<string, TaskRecord>; snapshot?: RunnerSnapshot };
 
 function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["usage"] {
   if (usage === null) return sum;
@@ -182,8 +185,8 @@ function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["u
 export type WaveLook = { view: WaveView; stuck: boolean };
 
 /** The wave as clients see it: its fold, its tasks' states and usage, whether its runner lives. */
-async function waveView(file: WaveFile, all?: WaveFile[]): Promise<WaveView> {
-  return (await lookWave(file, all)).view;
+async function waveView(file: WaveFile, all?: WaveFile[], read?: ListingReads): Promise<WaveView> {
+  return (await lookWave(file, all, read)).view;
 }
 
 /**
@@ -198,9 +201,9 @@ function queuedAfter(id: string, files: readonly WaveFile[]): WaveFold[] {
  * A queued wave that can start and that nothing starts: every wave it names is merged, and neither its runner nor one
  * of theirs lives (a merged wave's runner died before it poked). It counts as interrupted; `waves.retry` pokes it.
  */
-export async function queueStalled(fold: WaveFold, look: { waiting: string[]; never: string | null }, running: boolean): Promise<boolean> {
+export async function queueStalled(fold: WaveFold, look: { waiting: string[]; never: string | null }, running: boolean, snapshot?: RunnerSnapshot): Promise<boolean> {
   if (fold.stage !== "queued" || running || look.never !== null || look.waiting.length > 0) return false;
-  for (const id of fold.after) if ((await liveWaveRunners(id)).length > 0) return false;
+  for (const id of fold.after) if ((await liveWaveRunners(id, snapshot)).length > 0) return false;
   return true;
 }
 
@@ -279,18 +282,18 @@ export async function waveLook(file: WaveFile): Promise<WaveLook> {
   return lookWave(file);
 }
 
-/** `waveLook` with the waves read already (`all`: every wave), else they are read. */
-async function lookWave(file: WaveFile, all?: readonly WaveFile[]): Promise<WaveLook> {
+/** `waveLook` with the waves read already (`all`: every wave), else they are read; `read`: a listing's shared reads. */
+async function lookWave(file: WaveFile, all?: readonly WaveFile[], read: ListingReads = {}): Promise<WaveLook> {
   const full = foldWave(file.declaration, file.events);
   const { overrides: _overrides, ...fold } = full;
-  const { states, views } = await waveTaskViews(full);
-  const runners = await liveWaveRunners(fold.id);
+  const { states, views } = await waveTaskViews(full, read);
+  const runners = await liveWaveRunners(fold.id, read.snapshot);
   const running = runners.length > 0;
   const waitingForSlot = await slotWaiting(runners);
   const waves = all ?? (await listWaves());
   const queue = fold.stage === "queued" ? await queueLook(full, waves) : null;
   const stuck = (fold.stage === "building" && stuckKeys(full, states).length > 0) || (queue !== null && queue.never !== null);
-  const interrupted = (!RESTING_WAVE_STAGES.includes(fold.stage) && !running && !stuck) || (queue !== null && (await queueStalled(full, queue, running)));
+  const interrupted = (!RESTING_WAVE_STAGES.includes(fold.stage) && !running && !stuck) || (queue !== null && (await queueStalled(full, queue, running, read.snapshot)));
   let usage: WaveView["usage"] = null;
   const tasks = fold.tasks.map((task) => {
     const taskView = views.get(task.key);
@@ -622,9 +625,22 @@ export const WAVE_HANDLERS = {
   "waves.list": async (params, { cwd }) => {
     const tag = tagParam("waves.list", params.tag);
     const repo = params.repo === undefined ? undefined : await primaryOf(params.repo as string, cwd);
+    const origin = params.origin === undefined ? undefined : nonEmpty(params.origin)?.trim();
+    if (params.origin !== undefined && origin === undefined) throw new FactoryError("invalid", "waves.list: origin must be a non-empty session id");
+    if (params.open !== undefined && typeof params.open !== "boolean") throw new FactoryError("invalid", "waves.list: open must be true or false");
     const all = await listWaves();
-    const files = all.filter((file) => (repo === undefined || file.declaration.repo === repo) && (tag === undefined || tagInGroup(file.declaration.tag, tag)));
-    return { waves: await Promise.all(files.map((file) => waveView(file, all))) };
+    const files = all.filter(
+      (file) =>
+        (repo === undefined || file.declaration.repo === repo) &&
+        (tag === undefined || tagInGroup(file.declaration.tag, tag)) &&
+        (origin === undefined || file.declaration.origin === origin) &&
+        (params.open !== true || !WAVE_FINAL_STAGES.includes(foldWave(file.declaration, file.events).stage)),
+    );
+    if (files.length === 0) return { waves: [] };
+    // One read of the task records and one of the runners for every wave, not one per wave and task.
+    const [records, snapshot] = await Promise.all([listTasks(), runnerSnapshot()]);
+    const read: ListingReads = { records: new Map(records.map((record) => [record.id, record])), snapshot };
+    return { waves: await Promise.all(files.map((file) => waveView(file, all, read))) };
   },
 
   "waves.timeline": async (params) => {

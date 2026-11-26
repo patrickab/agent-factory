@@ -301,7 +301,8 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - Every step appends its event (`stage`, `gate`, `review` with the reviewer's session id, model, findings, usage and
   wall time, `merge`). The review worktree is removed when the wave leaves review and merge (unless it is dirty: then
   it stays). A runner started on a wave in `reviewing` or `merging` runs that step again from its start
-- `waves.get {id}` / `waves.list {repo?, tag?}` (tag: equal or prefix + `/`) answer `WaveView`s: the declaration
+- `waves.get {id}` / `waves.list {repo?, tag?, origin?, open?}` (tag: equal or prefix + `/`; origin: the declaring Pi
+  session's id; `open: true`: not merged or cancelled; filters combine) answer `WaveView`s: the declaration
   (without `overrides`), `stage`, `detail` (the last `stage` event's why, else null), each task's `state` (`pending`
   before it started) and `usage`, `counts` (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus
   reviews), `reviews`, `gates` (each with `flaky` when a step passed on its rerun), `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
@@ -531,6 +532,9 @@ Commands (inside a task's own Pi session):
 - `proofs/<id>.jsonl`: a gate proof, append-only, written by its runner: line 1 its declaration, then one `step` per
   gate step and one `end`; `.pid` its runner (pid and start time, written by `gates.prove` and by the runner itself), `.log` the runner's output, `.failing.log` the
   output of the step that failed
+- `cache/sessions/<session file name>.json`: what a finished task's (`done`, `cancelled`) session file says (state,
+  usage, outcome), with the file's size and mtime; read instead of the session while both match. Only a cache: deleting
+  it costs one read per session
 - Reviews: `<agent dir>/factory-reviews/<session id>/`. Merge lock and queue: in the repo's git common dir
 
 ## Entry protocol

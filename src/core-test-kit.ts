@@ -17,7 +17,7 @@ import { callAction, FactoryError, type TaskView } from "./core.ts";
 import { liveRunners, stopRunners } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, type TaskRecord } from "./tasks.ts";
-import { stopWaveRunners } from "./wave-poke.ts";
+import { liveWaveRunners, runnerSnapshot, stopWaveRunners } from "./wave-poke.ts";
 import { listWaves } from "./waves.ts";
 
 export let savedEnv: NodeJS.ProcessEnv;
@@ -155,8 +155,11 @@ process.exit(0);
 
   afterEach(async () => {
     // Wave runners first: they would start tasks while the tasks' runners stop.
-    for (const wave of await listWaves()) await stopWaveRunners(wave.declaration.id);
-    for (const record of await listTasks()) await stopRunners(record);
+    // Only those with a live runner: a search per wave and task would cost seconds in a case with many.
+    const waveRunners = await runnerSnapshot();
+    for (const wave of await listWaves()) if ((await liveWaveRunners(wave.declaration.id, waveRunners)).length > 0) await stopWaveRunners(wave.declaration.id);
+    const taskRunners = await runnerSnapshot();
+    for (const record of await listTasks()) if ((await liveRunners(record, taskRunners)).length > 0) await stopRunners(record);
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
     Object.assign(process.env, savedEnv);
   });

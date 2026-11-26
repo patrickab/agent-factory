@@ -1,6 +1,6 @@
 /** The core's wave actions, `tasks.wait` over waves and what the wave's runner asks (`core-waves.ts`), over the fixture of `core-test-kit.ts`. */
 import { describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ACTIONS, callAction } from "./core.ts";
 import type { TaskView } from "./core-tasks.ts";
@@ -9,7 +9,7 @@ import { startWaveTasks, taskWave, waveMergeRefusal, waveReviewWorktree } from "
 import { defaultModels } from "./settings.ts";
 import { listTasks, writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath } from "./wave-poke.ts";
-import { appendWaveEvent, createWave, listWaves, readWave, type WaveView } from "./waves.ts";
+import { appendWaveEvent, appendWaveEvents, createWave, listWaves, readWave, type WaveView } from "./waves.ts";
 
 useCoreFixture();
 
@@ -237,6 +237,65 @@ describe("waves", () => {
     expect(await list({ tag: "factory/w1" })).toEqual(["factory/w1"]);
     expect(await list({ repo })).toEqual(["factory/w1", "factory/w2"]);
     await expectError(list({ tag: "a//" }), "invalid", "tag");
+  });
+
+  test("waves.list {origin}: the waves a session declared; {open: true}: those not merged or cancelled; both with repo and tag", async () => {
+    const repo = await registeredRepo();
+    const wave = async (n: number, tag: string, origin: string | null, stage?: "merged" | "cancelled" | "blocked", waveRepo = repo) => {
+      const id = `5a000000-${RUN}-4000-8000-00000000000${n}`;
+      await createWave({ id, repo: waveRepo, tag, plan: null, title: `wave ${tag}`, request: "r", branch: `main-${tag}`, target: "main", base: "abc", origin, createdAt: `2026-01-01T00:00:0${n}.000Z`, overrides: {} });
+      if (stage !== undefined) await appendWaveEvent(id, { kind: "stage", stage, reason: stage === "blocked" ? "infra" : null });
+    };
+    await wave(1, "o/w1", "session-a", "merged");
+    await wave(2, "o/w2", "session-a", "blocked");
+    await wave(3, "o/w3", "session-b", "cancelled");
+    await wave(4, "p/w4", "session-a");
+    await wave(5, "o/w5", null, undefined, "/elsewhere");
+    const list = async (params: object) => ((await callAction("waves.list", params, { cwd: repo })) as { waves: WaveView[] }).waves.map((wave) => wave.tag);
+    expect(await list({ origin: "session-a" })).toEqual(["o/w1", "o/w2", "p/w4"]);
+    expect(await list({ origin: "session-c" })).toEqual([]);
+    expect(await list({ open: true })).toEqual(["o/w2", "p/w4", "o/w5"]);
+    expect(await list({ open: false })).toEqual(["o/w1", "o/w2", "o/w3", "p/w4", "o/w5"]);
+    expect(await list({ origin: "session-a", open: true, tag: "o" })).toEqual(["o/w2"]);
+    expect(await list({ open: true, repo })).toEqual(["o/w2", "p/w4"]);
+    await expectError(list({ origin: "" }), "invalid", "origin");
+    await expectError(list({ open: "yes" }), "invalid", "open");
+  });
+
+  test("a second waves.list over 50 merged waves reads no task session file; a session that grew is read again", async () => {
+    const repo = makeRepo();
+    const state = (name: string) => ({ type: "custom", customType: "factory-state", timestamp: "t", data: { state: name, round: 1, reason: "r" } });
+    const usage = (total: number) => ({ type: "message", message: { role: "assistant", usage: { input: 1, output: 2, cacheRead: 3, cost: { total } } } });
+    const sessions: string[] = [];
+    for (let n = 0; n < 50; n++) {
+      const id = `5c0000${String(n).padStart(2, "0")}-${RUN}-4000-8000-000000000000`;
+      await writtenWave(id, repo, `cache/w${n}`, `2026-01-01T00:00:${String(n).padStart(2, "0")}.000Z`);
+      const record = { ...fakeRecord(`5d0000${String(n).padStart(2, "0")}-${RUN}-4000-8000-000000000000`, repo), wave: id };
+      await writeTask(record);
+      const session = writeSession(record, [state("running"), usage(0.5), state("done")]);
+      utimesSync(session, 1_700_000_000, 1_700_000_000);
+      sessions.push(session);
+      await appendWaveEvents(id, [
+        { kind: "tasks", tasks: [spec("a")] },
+        { kind: "task", key: "a", taskId: record.id, sessionId: record.sessionId },
+        { kind: "stage", stage: "merged", reason: null },
+      ]);
+    }
+    const list = async () => ((await callAction("waves.list", { tag: "cache" })) as { waves: WaveView[] }).waves;
+    const first = await list();
+    expect(first).toHaveLength(50);
+    expect(first.every((wave) => wave.stage === "merged" && wave.tasks[0]?.state === "done" && wave.usage?.cost === 0.5)).toBe(true);
+    // Same size and mtime, other content: a read would see no state and no usage.
+    for (const path of sessions) {
+      writeFileSync(path, " ".repeat(statSync(path).size));
+      utimesSync(path, 1_700_000_000, 1_700_000_000);
+    }
+    expect(await list()).toEqual(first);
+    // A session that changed (its task continued) is read again.
+    appendFileSync(sessions[0], `${JSON.stringify(state("running"))}\n`);
+    const again = await list();
+    expect([again[0].tasks[0]?.state, again[0].usage]).toEqual(["running", null]);
+    expect(again.slice(1)).toEqual(first.slice(1));
   });
 
   test("cost in cents: rounded in the view, the wave's from the unrounded sum", async () => {

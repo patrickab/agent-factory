@@ -53,8 +53,13 @@ export const WAVES = feature({
     ),
     "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage. Answers {wave}", { id: WAVE_ID }, ["id"], false),
     "waves.list": spec(
-      "Every wave, or the repository's, or those under a tag. Answers {waves}",
-      { repo: { type: "string", description: "Only the waves of this repository" }, tag: { type: "string", description: "Only the waves whose tag is this one or lies under it" } },
+      "Every wave, or the repository's, or those under a tag, or a session's, or the open ones (filters combine). Answers {waves}",
+      {
+        repo: { type: "string", description: "Only the waves of this repository" },
+        tag: { type: "string", description: "Only the waves whose tag is this one or lies under it" },
+        origin: { type: "string", description: "Only the waves this Pi session (its id) declared" },
+        open: { type: "boolean", description: "true: only the waves not merged or cancelled" },
+      },
       [],
       false,
     ),

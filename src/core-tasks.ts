@@ -13,8 +13,8 @@
  * - An old merge request record (invariant 7) can only be removed
  */
 import { existsSync, realpathSync } from "node:fs";
-import { readFile, stat, truncate } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { mkdir, readFile, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { requireFactoryModels } from "./core-settings.ts";
 import { diffFileCounts, git, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
@@ -35,12 +35,12 @@ import {
 } from "./launch.ts";
 import { inboxReadPath, readFactoryStates, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { runCommand } from "./run.ts";
-import { loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
+import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
 import { COMMIT_ASK_TYPE, isFactoryPrompt, messageText, normalizeModels, parseSettingsFields, RESTING_STATES, type Finding, type Settings, type State } from "./state.ts";
 import { listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { cents, errorText, isRecord } from "./util.ts";
 import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
-import { pokeWave } from "./wave-poke.ts";
+import { pokeWave, type RunnerSnapshot } from "./wave-poke.ts";
 import { addScoutUsage, cancelScouts, scoutUsage } from "./scouts.ts";
 import { slotWaiting } from "./test-slots.ts";
 
@@ -252,10 +252,15 @@ export function rawScoutingCost(view: TaskView): number {
 }
 
 export { cents };
-export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise<TaskView> {
-  const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
-  const entries = sessionPath === null ? [] : parseEntries(await readFile(sessionPath, "utf8"));
-  let last: { state: State; round: number; reason: string; at: string } | null = null;
+
+/** What a task's session file says (`sessionSummary`): a function of its content only. `usage` unrounded. */
+interface SessionSummary extends Pick<TaskView, "settings" | "question" | "lastMessage" | "failure" | "review" | "merged" | "flaky"> {
+  last: { state: State; round: number; reason: string; at: string } | null;
+  usage: TaskView["usage"];
+}
+
+function summarize(entries: Record<string, unknown>[]): SessionSummary {
+  let last: SessionSummary["last"] = null;
   let settings: Settings | null = null;
   let question: string | null = null;
   let usage: TaskView["usage"] = null;
@@ -287,9 +292,51 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
       addUsage(input, output, isRecord(cost) ? cost.total : undefined, cacheRead, cacheWrite);
     }
   }
+  const lastState = last as SessionSummary["last"];
+  return { last: lastState, settings, question, usage, ...taskOutcome(entries, lastState?.state === "blocked"), flaky: flakyNames(entries) };
+}
+
+/** Where the summary of the session file `sessionPath` is kept once its task finished: `cache/sessions/<file name>.json`. */
+function summaryCachePath(sessionPath: string): string {
+  return join(factoryHome(), "cache", "sessions", `${basename(sessionPath)}.json`);
+}
+
+/**
+ * The summary of the session file `sessionPath` (none: empty). A finished task's (`done`, `cancelled`) is kept on disk
+ * with the file's size and mtime and read from there while both are the same: a listing does not read and parse the
+ * sessions of every task ever run again.
+ */
+async function sessionSummary(sessionPath: string | null): Promise<SessionSummary> {
+  if (sessionPath === null) return summarize([]);
+  const file = await stat(sessionPath).catch(() => null);
+  const cachePath = summaryCachePath(sessionPath);
+  if (file !== null) {
+    const cached: unknown = await readFile(cachePath, "utf8").then(JSON.parse, () => null).catch(() => null);
+    if (isRecord(cached) && cached.size === file.size && cached.mtimeMs === file.mtimeMs && isRecord(cached.summary)) return cached.summary as unknown as SessionSummary;
+  }
+  const summary = summarize(parseEntries(await readFile(sessionPath, "utf8")));
+  if (file !== null && summary.last !== null && FINAL_STATES.includes(summary.last.state)) {
+    const temporary = `${cachePath}.${process.pid}.${crypto.randomUUID()}`;
+    try {
+      await mkdir(dirname(cachePath), { recursive: true });
+      await writeFile(temporary, JSON.stringify({ size: file.size, mtimeMs: file.mtimeMs, summary }), "utf8");
+      await rename(temporary, cachePath);
+    } catch {
+      // Only a cache: the next listing reads the session again.
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+  }
+  return summary;
+}
+
+/** The task as clients see it. `knownWaveStage`: its wave's stage, read already; `snapshot`: the runners, looked up already. */
+export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage, snapshot?: RunnerSnapshot): Promise<TaskView> {
+  const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
+  const { last, settings, question, usage: sessionUsage, ...outcome } = await sessionSummary(sessionPath);
+  let usage: TaskView["usage"] = sessionUsage === null ? null : { ...sessionUsage };
   const scouting = await scoutUsage({ kind: "task", id: record.id });
   usage = addScoutUsage(usage, scouting) as TaskView["usage"];
-  const runners = await liveRunners(record);
+  const runners = await liveRunners(record, snapshot);
   const running = runners.length > 0;
   const waitingForSlot = await slotWaiting(runners);
   const view: Omit<TaskView, "actions"> = {
@@ -315,8 +362,11 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
     settings,
     usage: usage === null ? null : { ...(usage as NonNullable<TaskView["usage"]>), cost: cents((usage as NonNullable<TaskView["usage"]>).cost) },
     scoutingCost: cents(scouting?.cost ?? 0),
-    ...taskOutcome(entries, last?.state === "blocked"),
-    flaky: flakyNames(entries),
+    lastMessage: outcome.lastMessage,
+    failure: outcome.failure,
+    review: outcome.review,
+    merged: outcome.merged,
+    flaky: outcome.flaky,
     ...(waitingForSlot ? { waitingForSlot } : {}),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);

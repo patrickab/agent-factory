@@ -179,7 +179,7 @@ tasks.wait ...                       (limit reached)
 | `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], after?, plan?, contracts?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5 done  factory/w1 · started: record · waits: actions (record), runner (actions)`; with `after`: `declared wave 9c4d1e2f  queued  0/2 done  factory/w3 · waits for: 3f2a91c0` |
 | `waves.add` | `{id, tasks}` | `{wave: WaveView}` | `wave 3f2a91c0  building  4/6 done  factory/w1 · added: fix running` |
 | `waves.get` | `{id}` | `{wave: WaveView}` | the wave block above |
-| `waves.list` | `{repo?, tag?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count |
+| `waves.list` | `{repo?, tag?, origin?, open?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count |
 | `waves.timeline` | `{id, since?}` | `{events: WaveEvent[], next: number}` | none: not offered to agents; the CLI prints JSON |
 | `waves.retry` · `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  reviewing  5/5 done  factory/w1` · `... merging ...` · `... cancelled ...` |
 | `waves.update` | `{id, title?, request?}` | `{wave: WaveView, changed: boolean}` | the wave line, `updated, the next review reads it` · `nothing changed` |

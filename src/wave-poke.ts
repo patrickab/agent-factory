@@ -10,7 +10,7 @@
  *   only those with the caller's marker (`ownRunner` of `spawn.ts`, invariant 16)
  * - Imports nothing outside node built-ins and the plain plugin modules: a task's runner pokes its wave when it ends
  */
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runCommand } from "./run.ts";
 import { factoryHome } from "./settings.ts";
@@ -97,9 +97,28 @@ export async function pokeWave(id: string, env: RunnerEnv = process.env): Promis
   return pid !== undefined;
 }
 
-/** The pids of the wave's live runners with the caller's marker, found by their command line (`wave-runner.ts <id>`, the whole id). */
-export async function liveWaveRunners(id: string): Promise<number[]> {
+/**
+ * The live runner processes (`runner.ts`, `wave-runner.ts`) with the caller's marker at one moment, with their
+ * arguments: one scan of `/proc` serves the looks of a whole listing (`waves.list`) instead of a `pgrep` per task and
+ * wave.
+ */
+export type RunnerSnapshot = readonly { pid: number; args: string[] }[];
+
+export async function runnerSnapshot(): Promise<RunnerSnapshot> {
+  const pids = (await readdir("/proc")).filter((name) => /^\d+$/.test(name)).map(Number);
+  const found = await Promise.all(pids.map(async (pid) => ({ pid, args: (await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "")).split("\0").filter((arg) => arg !== "") })));
+  const runners = found.filter(({ pid, args }) => pid !== process.pid && args.some((arg) => arg.endsWith("runner.ts")));
+  const own = new Set(await ownRunners(runners.map(({ pid }) => pid)));
+  return runners.filter(({ pid }) => own.has(pid));
+}
+
+/**
+ * The pids of the wave's live runners with the caller's marker, found by their command line (`wave-runner.ts <id>`, the
+ * whole id); among `snapshot` when given.
+ */
+export async function liveWaveRunners(id: string, snapshot?: RunnerSnapshot): Promise<number[]> {
   if (!isWaveId(id)) return [];
+  if (snapshot !== undefined) return snapshot.filter(({ args }) => args.length >= 2 && args[args.length - 1] === id && args[args.length - 2].endsWith("wave-runner.ts")).map(({ pid }) => pid);
   const result = await runCommand(["pgrep", "-f", `wave-runner\\.ts ${id}$`], { cwd: "/", maxStdoutChars: 10_000 });
   // Exit 1 is "no match"; anything else (pgrep missing or failing) would hide a live runner.
   if (result.exitCode === 1) return [];

@@ -31,7 +31,7 @@ import type { ModelSize, Settings, StartPayload } from "./state.ts";
 import { onPath, ownRunners, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { removeSyncState } from "./sync.ts";
-import { TASK_WAVE_ENV } from "./wave-poke.ts";
+import { TASK_WAVE_ENV, type RunnerSnapshot } from "./wave-poke.ts";
 import { outputTail } from "./util.ts";
 
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory, and a runner would not start.
@@ -315,9 +315,10 @@ export async function restoreWorktree(record: TaskRecord): Promise<void> {
  * The pids of this factory's runners of a task still alive, found by their command line (`runner.ts ... <sessionId> ...`):
  * `pgrep` finds the candidates, then the session id must be a whole argument after `runner.ts` (`/proc/<pid>/cmdline`),
  * so a short id never matches another task's runner nor a wave's (`wave-runner.ts`), and the runner must carry the
- * caller's marker (`ownRunner`, invariant 16).
+ * caller's marker (`ownRunner`, invariant 16). Among `snapshot` (`runnerSnapshot`) when given.
  */
-export async function liveRunners(record: Pick<TaskRecord, "sessionId">): Promise<number[]> {
+export async function liveRunners(record: Pick<TaskRecord, "sessionId">, snapshot?: RunnerSnapshot): Promise<number[]> {
+  if (snapshot !== undefined) return snapshot.filter(({ args }) => runnerOf(args, record.sessionId)).map(({ pid }) => pid);
   const pattern = `(^|[ /])runner\\.ts .*${record.sessionId.replace(/[^A-Za-z0-9_-]/g, ".")}`;
   const result = await runCommand(["pgrep", "-f", pattern], { cwd: "/", maxStdoutChars: 10_000 });
   // Exit 1 is "no match"; anything else (pgrep missing or failing) would hide a live runner.
@@ -331,7 +332,11 @@ export async function liveRunners(record: Pick<TaskRecord, "sessionId">): Promis
 /** Whether process `pid` is a task runner (`runner.ts`) with `sessionId` as one of its arguments; false once it ended. */
 async function runsSession(pid: number, sessionId: string): Promise<boolean> {
   const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
-  const args = cmdline.split("\0");
+  return runnerOf(cmdline.split("\0"), sessionId);
+}
+
+/** Whether `args` are a task runner's (`runner.ts`) with `sessionId` as one of its arguments. */
+function runnerOf(args: readonly string[], sessionId: string): boolean {
   const script = args.findIndex((arg) => basename(arg) === "runner.ts");
   return script >= 0 && args.slice(script + 1).includes(sessionId);
 }
