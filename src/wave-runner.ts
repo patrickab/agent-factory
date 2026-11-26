@@ -19,6 +19,8 @@
  * - Every step appends its event (`gate`, `review`, `merge`, `stage`). A stage change is a compare-and-append on the
  *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there.
  *   While it reviews, the runner watches the log: once the stage left `reviewing` it kills the gates and the reviewer
+ * - A rebase of either step that conflicts only where both sides added lines (`additions-merge.ts`) is resolved ours
+ *   then theirs, a `resolved` event names the files, and the step goes on to its gates; any other conflict blocks
  * - A block's `stage` event says why in `detail` (the conflicting paths, the error, the dirty worktree and its paths)
  * - Resumable from the log: a runner started on a wave in `reviewing` or `merging` runs that step again from its start
  * - Invariant 2: the review worktree must hold nothing but HEAD's tree before the rebase, after it, and after the gates
@@ -42,6 +44,7 @@ import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, tr
 import { runGateStep } from "./flaky-rerun.ts";
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
+import { resolveAdditions } from "./additions-merge.ts";
 import { commentReview, mergePending, publishMerge, publishWave } from "./remote.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
@@ -297,7 +300,15 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
     // The gates and the reviewer see the committed tree only: anything else in the worktree is somebody's work.
     if (await uncommittedFiles(runner.run, root)) return leave("blocked", "dirty", await dirtyDetail(root));
     const conflicts = await rebaseWorktree(runner.run, runner.cleanup, root, task, config.protected, task.title, true);
-    if (conflicts) return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${conflicts.join(", ")}`);
+    if (conflicts) {
+      // Additions on both sides at one place: the factory keeps both and the gates judge the result.
+      const resolved = await resolveAdditions(runner.run, root, fold.target);
+      if ("refused" in resolved) {
+        log(id, `the conflict is not additions-only: ${resolved.refused}`);
+        return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${conflicts.join(", ")}`);
+      }
+      if (!(await recordResolved(id, "reviewing", { kind: "resolved", phase: "review", ...resolved }))) return removeWorktree(fold);
+    }
     // The rebase brings the target's .gitignore: a file it stopped ignoring is no gate output.
     if (await uncommittedFiles(runner.run, root)) return leave("blocked", "dirty", await dirtyDetail(root));
     // The rebased branch on the forge, its request opened (once): recorded, never blocking.
@@ -371,6 +382,16 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
   }
 }
 
+/** How often a merge resolves additions-only conflicts and tries again (the target moves on meanwhile). */
+const ADDITIONS_ATTEMPTS = 3;
+
+/** Appends the `resolved` event while the wave is still at `stage`; false when it moved on. Logs the files. */
+async function recordResolved(id: string, stage: WaveStage, event: Extract<NewWaveEvent, { kind: "resolved" }>): Promise<boolean> {
+  const written = await appendWaveEvents(id, (now) => (now.stage === stage ? [event] : null));
+  log(id, `the rebase onto ${event.onto.slice(0, 8)} conflicted only where both sides added lines, resolved ours then theirs: ${event.files.join(", ")}`);
+  return written !== null;
+}
+
 /**
  * `merging`: the merge queue, merge gates and the fast-forward of the target. The merge gates are skipped on the
  * commit they passed on before the review (`gated`): they run again only when the target moved since.
@@ -404,21 +425,33 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
       queueMs = Date.now() - started;
     }
   };
-  const outcome = await mergeTask({
-    exec: runner.run,
-    cleanup: runner.cleanup,
-    root,
-    round: fold.reviews.length,
-    task,
-    config,
-    intent: (data) => {
-      before = data.before;
-    },
-    status,
-    asIs: true,
-    gated,
-    stop: () => stopping,
-  });
+  const merging = () =>
+    mergeTask({
+      exec: runner.run,
+      cleanup: runner.cleanup,
+      root,
+      round: fold.reviews.length,
+      task,
+      config,
+      intent: (data) => {
+        before = data.before;
+      },
+      status,
+      asIs: true,
+      gated,
+      stop: () => stopping,
+    });
+  let outcome = await merging();
+  // Additions on both sides at one place: resolved, then the merge again, its gates on the result.
+  for (let attempt = 1; outcome.result.kind === "conflict" && attempt <= ADDITIONS_ATTEMPTS && !stopping; attempt++) {
+    const resolved = await resolveAdditions(runner.run, root, fold.target).catch((error: unknown) => ({ refused: errorText(error) }));
+    if ("refused" in resolved) {
+      log(id, `the conflict is not additions-only: ${resolved.refused}`);
+      break;
+    }
+    if (!(await recordResolved(id, "merging", { kind: "resolved", phase: "merge", ...resolved }))) return removeWorktree(fold);
+    outcome = await merging();
+  }
   const gates = outcome.gates.filter((gate: GateData) => gate.phase === "merge_gates");
   const gate = gates.length === 0 ? [] : [gateEvent("merge", gates.map((data) => ({ result: { output: data.outputTail, durationMs: data.durationMs }, passed: data.exitCode === 0 && !data.killed, flaky: data.flaky })))];
   const { result } = outcome;

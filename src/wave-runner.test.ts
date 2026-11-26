@@ -306,21 +306,71 @@ describe("the wave runner", () => {
     }
   });
 
-  test("a rebase conflict blocks it with reason conflict and deletes nothing", async () => {
+  /** A commit on the wave's branch, made in a worktree of its own. */
+  function waveCommit(repo: string, file: string, text: string, message: string): void {
+    const work = join(caseDir, "work-extra");
+    git(repo, "worktree", "add", "--quiet", work, BRANCH);
+    commit(work, file, text, message);
+    git(repo, "worktree", "remove", work);
+  }
+
+  test("a rebase conflict that changes a line blocks it with reason conflict and deletes nothing", async () => {
     const repo = await waveRepo();
+    waveCommit(repo, "a.txt", "wave's a\n", "feat: change a");
     const wave = git(repo, "rev-parse", BRANCH);
-    commit(repo, "b.txt", "main's b\n", "main: add b");
+    commit(repo, "a.txt", "main's a\n", "main: change a");
     const main = git(repo, "rev-parse", "main");
     await runWave(WAVE);
-    expect([(await getWave()).stage, (await getWave()).reason]).toEqual(["blocked", "conflict"]);
+    expect([(await getWave()).stage, (await getWave()).reason, (await getWave()).detail]).toEqual(["blocked", "conflict", "the rebase onto main conflicts on a.txt"]);
     expect([git(repo, "rev-parse", BRANCH), git(repo, "rev-parse", "main")]).toEqual([wave, main]);
     expect((await getWave()).reviews).toEqual([]);
+    expect((await getWave()).resolved).toBeUndefined();
   });
+
+  test("both sides add lines at one place: resolved before the review's gates, ours then theirs, the log names the files", async () => {
+    const count = join(caseDir, "merge-gates");
+    const repo = await waveRepo(`gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "cat a.txt >> ${count}"]\n`);
+    waveCommit(repo, "a.txt", "a\nwave\n", "feat: wave adds to a");
+    const main = commit(repo, "a.txt", "a\nmain\n", "main: add to a");
+    const lines: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args.join(" ")));
+    try {
+      expect(await runWave(WAVE)).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    const wave = await getWave();
+    expect(wave.stage).toBe("merged");
+    expect(wave.resolved).toEqual([{ at: expect.any(String), phase: "review", onto: main, files: ["a.txt"] }]);
+    expect(git(repo, "show", "main:a.txt")).toBe("a\nmain\nwave");
+    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: wave adds to a\nfeat: add c\nfeat: add b\nmain: add to a\ninit");
+    // The gates ran on the resolved tree.
+    expect(readFileSync(count, "utf8")).toBe("a\nmain\nwave\n");
+    expect((await timeline()).map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "resolved", "gate", "review", "merging", "merge", "merged"]);
+    expect(lines.some((line) => line.includes("resolved ours then theirs: a.txt"))).toBe(true);
+  });
+
+  test("the target gets additions at the same place after the review: the merge resolves them and runs its gates again", async () => {
+    const count = join(caseDir, "merge-gates");
+    const repo = await waveRepo(`gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "cat a.txt >> ${count}"]\n`, "done", { merge: "review" });
+    waveCommit(repo, "a.txt", "a\nwave\n", "feat: wave adds to a");
+    await runWave(WAVE);
+    expect((await getWave()).stage).toBe("waiting_approve");
+    const main = commit(repo, "a.txt", "a\nmain\n", "main: add to a");
+    await holding(() => callAction("waves.approve", { id: WAVE }));
+    expect(await runWave(WAVE)).toBe(0);
+    const wave = await getWave();
+    expect([wave.stage, wave.resolved]).toEqual(["merged", [{ at: expect.any(String), phase: "merge", onto: main, files: ["a.txt"] }]]);
+    expect(git(repo, "show", "main:a.txt")).toBe("a\nmain\nwave");
+    expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", true], ["merge", true]]);
+    expect(readFileSync(count, "utf8")).toBe("a\nwave\na\nmain\nwave\n");
+  }, 30_000);
 
   test("waves.retry after a blocked rebase: review and merge run again from the rebase, in a runner it starts", async () => {
     const repo = await waveRepo();
+    waveCommit(repo, "a.txt", "wave's a\n", "feat: change a");
     const init = git(repo, "rev-parse", "main");
-    commit(repo, "b.txt", "main's b\n", "main: add b");
+    commit(repo, "a.txt", "main's a\n", "main: change a");
     await runWave(WAVE);
     expect([(await getWave()).stage, (await getWave()).actions]).toEqual(["blocked", ["waves.add", "waves.retry", "waves.cancel", "waves.remove"]]);
     // The supervisor resolves it: the conflicting commit leaves the target.
@@ -329,7 +379,7 @@ describe("the wave runner", () => {
     expect(retried.stage).toBe("reviewing");
     await until(async () => (await getWave()).stage === "merged");
     await until(async () => (await liveWaveRunners(WAVE)).length === 0);
-    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
+    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: change a\nfeat: add c\nfeat: add b\ninit");
     const timeline = (await callAction("waves.timeline", { id: WAVE })) as { events: { kind: string; stage?: string; reason?: string }[] };
     expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "blocked", "reviewing", "gate", "review", "merging", "merge", "merged"]);
   }, 30_000);

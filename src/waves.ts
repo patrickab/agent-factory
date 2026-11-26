@@ -98,6 +98,8 @@ export type WaveGate = { at: string; phase: "review" | "merge"; passed: boolean;
 /** The commit range that reached the target. */
 export type WaveMerge = { at: string; from: string; to: string; queueMs: number };
 export type WaveRemote = { number: number | null; url: string | null; pushed: string | null; error: string | null };
+/** A rebase onto the target whose conflicts were all additions on both sides, resolved by the factory (`additions-merge.ts`). */
+export type WaveResolved = { at: string; phase: "review" | "merge"; onto: string; files: string[] };
 
 /** One line after the declaration. A `remote` event sets only the fields it carries. */
 export type WaveEvent =
@@ -118,7 +120,9 @@ export type WaveEvent =
    */
   | { at: string; kind: "update"; key?: string; title?: string; request?: string; after?: string[]; model?: ModelSize }
   /** The runner launches the pending task `key` with its spec as folded now; its `task` event follows (or a `stage` event). */
-  | { at: string; kind: "launch"; key: string };
+  | { at: string; kind: "launch"; key: string }
+  /** The rebase onto the target `onto` conflicted only where both sides added lines: resolved ours then theirs. */
+  | ({ kind: "resolved" } & WaveResolved);
 
 /** One `update` event as `waves.get` shows it: the task's `key` (null: the wave's own) and the fields it changed. */
 export type WaveUpdate = { at: string; key: string | null; fields: string[] };
@@ -168,6 +172,8 @@ export interface WaveFold extends WaveDeclaration {
   remote: WaveRemote | null;
   /** The `update` events, oldest first; absent when none (a log without them folds as before). */
   updates?: WaveUpdate[];
+  /** The `resolved` events, oldest first; absent when none. */
+  resolved?: WaveResolved[];
 }
 
 /** A wave that has its branch: declared without `after`, or started (`start` event). */
@@ -199,6 +205,8 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   remote: WaveRemote | null;
   /** What `tasks.update` and `waves.update` changed, oldest first; absent when nothing did. */
   updates?: WaveUpdate[];
+  /** The rebases whose additions-only conflicts the factory resolved, oldest first; absent when none. */
+  resolved?: WaveResolved[];
   usage: Usage | null;
   /** The part of `usage.cost` the wave's and its tasks' scouts spent. Always set by the core. */
   scoutingCost?: number;
@@ -408,6 +416,8 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
     }
     case "launch":
       return { at, kind, key: str(raw, "key") };
+    case "resolved":
+      return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), onto: str(raw, "onto"), files: strings(raw, "files") ?? [] };
     default:
       throw new Error(`kind ${JSON.stringify(kind)} is no wave event`);
   }
@@ -637,6 +647,11 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
       }
       case "contract":
         break;
+      case "resolved": {
+        const { kind: _kind, ...resolved } = event;
+        (fold.resolved ??= []).push({ ...resolved, files: [...resolved.files] });
+        break;
+      }
       default:
         throw new Error(`kind ${JSON.stringify((event as { kind: unknown }).kind)} is no wave event`);
     }
