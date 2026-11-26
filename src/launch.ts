@@ -165,10 +165,10 @@ export interface LaunchInput {
   /** The wave's contracts (in the memory-store `plan`): read now, named in the coder's first message, stamped on the record. */
   contracts?: readonly string[];
   /**
-   * Checked once the worktree on the target `branch` exists, right before the record is written; a throw undoes the
-   * start. `tasks.start` checks there again that no open wave owns the branch (a `waves.start` racing it).
+   * Checked (and the new `worktree` prepared) once the worktree on the target `branch` exists, right before the record
+   * is written; a throw undoes the start. `tasks.start` checks there again that no open wave owns the branch (a `waves.start` racing it).
    */
-  beforeRecord?: (branch: string) => Promise<void>;
+  beforeRecord?: (branch: string, worktree: string) => Promise<void>;
 }
 
 export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
@@ -211,7 +211,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
     try {
       await runAfterCreate(commands.run, worktree);
       if (aborted()) throw new Error("the start was aborted");
-      await input.beforeRecord?.(settings.branch);
+      await input.beforeRecord?.(settings.branch, worktree);
       const record: TaskRecord = {
         id,
         repo,

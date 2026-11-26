@@ -100,6 +100,12 @@ export type WaveMerge = { at: string; from: string; to: string; queueMs: number 
 export type WaveRemote = { number: number | null; url: string | null; pushed: string | null; error: string | null };
 /** A rebase onto the target whose conflicts were all additions on both sides, resolved by the factory (`additions-merge.ts`). */
 export type WaveResolved = { at: string; phase: "review" | "merge"; onto: string; files: string[] };
+/**
+ * A rebase onto the target that was not additions-only (`wave-runner.ts`): the wave builds again with the task `key`,
+ * whose worktree holds the wave's branch `head` merged onto the target's tip `onto` with the markers left
+ * (`core-waves.ts`). `files`: the conflicting paths.
+ */
+export type WaveConflict = { at: string; phase: "review" | "merge"; key: string; head: string; onto: string; files: string[] };
 
 /** One line after the declaration. A `remote` event sets only the fields it carries. */
 export type WaveEvent =
@@ -122,7 +128,9 @@ export type WaveEvent =
   /** The runner launches the pending task `key` with its spec as folded now; its `task` event follows (or a `stage` event). */
   | { at: string; kind: "launch"; key: string }
   /** The rebase onto the target `onto` conflicted only where both sides added lines: resolved ours then theirs. */
-  | ({ kind: "resolved" } & WaveResolved);
+  | ({ kind: "resolved" } & WaveResolved)
+  /** The rebase onto the target conflicted otherwise: the task `key` (added with it) resolves it. */
+  | ({ kind: "conflict" } & WaveConflict);
 
 /** One `update` event as `waves.get` shows it: the task's `key` (null: the wave's own) and the fields it changed. */
 export type WaveUpdate = { at: string; key: string | null; fields: string[] };
@@ -174,6 +182,8 @@ export interface WaveFold extends WaveDeclaration {
   updates?: WaveUpdate[];
   /** The `resolved` events, oldest first; absent when none. */
   resolved?: WaveResolved[];
+  /** The `conflict` events, oldest first; absent when none. */
+  conflicts?: WaveConflict[];
 }
 
 /** A wave that has its branch: declared without `after`, or started (`start` event). */
@@ -207,6 +217,8 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   updates?: WaveUpdate[];
   /** The rebases whose additions-only conflicts the factory resolved, oldest first; absent when none. */
   resolved?: WaveResolved[];
+  /** The conflicts a task was added for (`conflict-<n>`), oldest first; absent when none. */
+  conflicts?: WaveConflict[];
   usage: Usage | null;
   /** The part of `usage.cost` the wave's and its tasks' scouts spent. Always set by the core. */
   scoutingCost?: number;
@@ -418,6 +430,8 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       return { at, kind, key: str(raw, "key") };
     case "resolved":
       return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), onto: str(raw, "onto"), files: strings(raw, "files") ?? [] };
+    case "conflict":
+      return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), key: str(raw, "key"), head: str(raw, "head"), onto: str(raw, "onto"), files: strings(raw, "files") ?? [] };
     default:
       throw new Error(`kind ${JSON.stringify(kind)} is no wave event`);
   }
@@ -650,6 +664,11 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
       case "resolved": {
         const { kind: _kind, ...resolved } = event;
         (fold.resolved ??= []).push({ ...resolved, files: [...resolved.files] });
+        break;
+      }
+      case "conflict": {
+        const { kind: _kind, ...conflict } = event;
+        (fold.conflicts ??= []).push({ ...conflict, files: [...conflict.files] });
         break;
       }
       default:

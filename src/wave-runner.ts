@@ -20,7 +20,9 @@
  *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there.
  *   While it reviews, the runner watches the log: once the stage left `reviewing` it kills the gates and the reviewer
  * - A rebase of either step that conflicts only where both sides added lines (`additions-merge.ts`) is resolved ours
- *   then theirs, a `resolved` event names the files, and the step goes on to its gates; any other conflict blocks
+ *   then theirs, a `resolved` event names the files, and the step goes on to its gates. Any other conflict sends the
+ *   wave back to `building` with a conflict task (`conflictTask`, a `conflict` event and its `tasks` event); after
+ *   `CONFLICT_TASKS` of them a conflict blocks
  * - A block's `stage` event says why in `detail` (the conflicting paths, the error, the dirty worktree and its paths)
  * - Resumable from the log: a runner started on a wave in `reviewing` or `merging` runs that step again from its start
  * - Invariant 2: the review worktree must hold nothing but HEAD's tree before the rebase, after it, and after the gates
@@ -45,6 +47,7 @@ import { runGateStep } from "./flaky-rerun.ts";
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
 import { resolveAdditions } from "./additions-merge.ts";
+import { CONFLICT_TASKS, conflictTask } from "./core-waves.ts";
 import { commentReview, mergePending, publishMerge, publishWave } from "./remote.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
@@ -305,7 +308,7 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
       const resolved = await resolveAdditions(runner.run, root, fold.target);
       if ("refused" in resolved) {
         log(id, `the conflict is not additions-only: ${resolved.refused}`);
-        return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${conflicts.join(", ")}`);
+        return conflicted(fold, "review", conflicts, leave);
       }
       if (!(await recordResolved(id, "reviewing", { kind: "resolved", phase: "review", ...resolved }))) return removeWorktree(fold);
     }
@@ -393,6 +396,24 @@ async function recordResolved(id: string, stage: WaveStage, event: Extract<NewWa
 }
 
 /**
+ * A conflict that is not additions-only: the wave builds again with a conflict task, or (after `CONFLICT_TASKS`)
+ * blocks, `conflict`. `leave` is the step's stage change; `events` go before the step's own.
+ */
+function conflicted<T>(
+  fold: StartedWaveFold,
+  phase: "review" | "merge",
+  files: readonly string[],
+  leave: (to: WaveStage, reason: WaveReason | null, detail: string | null, events: NewWaveEvent[]) => Promise<T>,
+  events: NewWaveEvent[] = [],
+): Promise<T> {
+  const detail = `the rebase onto ${fold.target} conflicts on ${files.join(", ")}`;
+  return conflictTask(fold, phase, files).then(
+    (task) => (task === null ? leave("blocked", "conflict", `${detail}; its ${CONFLICT_TASKS} conflict tasks are used up`, events) : leave("building", null, `${detail}: task ${task.key} resolves it`, [...events, ...task.events])),
+    (error: unknown) => leave("blocked", "infra", `${detail}; adding its conflict task failed: ${oneLine(errorText(error))}`, events),
+  );
+}
+
+/**
  * `merging`: the merge queue, merge gates and the fast-forward of the target. The merge gates are skipped on the
  * commit they passed on before the review (`gated`): they run again only when the target moved since.
  */
@@ -471,7 +492,7 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
       // The target moved: the forge gets it, the request shows merged (recorded, never blocking).
       return void (await publishMerge(fold));
     case "conflict":
-      return leave("blocked", "conflict", `the rebase onto ${fold.target} conflicts on ${result.files.join(", ")}`, gate);
+      return conflicted(fold, "merge", result.files, leave, gate);
     case "gate_failed":
       return leave("blocked", gateReason(result.gate.result), gateDetail(result.gate.argv, result.gate.result), gate);
     case "dirty":

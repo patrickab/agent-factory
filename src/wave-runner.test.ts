@@ -314,17 +314,25 @@ describe("the wave runner", () => {
     git(repo, "worktree", "remove", work);
   }
 
-  test("a rebase conflict that changes a line blocks it with reason conflict and deletes nothing", async () => {
+  /** The wave's two conflict tasks, used up (their `conflict` events only): the next conflict blocks it. */
+  async function usedUpConflicts(): Promise<void> {
+    for (const key of ["conflict-1", "conflict-2"]) await appendWaveEvent(WAVE, { kind: "conflict", phase: "review", key, head: "0".repeat(40), onto: "1".repeat(40), files: ["a.txt"] });
+  }
+
+  test("a third rebase conflict that changes a line blocks it with reason conflict and deletes nothing", async () => {
     const repo = await waveRepo();
+    await usedUpConflicts();
     waveCommit(repo, "a.txt", "wave's a\n", "feat: change a");
     const wave = git(repo, "rev-parse", BRANCH);
     commit(repo, "a.txt", "main's a\n", "main: change a");
     const main = git(repo, "rev-parse", "main");
     await runWave(WAVE);
-    expect([(await getWave()).stage, (await getWave()).reason, (await getWave()).detail]).toEqual(["blocked", "conflict", "the rebase onto main conflicts on a.txt"]);
+    const view = await getWave();
+    expect([view.stage, view.reason, view.detail]).toEqual(["blocked", "conflict", "the rebase onto main conflicts on a.txt; its 2 conflict tasks are used up"]);
     expect([git(repo, "rev-parse", BRANCH), git(repo, "rev-parse", "main")]).toEqual([wave, main]);
-    expect((await getWave()).reviews).toEqual([]);
-    expect((await getWave()).resolved).toBeUndefined();
+    expect(view.reviews).toEqual([]);
+    expect(view.resolved).toBeUndefined();
+    expect([view.tasks.map((task) => task.key), view.conflicts?.length]).toEqual([["a", "b"], 2]);
   });
 
   test("both sides add lines at one place: resolved before the review's gates, ours then theirs, the log names the files", async () => {
@@ -341,6 +349,8 @@ describe("the wave runner", () => {
     }
     const wave = await getWave();
     expect(wave.stage).toBe("merged");
+    // Additions-only: no conflict task.
+    expect([wave.tasks.map((task) => task.key), wave.conflicts]).toEqual([["a", "b"], undefined]);
     expect(wave.resolved).toEqual([{ at: expect.any(String), phase: "review", onto: main, files: ["a.txt"] }]);
     expect(git(repo, "show", "main:a.txt")).toBe("a\nmain\nwave");
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: wave adds to a\nfeat: add c\nfeat: add b\nmain: add to a\ninit");
@@ -368,6 +378,7 @@ describe("the wave runner", () => {
 
   test("waves.retry after a blocked rebase: review and merge run again from the rebase, in a runner it starts", async () => {
     const repo = await waveRepo();
+    await usedUpConflicts();
     waveCommit(repo, "a.txt", "wave's a\n", "feat: change a");
     const init = git(repo, "rev-parse", "main");
     commit(repo, "a.txt", "main's a\n", "main: change a");
@@ -381,7 +392,7 @@ describe("the wave runner", () => {
     await until(async () => (await liveWaveRunners(WAVE)).length === 0);
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: change a\nfeat: add c\nfeat: add b\ninit");
     const timeline = (await callAction("waves.timeline", { id: WAVE })) as { events: { kind: string; stage?: string; reason?: string }[] };
-    expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "blocked", "reviewing", "gate", "review", "merging", "merge", "merged"]);
+    expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "conflict", "conflict", "reviewing", "blocked", "reviewing", "gate", "review", "merging", "merge", "merged"]);
   }, 30_000);
 
   test("merge review: waves.approve only from waiting_approve, then the runner merges", async () => {

@@ -21,7 +21,7 @@ import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
 import { DEFAULT_SETTINGS, loadSettings, modelChoice, registeredRepos, resolveSettings, type StoredSettings } from "./settings.ts";
 import { normalizeModels, parseSettingsFields } from "./state.ts";
-import { sessionTask } from "./sync.ts";
+import { mergeTrees, sessionTask } from "./sync.ts";
 import { listTasks, tagInGroup, TaskBusyError, type TaskRecord } from "./tasks.ts";
 import { errorText } from "./util.ts";
 import {
@@ -46,6 +46,8 @@ import {
   waveTaskState,
   type FoldedTask,
   type NewWaveEvent,
+  type StartedWaveFold,
+  type WaveConflict,
   type WaveDeclaration,
   type WaveFile,
   type WaveFold,
@@ -345,7 +347,8 @@ export async function noticeInputs(
  * the wave, as `startQueuedWave` does. Resolves with the
  * started keys; a launch that fails throws (`refused` or `failed`) after the tasks started before it are recorded.
  * `signal` (the runner stops): no further launch, the running one is undone (`launchTask`), and it resolves with the
- * keys started before.
+ * keys started before. A conflict task (`conflictTask`) starts on the wave's branch moved to the target's tip it
+ * recorded, its worktree holding the wave's change merged onto that tip with the markers left.
  */
 export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: AbortSignal): Promise<string[]> {
   const { declaration, events } = await readWave(id);
@@ -394,8 +397,12 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
         if (small !== undefined) models.small = small;
       }
       try {
+        // A conflict task: the wave's branch on the target's tip, its worktree the wave's change merged onto it.
+        const conflict = fold.conflicts?.find((candidate) => candidate.key === key);
+        if (conflict !== undefined) await conflictBranch(fold, conflict);
+        const prepare = conflict === undefined ? {} : { beforeRecord: (_branch: string, worktree: string) => leaveMarkers(worktree, conflict) };
         // The task's size picks its coder's model of the wave's; the reviewer's stays the wave's.
-        record = await launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model, ...(spec.id === undefined ? {} : { id: spec.id }), tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
+        record = await launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model, ...(spec.id === undefined ? {} : { id: spec.id }), tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...prepare, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
@@ -407,6 +414,72 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
     started.push(key);
   }
   return started;
+}
+
+/** How many conflict tasks (`conflict-<n>`) a wave gets; the next conflict blocks it. */
+export const CONFLICT_TASKS = 2;
+/** How many commit subjects of each side a conflict task's request names. */
+const SUBJECTS_SHOWN = 20;
+
+/**
+ * The events that send a wave whose rebase onto its target conflicted (not additions-only) back to building: a
+ * `conflict` event (the branch's tip `head`, the target's tip `onto`, the conflicting files of their merge, else
+ * `rebaseFiles`) and the task `conflict-<n>` that resolves it, its request naming the files and the subjects of both
+ * sides' commits. Null once the wave had `CONFLICT_TASKS`: the conflict blocks it.
+ */
+export async function conflictTask(fold: StartedWaveFold, phase: "review" | "merge", rebaseFiles: readonly string[]): Promise<{ key: string; events: NewWaveEvent[] } | null> {
+  const count = fold.conflicts?.length ?? 0;
+  if (count >= CONFLICT_TASKS) return null;
+  const { repo, branch, target } = fold;
+  const head = await git(runCommand, repo, ["rev-parse", `refs/heads/${branch}`]);
+  const onto = await git(runCommand, repo, ["rev-parse", `refs/heads/${target}`]);
+  const base = await git(runCommand, repo, ["merge-base", head, onto]);
+  const merged = await mergeTrees(runCommand, repo, base, onto, head);
+  const files = merged.conflicts.length > 0 ? merged.conflicts : [...rebaseFiles];
+  const subjects = async (tip: string) => {
+    const lines = (await git(runCommand, repo, ["log", "--no-merges", "--format=%s", `${base}..${tip}`, "--", ...files])).split("\n").filter(Boolean);
+    const shown = lines.slice(0, SUBJECTS_SHOWN).map((subject) => `- ${subject}`);
+    if (lines.length > SUBJECTS_SHOWN) shown.push(`- and ${lines.length - SUBJECTS_SHOWN} more`);
+    return shown.length === 0 ? "- (none on these files)" : shown.join("\n");
+  };
+  let n = count + 1;
+  while (fold.tasks.some((task) => task.key === `conflict-${n}`)) n++;
+  const key = `conflict-${n}`;
+  const request = [
+    `The wave's branch ${branch} conflicts with ${target}. Your worktree is on ${target}'s tip ${onto.slice(0, 12)} with the wave's whole change (${head.slice(0, 12)}) on it, uncommitted.`,
+    `These files hold both versions between conflict markers (<<<<<<< ${onto.slice(0, 12)}… is ${target}, >>>>>>> ${head.slice(0, 12)}… is the wave):\n${files.map((file) => `- ${file}`).join("\n")}`,
+    `Commits of ${target} on them since the wave branched off:\n${await subjects(onto)}`,
+    `Commits of the wave on them:\n${await subjects(head)}`,
+    "Resolve every conflict keeping what both sides meant, remove the markers, leave the rest of the wave's change as it is.",
+  ].join("\n\n");
+  const spec: WaveTaskEntry = { key, title: `fix: resolve the conflict of ${fold.tag} with ${target}`, request, after: [], id: crypto.randomUUID() };
+  return { key, events: [{ kind: "conflict", phase, key, head, onto, files }, { kind: "tasks", tasks: [spec] }] };
+}
+
+/**
+ * Puts the wave's branch on the target's tip the conflict recorded (from the tip it recorded; there already: nothing),
+ * so its conflict task's commit lands on it. Any other tip, or the branch checked out somewhere: `failed`.
+ */
+async function conflictBranch(fold: StartedWaveFold, conflict: WaveConflict): Promise<void> {
+  const tip = await git(runCommand, fold.repo, ["rev-parse", `refs/heads/${fold.branch}`]);
+  if (tip === conflict.onto) return;
+  if (tip !== conflict.head) throw new FactoryError("failed", `its branch ${fold.branch} moved since the conflict of ${conflict.key} (${tip.slice(0, 12)}, not ${conflict.head.slice(0, 12)}): waves.cancel, or merge it by hand and waves.retry`);
+  const worktrees = await git(runCommand, fold.repo, ["worktree", "list", "--porcelain"]);
+  if (worktrees.split("\n").includes(`branch refs/heads/${fold.branch}`)) throw new FactoryError("failed", `its branch ${fold.branch} is checked out in a worktree: remove that worktree, then waves.retry`);
+  await git(runCommand, fold.repo, ["update-ref", "-m", `factory: ${fold.branch} onto ${fold.target} for ${conflict.key}`, `refs/heads/${fold.branch}`, conflict.onto, conflict.head]);
+}
+
+/**
+ * The conflict task's new worktree (on the target's tip `onto`): the wave's change (`head`) merged onto it with the
+ * conflict markers left, uncommitted, as `applySync` (`sync.ts`) leaves a sync's.
+ */
+async function leaveMarkers(worktree: string, conflict: WaveConflict): Promise<void> {
+  const head = await git(runCommand, worktree, ["rev-parse", "HEAD"]);
+  if (head !== conflict.onto) throw new Error(`the worktree of ${conflict.key} is on ${head.slice(0, 12)}, not on ${conflict.onto.slice(0, 12)}`);
+  const base = await git(runCommand, worktree, ["merge-base", conflict.head, conflict.onto]);
+  const merged = await mergeTrees(runCommand, worktree, base, conflict.onto, conflict.head);
+  await git(runCommand, worktree, ["read-tree", "-m", "-u", "HEAD", merged.tree]);
+  await git(runCommand, worktree, ["reset", "-q"]);
 }
 
 export const WAVE_HANDLERS = {
