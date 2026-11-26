@@ -43,6 +43,9 @@
  * - A task of a wave merges into the wave's branch only until the wave's review began (`waveMergeRefusal`, invariant
  *   2): a merge after that ends the task `blocked`, `merge_failed`, its work stays in its worktree. Its merge gates
  *   are `gates` and `task_gates` (`taskWave`), not `merge_gates`: the wave runs those
+ * - Files in step (`sync.ts`): at the end of a coder turn, before the round, a due sync rebases the worktree onto the
+ *   target's tip; its follow-up (`factory-sync`) continues the coder in the same round. The sync's snapshot ref goes
+ *   once a round passed its gates
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -80,6 +83,8 @@ import { startNotifier, type Notifier } from "./notifier.ts";
 import { isTaskSession, registerFactoryTool } from "./tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { errorText } from "../util.ts";
+import { dropSnapshot, roundPassedGates, sessionTask, SYNC_TYPE, syncAtTurnEnd, syncLeftOf, type SyncDraft, type SyncLeft } from "../sync.ts";
+import type { TaskRecord } from "../tasks.ts";
 
 /** Tag of the system prompt section that carries `.factory/agents/coder.md`. */
 const ROLE_SECTION = "factory_role";
@@ -112,6 +117,16 @@ export default function (pi: ExtensionAPI) {
   /** The commit message ask of a passed round awaiting the coder's answer: the state it passed into, the tree that passed. */
   let commitAsk: { passedInto: State; tree: string } | undefined;
   let taskTools = false;
+  /** The conflicts the last sync left (`sync.ts`), until resolved, reminded of once, or a round passed its gates. */
+  let syncLeft: SyncLeft | undefined;
+  /** The factory's record of this session's task, looked up once: the sync log and snapshot ref go by its id. */
+  let syncTaskRecord: Promise<TaskRecord | undefined> | undefined;
+  const syncRecord = (ctx: ExtensionContext): Promise<TaskRecord | undefined> => {
+    const dir = ctx.sessionManager.getSessionDir?.();
+    if (dir === undefined) return Promise.resolve(undefined);
+    syncTaskRecord ??= sessionTask(dir, ctx.sessionManager.getSessionId()).catch(() => undefined);
+    return syncTaskRecord;
+  };
   /** `factory_new_task` and `factory_ask_supervisor` exist in task sessions only: registered once the session holds a task. */
   const registerTaskTools = () => {
     if (taskTools || !session.snapshot) return;
@@ -256,6 +271,8 @@ export default function (pi: ExtensionAPI) {
     }
     session.snapshot = rebuild(ctx.sessionManager.getBranch());
     session.files = undefined;
+    syncLeft = syncLeftOf(ctx.sessionManager.getBranch());
+    syncTaskRecord = undefined;
     registerTaskTools();
     if (session.snapshot && wasInterrupted(session.snapshot)) await resumeTask(deps(ctx), session.snapshot);
   });
@@ -263,6 +280,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_tree", (_event, ctx) => {
     session.snapshot = rebuild(ctx.sessionManager.getBranch());
     session.files = undefined;
+    syncLeft = syncLeftOf(ctx.sessionManager.getBranch());
   });
 
   pi.on("session_shutdown", () => {
@@ -340,6 +358,7 @@ export default function (pi: ExtensionAPI) {
       return ctx.hasPendingMessages() ? { entries: [...entries, ...messageRoundDrafts(round)], continue: true } : { entries, continue: false };
     };
     let result: RoundResult;
+    const syncDrafts: SyncDraft[] = [];
     const asked = commitAsk;
     commitAsk = undefined;
     if (event.outcome === "error") {
@@ -352,8 +371,23 @@ export default function (pi: ExtensionAPI) {
         if (asked && (await snapshotTree(runner.run, ctx.cwd)) === asked.tree) {
           result = commitAnswerDrafts(current, lastAssistantText(ctx.sessionManager.getBranch()), asked.passedInto, ctx.hasPendingMessages());
         } else {
-          result = await runRound(current, pipelineSteps(ops, task, await taskFiles(ops, task), false));
-          if (result.commitAsk) commitAsk = { passedInto: result.commitAsk, tree: await snapshotTree(runner.run, ctx.cwd) };
+          // Files in step (`sync.ts`): a due sync first; its follow-up continues the coder in this round.
+          const record = await syncRecord(ctx);
+          const sync = await syncAtTurnEnd(runner.cleanup, ctx.cwd, record, task.mainBranch, syncLeft);
+          syncLeft = sync.left;
+          syncDrafts.push(...sync.drafts);
+          if (sync.follow) {
+            result = { entries: [], continue: true };
+          } else {
+            result = await runRound(current, pipelineSteps(ops, task, await taskFiles(ops, task), false));
+            if (result.commitAsk) commitAsk = { passedInto: result.commitAsk, tree: await snapshotTree(runner.run, ctx.cwd) };
+            // The snapshot of the last sync is kept until a round passed its gates after it.
+            if (record && roundPassedGates(result.entries, result.commitAsk !== undefined)) {
+              await dropSnapshot(runner.cleanup, ctx.cwd, record.id);
+              if (syncLeft) syncDrafts.push({ type: "custom", customType: SYNC_TYPE, data: { kind: "cleared" } });
+              syncLeft = undefined;
+            }
+          }
         }
       } catch (error) {
         result = stopped(`pipeline_error: ${errorText(error)}`);
@@ -362,7 +396,7 @@ export default function (pi: ExtensionAPI) {
     // Pi commits the returned entries: the snapshot follows them without `appendEntry`.
     for (const draft of result.entries) if (draft.type === "custom") session.snapshot = applyEntry(session.snapshot, draft.customType, draft.data);
     roundEnd = session.snapshot?.state;
-    const entries = [...event.entries, ...result.entries];
+    const entries = [...event.entries, ...syncDrafts, ...result.entries];
     return result.continue ? { entries, continue: true } : { entries };
   });
 

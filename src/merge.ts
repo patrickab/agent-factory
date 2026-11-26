@@ -21,6 +21,8 @@
  * - Provides `mergeTask`: the `MergeResult` and the `factory-gate` data of the commands it ran. It never throws, a
  *   failure is a `failed` result whose `factory-merge` data is `ok: false` with the reason
  * - The merge commit carries `MergeInput.message` (default: the task title)
+ * - A task merged into an open wave's branch marks a sync due for the wave's other running tasks (`sync.ts`
+ *   `taskLanded`); that never fails the merge
  */
 import { basename, join } from "node:path";
 import { commitMessageFallback, commitText, type CommitMessage } from "./commitmsg.ts";
@@ -42,6 +44,7 @@ import { joinQueue, leaveQueue, queueAhead } from "./queue.ts";
 import type { CommandResult, Exec } from "./run.ts";
 import { gateData, passed, type GateData, type MergeData, type MergeIntentData, type Task } from "./state.ts";
 import { ERROR_TAIL_CHARS, errorText, outputTail } from "./util.ts";
+import { taskLanded } from "./sync.ts";
 
 /** How long a merge waits for the merge lock, polling once a second. */
 const LOCK_WAIT_MS = 60_000;
@@ -261,6 +264,8 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
     const [before, moved] = moveResult.stdout.trim().split(" ");
     const commit = await git(cleanup, primary, ["rev-parse", `refs/heads/${task.mainBranch}`]);
     if (commit !== head) return fail(`${task.mainBranch} is at ${commit} after the update, not at the task's commit ${head}`);
+    // Files in step (`sync.ts`): the wave's other running tasks learn of it; that never fails the merge.
+    if (!asIs) await taskLanded(cleanup, root, task.branch, task.mainBranch, before, commit).catch(() => undefined);
 
     // Hooks install into the primary only: another worktree, or a target checked out nowhere, gets none.
     if (moved !== "primary") return merged(commit, null, false);

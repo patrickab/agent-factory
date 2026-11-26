@@ -66,6 +66,7 @@ import {
   type WaveStage,
 } from "./waves.ts";
 import { resolveModels } from "./settings.ts";
+import { waveLanded } from "./sync.ts";
 
 /**
  * How long a building wave waits for a poke before it looks at its tasks again. `FACTORY_WAVE_POLL_MS` (tests only)
@@ -416,6 +417,15 @@ async function merge(fold: WaveFold, gated: string | null): Promise<void> {
     case "merged":
       // The push still to come is in the log before the resting stage: a runner that dies in between leaves it said.
       await leave("merged", null, null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }, ...mergePending(fold)]);
+      // Files in step (`sync.ts`): the other building waves on the target are rebased onto it, their running tasks marked.
+      {
+        const from = before as string | null;
+        const to = result.merge.commit;
+        if (from !== null && to !== null) {
+          const synced = await waveLanded(runner.cleanup, fold.repo, id, fold.target, from, to).catch((error: unknown) => [`files in step: ${errorText(error)}`]);
+          for (const line of synced) log(id, line);
+        }
+      }
       // The target moved: the forge gets it, the request shows merged (recorded, never blocking).
       return void (await publishMerge(fold));
     case "conflict":

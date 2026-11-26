@@ -271,6 +271,25 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   reviews), `reviews`, `gates`, `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
   answers `{events, next}` (`since`/`next` count events)
 
+### Files in step (`src/sync.ts`)
+
+- Parallel tasks and waves may edit the same files: a merge reaches the running tasks below its branch at the end of
+  their coder turn, not at their own merge
+- A task merges into its wave's branch: the wave's other tasks in `running` get a due sync. A wave merges into its
+  target: the branch of every other `building` wave on that target is rebased onto it first (no worktree; a conflict
+  or a checkout leaves it as it is), then its tasks in `running` get one. Plain tasks are never synced
+- At the end of the coder turn, before the gates: the worktree's snapshot, then a three-way merge of the task's whole
+  change onto the branch's tip, left uncommitted (untracked files too); the tip is the task's base from then on. Two
+  merges before the turn ends make one sync
+- The task has read or edited a changed file (its `read`, `edit`, `write` calls, `session-files.ts`): one
+  `factory-sync` message to the coder, the changed files with the subjects of their commits, conflicting files first
+  with their markers left, and "re-read these". It counts as no round; the gates run at the end of the next turn.
+  Markers of that sync still in a file it named then: said once more. Without such a file: no message
+- Every sync is a `factory-sync` session entry (`synced` with tip, named and conflicting files; `failed` with the error
+  and whether the snapshot was restored; `reminded`; `cleared`). A failure restores HEAD, worktree and index, consumes
+  the due syncs and blocks nothing: the task meets the change at its merge
+- Marks, branch rebases and syncs hold the merge lock; a running turn, a gate run or a merge is never interrupted
+
 ### CLI (`factory`)
 
 ```bash
@@ -403,6 +422,8 @@ Commands (inside a task's own Pi session):
 - `waves/<id>.jsonl`: a wave, append-only: line 1 its declaration, every later line one event; `waves/<id>.lock` its
   runner's lock, `.log.lock` the append lock, `.poke` an unseen poke, `.log` the runner's output, `.reviews/` its reviewer's
   sessions and patch files
+- `sync/<task id>.jsonl`: a task's due syncs, append-only (`due` lines, `done` lines consume them). The worktree before
+  its last sync: the ref `refs/factory/sync/<task id>` in the repo
 - Reviews: `<agent dir>/factory-reviews/<session id>/`. Merge lock and queue: in the repo's git common dir
 
 ## Entry protocol
