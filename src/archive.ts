@@ -15,10 +15,11 @@ import { copyFile, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { sessionFilePath } from "./runner.ts";
-import { callerKey, scoutsDir, type ScoutCaller } from "./scouts.ts";
+import { addScoutUsage, callerKey, readScout, scoutsDir, type ScoutCaller, type ScoutUsage } from "./scouts.ts";
 import { factoryHome } from "./settings.ts";
 import { readTask, type TaskRecord } from "./tasks.ts";
 import { wavePath, waveReviewsDir } from "./wave-poke.ts";
+import { isRecord } from "./util.ts";
 import type { WaveFold } from "./waves.ts";
 
 const SHORT = 8;
@@ -155,4 +156,79 @@ export async function archiveTask(record: TaskRecord): Promise<string> {
   await copyScouts({ kind: "task", id: record.id }, dir);
   await writeIndex(dir, { id: record.id, tag: record.tag, repo: record.repo, plan: record.plan, origin: record.origin, sessionId: record.sessionId });
   return dir;
+}
+
+/** What `index.json` of an archived wave says (`archiveWave`). */
+export interface WaveArchiveIndex {
+  id: string;
+  tag: string;
+  repo: string;
+  plan: string | null;
+  origin: string | null;
+  archivedAt: string;
+  tasks: Record<string, { id: string; sessionId: string | null }>;
+}
+
+/** How deep plan names nest under the store root (`team/plan`) while archive roots are looked for. */
+const STORE_DEPTH = 3;
+
+async function subdirs(dir: string): Promise<string[]> {
+  try {
+    return (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+/** Every archive root there is: the factory home's, and `<store>/run/sessions` of every store that has one. */
+export async function archiveRoots(): Promise<string[]> {
+  const roots = [join(factoryHome(), "archive")];
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    for (const name of await subdirs(dir)) {
+      const store = join(dir, name);
+      if ((await stat(join(store, "run", "sessions")).catch(() => undefined))?.isDirectory()) roots.push(join(store, "run", "sessions"));
+      if (depth < STORE_DEPTH && name !== "run") await walk(store, depth + 1);
+    }
+  };
+  await walk(memoryStoreRoot(), 1);
+  return roots;
+}
+
+function parseWaveIndex(raw: unknown): WaveArchiveIndex | undefined {
+  if (!isRecord(raw) || typeof raw.id !== "string" || typeof raw.tag !== "string" || typeof raw.repo !== "string" || !isRecord(raw.tasks)) return undefined;
+  const text = (value: unknown) => (typeof value === "string" ? value : null);
+  return { id: raw.id, tag: raw.tag, repo: raw.repo, plan: text(raw.plan), origin: text(raw.origin), archivedAt: text(raw.archivedAt) ?? "", tasks: raw.tasks as WaveArchiveIndex["tasks"] };
+}
+
+/**
+ * Every archived wave: its directory and its index, those of all archive roots. A directory with `index.json` and
+ * `wave.jsonl` is one; an unreadable index is skipped. A wave archived under two roots (its plan's store appeared
+ * later) counts once, the most recently archived.
+ */
+export async function archivedWaveDirs(): Promise<{ dir: string; index: WaveArchiveIndex }[]> {
+  const found = new Map<string, { dir: string; index: WaveArchiveIndex }>();
+  const walk = async (dir: string): Promise<void> => {
+    const names = await readdir(dir).catch(() => [] as string[]);
+    if (names.includes("index.json")) {
+      if (!names.includes("wave.jsonl")) return;
+      const index = parseWaveIndex(await readFile(join(dir, "index.json"), "utf8").then(JSON.parse, () => undefined));
+      const known = index && found.get(index.id);
+      if (index && (known === undefined || known.index.archivedAt < index.archivedAt)) found.set(index.id, { dir, index });
+      return;
+    }
+    for (const name of await subdirs(dir)) await walk(join(dir, name));
+  };
+  for (const root of await archiveRoots()) await walk(root);
+  return [...found.values()];
+}
+
+/** The unrounded usage of the caller's scouts as archived under `dir` (`scouts/<kind>-<id>/`), null without one. */
+export async function archivedScoutUsage(dir: string, caller: ScoutCaller): Promise<ScoutUsage | null> {
+  const callerDir = join(dir, "scouts", callerKey(caller));
+  let sum: ScoutUsage | null = null;
+  for (const name of (await subdirs(callerDir)).sort()) {
+    if (name.includes(".")) continue;
+    sum = addScoutUsage(sum, await readScout(join(callerDir, name)).then(({ fold }) => fold.usage, () => null));
+  }
+  return sum;
 }

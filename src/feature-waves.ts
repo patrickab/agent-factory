@@ -56,7 +56,7 @@ export const WAVES = feature({
       ["id", "tasks"],
       true,
     ),
-    "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage. Answers {wave}", { id: WAVE_ID }, ["id"], false),
+    "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage; a removed wave from its archive. Answers {wave}", { id: WAVE_ID }, ["id"], false),
     "waves.list": spec(
       "Every wave, or the repository's, or those under a tag, or a session's, or the open ones (filters combine). Answers {waves}",
       {
@@ -64,6 +64,7 @@ export const WAVES = feature({
         tag: { type: "string", description: "Only the waves whose tag is this one or lies under it" },
         origin: { type: "string", description: "Only the waves this Pi session (its id) declared" },
         open: { type: "boolean", description: "true: only the waves not merged or cancelled" },
+        archived: { type: "boolean", description: "true: the removed waves from the archive too (archived: true, cost computed from the archive); open leaves them out" },
       },
       [],
       false,

@@ -12,6 +12,7 @@
  *   wave's task again its wave's runner is poked
  * - An old merge request record (invariant 7) can only be removed
  */
+import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -306,21 +307,27 @@ function summaryCachePath(sessionPath: string): string {
   return join(factoryHome(), "cache", "sessions", `${basename(sessionPath)}.json`);
 }
 
+/** Where the summary of an archived session file is kept: keyed by its whole path (archives share file names). */
+function archivedSummaryCachePath(sessionPath: string): string {
+  return join(factoryHome(), "cache", "sessions", "archive", `${createHash("sha256").update(sessionPath).digest("hex")}.json`);
+}
+
 /**
  * The summary of the session file `sessionPath` (none: empty). A finished task's (`done`, `cancelled`) is kept on disk
  * with the file's size and mtime and read from there while both are the same: a listing does not read and parse the
- * sessions of every task ever run again.
+ * sessions of every task ever run again. `archived`: an archive's copy, kept whatever its state, keyed by its path.
  */
-async function sessionSummary(sessionPath: string | null): Promise<SessionSummary> {
+async function sessionSummary(sessionPath: string | null, archived = false): Promise<SessionSummary> {
   if (sessionPath === null) return summarize([]);
   const file = await stat(sessionPath).catch(() => null);
-  const cachePath = summaryCachePath(sessionPath);
+  if (archived && file === null) return summarize([]);
+  const cachePath = archived ? archivedSummaryCachePath(sessionPath) : summaryCachePath(sessionPath);
   if (file !== null) {
     const cached: unknown = await readFile(cachePath, "utf8").then(JSON.parse, () => null).catch(() => null);
     if (isRecord(cached) && cached.size === file.size && cached.mtimeMs === file.mtimeMs && isRecord(cached.summary)) return cached.summary as unknown as SessionSummary;
   }
   const summary = summarize(parseEntries(await readFile(sessionPath, "utf8")));
-  if (file !== null && summary.last !== null && FINAL_STATES.includes(summary.last.state)) {
+  if (file !== null && (archived || (summary.last !== null && FINAL_STATES.includes(summary.last.state)))) {
     const temporary = `${cachePath}.${process.pid}.${crypto.randomUUID()}`;
     try {
       await mkdir(dirname(cachePath), { recursive: true });
@@ -332,6 +339,15 @@ async function sessionSummary(sessionPath: string | null): Promise<SessionSummar
     }
   }
   return summary;
+}
+
+/**
+ * What an archived task's session file (`archive.ts`) says for its wave's view: its last state (null: none), its
+ * unrounded usage, its minor findings. A missing file says nothing.
+ */
+export async function archivedSessionSummary(sessionPath: string): Promise<{ state: State | null; usage: TaskView["usage"]; minors: TaskView["minors"] }> {
+  const summary = await sessionSummary(sessionPath, true);
+  return { state: summary.last?.state ?? null, usage: summary.usage, minors: summary.minors };
 }
 
 /** The task as clients see it. `knownWaveStage`: its wave's stage, read already; `snapshot`: the runners, looked up already. */

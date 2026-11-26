@@ -10,12 +10,14 @@
  * - `noticeInputs`: the tasks and waves a Pi session started, for its notifications (`notify.ts`)
  */
 import { existsSync } from "node:fs";
-import { archiveWave } from "./archive.ts";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { archivedScoutUsage, archivedWaveDirs, archiveWave } from "./archive.ts";
 import { waveContracts } from "./core-contracts.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, requireFactoryModels, wantedModels } from "./core-settings.ts";
-import { cancelTask, cents, droppedWork, FINAL_STATES, rawScoutingCost, rawUsage, removable, requireRemovable, retryRestingTask, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
+import { archivedSessionSummary, cancelTask, cents, droppedWork, FINAL_STATES, rawScoutingCost, rawUsage, removable, requireRemovable, retryRestingTask, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
 import { git, uncommittedFiles } from "./git.ts";
 import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchExists, type RunnerEnv, worktreePath } from "./launch.ts";
 import type { NoticeWave } from "./notify.ts";
@@ -32,6 +34,7 @@ import {
   foldWave,
   listWaves,
   lockWave,
+  parseWaveFile,
   parseWaveOverrides,
   readWave,
   removeWave,
@@ -339,6 +342,92 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[], read: Listing
   const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
   const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
   return { view: { ...fold, reviews, minors, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, scoutingCost, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, stuck };
+}
+
+/** A wave read from the archive (`archive.ts`): nothing of it runs, no action applies. */
+export type ArchivedWaveView = WaveView & { archived: true };
+
+/** Which archived waves `archivedWaves` answers: those of `repo`, under `tag`, declared by `origin`. */
+export interface ArchivedWaveFilter {
+  repo?: string;
+  tag?: string;
+  origin?: string;
+}
+
+/**
+ * The view of the wave archived in `dir`: its log folded, usage summed as `lookWave` does from the archived task
+ * sessions (`archivedSessionSummary`, cached by path, size and mtime), the log's reviews and the archived scouts.
+ */
+async function archivedView(dir: string, file: WaveFile): Promise<ArchivedWaveView> {
+  const full = foldWave(file.declaration, file.events);
+  const { overrides: _overrides, ...fold } = full;
+  const states = new Map<string, string | null>();
+  const taskUsage = new Map<string, WaveView["usage"]>();
+  const taskMinors = new Map<string, MinorFinding[]>();
+  let scouting = 0;
+  await Promise.all(
+    fold.tasks.map(async (task) => {
+      if (task.taskId === null) return;
+      const summary = await archivedSessionSummary(join(dir, "tasks", `${task.key}.jsonl`));
+      const scouts = await archivedScoutUsage(dir, { kind: "task", id: task.taskId });
+      // A task whose session says nothing never finished: it counts as cancelled, as a removed one does.
+      states.set(task.key, summary.state ?? "cancelled");
+      taskUsage.set(task.key, addUsage(summary.usage === null ? null : { ...summary.usage }, scouts));
+      taskMinors.set(task.key, summary.minors ?? []);
+      scouting += scouts?.cost ?? 0;
+    }),
+  );
+  let usage: WaveView["usage"] = null;
+  const tasks = fold.tasks.map((task) => {
+    const raw = taskUsage.get(task.key) ?? null;
+    usage = addUsage(usage, raw);
+    const id = task.taskId ?? task.id;
+    return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: raw === null ? null : { ...raw, cost: cents(raw.cost) }, ...(id === undefined ? {} : { id }) };
+  });
+  for (const review of fold.reviews) usage = addUsage(usage, review.usage);
+  const minors: MinorFinding[] = [
+    ...fold.tasks.flatMap((task) => (taskMinors.get(task.key) ?? []).map((minor) => ({ ...minor, task: task.key }))),
+    ...fold.reviews.flatMap((review) => minorFindings(review.round, review.findings)),
+  ];
+  const waveScouting = await archivedScoutUsage(dir, { kind: "wave", id: fold.id });
+  usage = addUsage(usage, waveScouting);
+  const scoutingCost = cents(scouting + (waveScouting?.cost ?? 0));
+  const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
+  const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
+  return { ...fold, reviews, minors, running: false, interrupted: false, tasks, counts: waveCounts(full, states), usage: total, scoutingCost, actions: [], archived: true };
+}
+
+/**
+ * The archived waves that have no live record (`waves/<id>.jsonl`), oldest first, filtered by `filter` on their
+ * index before their log is read. No number is stored: their cost is computed from the archive at each call.
+ */
+export async function archivedWaves(filter: ArchivedWaveFilter = {}, live?: readonly WaveFile[]): Promise<ArchivedWaveView[]> {
+  const liveIds = new Set((live ?? (await listWaves())).map((file) => file.declaration.id));
+  const archives = (await archivedWaveDirs()).filter(
+    ({ index }) =>
+      !liveIds.has(index.id) &&
+      (filter.repo === undefined || index.repo === filter.repo) &&
+      (filter.tag === undefined || tagInGroup(index.tag, filter.tag)) &&
+      (filter.origin === undefined || index.origin === filter.origin),
+  );
+  const views = await Promise.all(
+    archives.map(async ({ dir, index }) => {
+      const file = await readFile(join(dir, "wave.jsonl"), "utf8")
+        .then((text) => parseWaveFile(text, index.id))
+        .catch(() => undefined);
+      return file === undefined ? undefined : archivedView(dir, file);
+    }),
+  );
+  return views.filter((view): view is ArchivedWaveView => view !== undefined).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/** The archived wave whose id starts with `id`, when no live wave has it: `waves.get` of a removed wave. */
+async function findArchivedWave(id: string): Promise<ArchivedWaveView | undefined> {
+  const matches = (await archivedWaves()).filter((view) => view.id === id || view.id.startsWith(id));
+  const exact = matches.find((view) => view.id === id);
+  if (exact) return exact;
+  if (matches.length > 1) throw new FactoryError("invalid", `"${id}" matches ${matches.length} archived waves, give more of the id`);
+  return matches[0];
 }
 
 /**
@@ -650,7 +739,15 @@ export const WAVE_HANDLERS = {
   },
 
   "waves.get": async (params) => {
-    const file = await findWave(params.id);
+    let file: WaveFile;
+    try {
+      file = await findWave(params.id);
+    } catch (error) {
+      // A removed wave answers from its archive.
+      const archived = error instanceof FactoryError && error.code === "not_found" ? await findArchivedWave(String(params.id).trim()) : undefined;
+      if (archived === undefined) throw error;
+      return { wave: { ...archived, feedback: await waveFeedback(archived.plan, archived.id) } };
+    }
     const view = await waveView(file);
     return { wave: { ...view, feedback: await waveFeedback(file.declaration.plan, view.id) } };
   },
@@ -661,7 +758,10 @@ export const WAVE_HANDLERS = {
     const origin = params.origin === undefined ? undefined : nonEmpty(params.origin)?.trim();
     if (params.origin !== undefined && origin === undefined) throw new FactoryError("invalid", "waves.list: origin must be a non-empty session id");
     if (params.open !== undefined && typeof params.open !== "boolean") throw new FactoryError("invalid", "waves.list: open must be true or false");
+    if (params.archived !== undefined && typeof params.archived !== "boolean") throw new FactoryError("invalid", "waves.list: archived must be true or false");
     const all = await listWaves();
+    // Archived waves are never open; without `archived: true` the answer is as before.
+    const archived = params.archived === true && params.open !== true ? await archivedWaves({ repo, tag, origin }, all) : [];
     const files = all.filter(
       (file) =>
         (repo === undefined || file.declaration.repo === repo) &&
@@ -669,11 +769,11 @@ export const WAVE_HANDLERS = {
         (origin === undefined || file.declaration.origin === origin) &&
         (params.open !== true || !WAVE_FINAL_STAGES.includes(foldWave(file.declaration, file.events).stage)),
     );
-    if (files.length === 0) return { waves: [] };
+    if (files.length === 0) return { waves: archived };
     // One read of the task records and one of the runners for every wave, not one per wave and task.
     const [records, snapshot] = await Promise.all([listTasks(), runnerSnapshot()]);
     const read: ListingReads = { records: new Map(records.map((record) => [record.id, record])), snapshot };
-    return { waves: await Promise.all(files.map((file) => waveView(file, all, read))) };
+    return { waves: [...(await Promise.all(files.map((file) => waveView(file, all, read)))), ...archived] };
   },
 
   "waves.timeline": async (params) => {

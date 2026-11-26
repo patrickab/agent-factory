@@ -968,7 +968,9 @@ describe("waiting on waves and the wave actions", () => {
     for (const record of records) expect(existsSync(record.worktree)).toBe(false);
     expect(existsSync(join(caseDir, "agent", "factory", "waves", `${started.id}.jsonl`))).toBe(false);
     expect(git(repo, "branch", "--list", started.branch ?? "")).toBe(started.branch ?? "");
-    await expectError(callAction("waves.get", { id: started.id }), "not_found", "no wave");
+    // A removed wave answers from its archive (contract archive-1).
+    const archived = (await callAction("waves.get", { id: started.id })) as { wave: WaveView & { archived?: true } };
+    expect([archived.wave.archived, archived.wave.stage, archived.wave.actions]).toEqual([true, "cancelled", []]);
   }, 60_000);
 
   test("waves.remove: refused for a waiting question and unmerged work without force; a merged wave's branch is deleted", async () => {
