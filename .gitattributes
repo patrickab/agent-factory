@@ -1,3 +1,0 @@
-# Parallel waves add lines to the same lists of these files: keep both sides instead of a conflict.
-README.md merge=union
-VIEWS.md merge=union
