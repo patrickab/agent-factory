@@ -3,6 +3,7 @@ import { asTask, fields, plural, short, taskBlock, taskHeader, taskList, taskSta
 import type { TaskView } from "./core-tasks.ts";
 import { card, decision, shortId, taskCard, taskCardState, timelineCard } from "./cards.ts";
 import { TASK_HANDLERS } from "./core-tasks.ts";
+import { taskCause } from "./decisions.ts";
 import { feature, ID, REPO, SETTINGS_PROPERTIES, spec, TAG, TAG_FILTER } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 
@@ -87,6 +88,11 @@ export const TASKS = feature({
       const task = asTask(result);
       return fields(`sent to task ${short(task.id)}`, taskState(task), task.round === null ? null : `round ${task.round}`);
     },
+  },
+  decides: {
+    "tasks.message": (params) => taskCause(params.id, true),
+    "tasks.retry": (params) => taskCause(params.id),
+    "tasks.cancel": (params) => taskCause(params.id),
   },
   cards: {
     "tasks.list": (_params, result: { tasks: TaskView[] }) =>

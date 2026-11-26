@@ -3,6 +3,7 @@ import { card, decision, shortId, timelineCard, waveCard, waveCardState } from "
 import { afterNames, plural, short, timelineView, waveBlock, waveList, waveReceipt } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
+import { waveCause } from "./decisions.ts";
 import { feature, REMOTE, REPO, SETTINGS_PROPERTIES, spec, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 import type { WaveView } from "./waves.ts";
@@ -103,6 +104,11 @@ export const WAVES = feature({
     "waves.approve": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
     "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
     "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
+  },
+  decides: {
+    "waves.add": (params) => waveCause(params.id, ["rejected", "blocked"]),
+    "waves.retry": (params) => waveCause(params.id),
+    "waves.cancel": (params) => waveCause(params.id),
   },
   cards: {
     "waves.start": (_params, result: { wave: WaveView }) => waveCard(result.wave, `${result.wave.stage === "queued" ? "declared" : "started"} wave ${result.wave.tag}`),

@@ -2,6 +2,7 @@
 import { decision, waveCard } from "./cards.ts";
 import { waveReceipt } from "./agent-view.ts";
 import { PLAN_HANDLERS } from "./core-plan.ts";
+import { taskCause, waveCause } from "./decisions.ts";
 import { feature, ID, spec, WAVE_ID } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 import type { WaveView } from "./waves.ts";
@@ -40,6 +41,10 @@ export const PLAN = feature({
       return waveReceipt("", result.wave, [`task ${result.key} updated, ${TOLD[result.delivery] ?? result.delivery}`]);
     },
     "waves.update": (_params, result: { wave: WaveView; changed: boolean }) => waveReceipt("", result.wave, [result.changed ? "updated, the next review reads it" : "nothing changed"]),
+  },
+  decides: {
+    "tasks.update": (params) => taskCause(params.id),
+    "waves.update": (params) => waveCause(params.id),
   },
   cards: {
     "tasks.update": (params, result: { wave: WaveView; key: string; changed: boolean; delivery: string }) => {

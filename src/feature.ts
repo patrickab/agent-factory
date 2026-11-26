@@ -7,11 +7,14 @@
  *   the registry)
  * - `renderers`: one per action, `(params, result) => text` (`agent-view.ts` scrubs it); `cards`: one per action,
  *   `(params, result) => FactoryCard` (`cards.ts`)
+ * - `decides`: for the actions that settle something, how the cause is read from state at call time, before the action
+ *   runs (`decisions.ts`): a `Cause` makes it a decision, null leaves it an action
  * - `notices`: the feature's notices from the items the notifier looked up under the feature's `name`
  * - Also the schema helpers the features' action specs share
  */
 import type { CardBuilder } from "./cards.ts";
-import type { Handler, Params } from "./core-shared.ts";
+import type { CallContext, Handler, Params } from "./core-shared.ts";
+import type { Cause } from "./decisions.ts";
 import type { Notice } from "./notify.ts";
 
 export type Schema = Record<string, unknown>;
@@ -28,6 +31,9 @@ export type Handlers = Readonly<Record<string, Handler>>;
 
 export type Renderer = (params: Params, result: never) => string;
 
+/** The cause an action settles, read before it runs (`decisions.ts`); null: this call is no decision. */
+export type CauseReader = (params: Params, context: CallContext) => Promise<Cause | null>;
+
 export interface Feature<A extends string = string> {
   /** One word; the key of the items `pendingNotices` hands to `notices`. */
   name: string;
@@ -38,6 +44,8 @@ export interface Feature<A extends string = string> {
   /** One card per action (`cards.ts`): the readable form of its result next to the agent's text. */
   cards: Record<NoInfer<A>, CardBuilder>;
   notices?: (items: readonly unknown[]) => Notice[];
+  /** The actions that settle something: their cause (`decisions.ts`). */
+  decides?: Partial<Record<NoInfer<A>, CauseReader>>;
   /** Its sentences of the `factory` tool's description. */
   toolBlurb?: string;
 }

@@ -256,4 +256,13 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   },
   "tasks.update": { params: { id: "4ae7325b", request: "the new request" }, result: { wave: wave(), key: "docs", changed: true, delivery: "pending" } },
   "waves.update": { params: { id: WAVE_ID, request: "new instructions" }, result: { wave: wave(), changed: true } },
+  "decisions.list": {
+    params: {},
+    result: {
+      decisions: [
+        { at: "2025-01-02T10:10:00.000Z", key: "call-1", answers: `task:${TASK_ID}:waiting_answer:1@2025-01-02T10:09:00.000Z`, card: { v: 1, kind: "decision", tone: "quiet", title: "sent to task 4ae7325b" } },
+        { at: "2025-01-02T10:11:00.000Z", card: { v: 1, kind: "decision", tone: "quiet", title: "updated wave factory/w1" } },
+      ],
+    },
+  },
 };

@@ -2,6 +2,7 @@
 import { card, decision } from "./cards.ts";
 import { plural } from "./agent-view.ts";
 import { CONTRACT_HANDLERS } from "./core-contracts.ts";
+import { contractCause } from "./decisions.ts";
 import { feature, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 
@@ -38,6 +39,9 @@ export const CONTRACTS = feature({
         ...(result.done.length > 0 ? [`done, may need a follow-up task: ${keys(result.done)}`] : []),
       ].join(" · ");
     },
+  },
+  decides: {
+    "contracts.apply": (params) => contractCause(params.store, params.name),
   },
   cards: {
     "contracts.apply": (params, result: { name: string; changed: string[]; notified: ContractTask[]; kept: ContractTask[]; done: ContractTask[] }) => {

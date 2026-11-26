@@ -83,7 +83,7 @@ describe("actionCard", () => {
     const sent = actionCard("tasks.message", { id: "4ae7", text: "use the **old** id" }, task());
     expect(sent).toMatchObject({ kind: "action", title: "sent to task 4ae7325b", text: "use the **old** id", tag: "factory/w1", id: "4ae7325b" });
     const key = `task:${TASK_ID}:waiting_answer:1@2025-01-02T10:09:00.000Z`;
-    const answer = actionCard("tasks.message", { id: "4ae7", text: "use the old id" }, task(), key);
+    const answer = actionCard("tasks.message", { id: "4ae7", text: "use the old id" }, task(), { answers: key });
     expect(answer).toMatchObject({ kind: "decision", answers: key, text: "use the old id" });
     valid(answer, "tasks.message answers");
     const updated = actionCard("tasks.update", FIXTURES["tasks.update"].params, FIXTURES["tasks.update"].result);
@@ -91,7 +91,7 @@ describe("actionCard", () => {
     const applied = actionCard("contracts.apply", FIXTURES["contracts.apply"].params, FIXTURES["contracts.apply"].result);
     expect(applied).toMatchObject({ kind: "decision", title: "contract api: 1 fact changed", text: "t" });
     expect(applied.rows).toContainEqual({ label: "update", text: "answer" });
-    const added = actionCard("waves.add", FIXTURES["waves.add"].params, FIXTURES["waves.add"].result, `wave:${WAVE_ID}:rejected:3`);
+    const added = actionCard("waves.add", FIXTURES["waves.add"].params, FIXTURES["waves.add"].result, { answers: `wave:${WAVE_ID}:rejected:3` });
     expect(added).toMatchObject({ kind: "decision", title: "added 1 task to wave factory/w1", text: "- **fix**: fix", answers: `wave:${WAVE_ID}:rejected:3` });
     expect(actionCard("tasks.cancel", {}, task({ state: "cancelled", review: { round: 1, status: "ok", approved: false, findings: [] } })).findings).toBeUndefined();
   });

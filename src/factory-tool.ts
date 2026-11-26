@@ -12,11 +12,18 @@
  *   (`factoryToolError` renders it). A view that fails to render after the action succeeded is a one-line receipt
  *   (`renderFailed`), never a failure: the agent must not retry what already happened; a card that fails is the
  *   action's name (`fallbackCard`)
- * - `factoryCard(name, params, result)`: the card of a result, never throwing
+ * - `factoryCard(name, params, result, cause?)`: the card of a result, never throwing
+ * - A decision (contract `cards`): before the action runs, its feature's `decides` reads the cause from state
+ *   (`decisions.ts`); a cause that cannot be read leaves a decision that answers nothing. After it succeeded the card is a
+ *   decision and, with an `origin`, appended to that session's log (`key`: the caller's `callId`). A log that fails
+ *   never fails the answer: the action happened
  */
 import { agentError, agentView } from "./agent-view.ts";
 import { actionCard, fallbackCard, type FactoryCard } from "./cards.ts";
 import { ACTIONS, callAction, FactoryError, type ActionName, type CallOptions } from "./core.ts";
+import type { Params } from "./core-shared.ts";
+import { appendDecision, type Cause } from "./decisions.ts";
+import type { CauseReader } from "./feature.ts";
 import { FEATURES } from "./features.ts";
 import { errorText, isRecord } from "./util.ts";
 
@@ -86,24 +93,47 @@ function renderFailed(name: string, result: unknown, error: unknown): string {
  * (host-only, a timeline, a mutating one in a task session) is as unknown as a made-up one. `render` is the agent view
  * (tests swap it).
  */
-export async function callFactoryTool(params: unknown, taskSession: boolean, options: CallOptions, render = agentView): Promise<{ text: string; result: unknown; card: FactoryCard }> {
+export async function callFactoryTool(
+  params: unknown,
+  taskSession: boolean,
+  options: CallOptions & { callId?: string },
+  render = agentView,
+): Promise<{ text: string; result: unknown; card: FactoryCard }> {
   const { action, ...rest } = isRecord(params) ? params : {};
   const name = String(action);
   if (!(agentActions(taskSession) as string[]).includes(name)) throw new FactoryError("invalid", `unknown action "${name}"`);
-  const result = await callAction(name, rest, options);
+  const { callId, ...callOptions } = options;
+  const cause = await causeOf(name, rest, callOptions);
+  const result = await callAction(name, rest, callOptions);
   let text: string;
   try {
     text = render(name, rest, result);
   } catch (error) {
     text = renderFailed(name, result, error);
   }
-  return { text, result, card: factoryCard(name, rest, result) };
+  const card = factoryCard(name, rest, result, cause);
+  if (cause !== null && options.origin !== undefined) {
+    const entry = { at: new Date().toISOString(), ...(callId === undefined ? {} : { key: callId }), ...(card.answers === undefined ? {} : { answers: card.answers }), card };
+    await appendDecision(options.origin, entry).catch(() => undefined);
+  }
+  return { text, result, card };
 }
 
-/** The card of `name`'s result (`actionCard`); the action's name when it cannot be built. */
-export function factoryCard(name: string, params: unknown, result: unknown): FactoryCard {
+/** The cause `name` settles (its feature's `decides`), read before it runs; null when it is no decision. */
+async function causeOf(name: string, params: Params, options: CallOptions): Promise<Cause | null> {
+  const reader = FEATURES.flatMap((feature) => (feature.decides as Readonly<Record<string, CauseReader>> | undefined)?.[name] ?? [])[0];
+  if (reader === undefined) return null;
   try {
-    return actionCard(name, params, result);
+    return await reader(params, { cwd: options.cwd, signal: options.signal, env: options.env, origin: options.origin });
+  } catch {
+    return {};
+  }
+}
+
+/** The card of `name`'s result (`actionCard`), a decision with a cause; the action's name when it cannot be built. */
+export function factoryCard(name: string, params: unknown, result: unknown, cause?: Cause | null): FactoryCard {
+  try {
+    return actionCard(name, params, result, cause);
   } catch {
     return fallbackCard(name);
   }

@@ -54,7 +54,7 @@ function taskEvent(task: TaskView): string | null {
   return Object.hasOwn(TASK_EVENTS, task.state) ? task.state : null;
 }
 
-function taskNotice(task: TaskView, origin: string): Notice | null {
+export function taskNotice(task: TaskView, origin: string): Notice | null {
   const event = taskEvent(task);
   if (event === null) return null;
   const what = event === "waiting_answer" ? TASK_EVENTS[event] : event === "interrupted" ? `task ${task.id.slice(0, 8)} was interrupted` : `task ${task.id.slice(0, 8)} ${TASK_EVENTS[event]}`;
@@ -68,7 +68,7 @@ const WAVE_STAGE_EVENTS: Partial<Record<WaveView["stage"], string>> = {
   merged: "was merged",
 };
 
-function waveNotice({ view, stuck, events }: NoticeWave, origin: string): Notice | null {
+export function waveNotice({ view, stuck, events }: NoticeWave, origin: string): Notice | null {
   let event: string;
   let n: number | string;
   let what: string;

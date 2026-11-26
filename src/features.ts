@@ -7,6 +7,7 @@ import { TASKS } from "./feature-tasks.ts";
 import { WAIT } from "./feature-wait.ts";
 import { WAVES } from "./feature-waves.ts";
 import { CONTRACTS } from "./feature-contracts.ts";
+import { DECISIONS } from "./feature-decisions.ts";
 import { GATES } from "./feature-gates.ts";
 import { PLAN } from "./feature-plan.ts";
 import { SCOUTS } from "./feature-scouts.ts";
@@ -17,6 +18,7 @@ export const FEATURES = [
   WAIT,
   WAVES,
   CONTRACTS,
+  DECISIONS,
   GATES,
   PLAN,
   SCOUTS,

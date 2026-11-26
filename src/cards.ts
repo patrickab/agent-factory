@@ -6,8 +6,8 @@
  *   `details {result, card}` (`factory-tool.ts`, `pi/tool.ts`)
  * - `taskCard`, `waveCard`, `scoutCard`, `proofCard`, `contractCard`: one view object → one card, with the title and
  *   tone the caller gives
- * - `actionCard(name, params, result, answers?)`: the card of an action's result, from the builder its feature registers
- *   (`feature.ts` `cards`); with `answers` (the notice key a supervisor's action settles) the card is a decision
+ * - `actionCard(name, params, result, cause?)`: the card of an action's result, from the builder its feature registers
+ *   (`feature.ts` `cards`); with a cause (`decisions.ts`) the card is a decision, `answers` the notice key it settles
  * - Tone `attention` only for what needs a ruling: a question, blocked, waiting for approve, interrupted, rejected,
  *   tasks that can never start, failing gates, a wait that ended on attention. Everything else is `quiet`
  * - Cost is in cents. A card has no undefined field and no empty list: it survives a JSON round trip unchanged
@@ -218,11 +218,13 @@ export function fallbackCard(name: string): FactoryCard {
 }
 
 /**
- * The card of `name`'s result, from its feature's builder. With `answers` (the notice key the action settles) it is a
- * decision answering it.
+ * The card of `name`'s result, from its feature's builder. With a cause (`decisions.ts`) it is a decision, answering
+ * the notice key the cause names.
  */
-export function actionCard(name: string, params: unknown, result: unknown, answers?: string): FactoryCard {
+export function actionCard(name: string, params: unknown, result: unknown, cause?: { answers?: string } | null): FactoryCard {
   const builder = FEATURES.flatMap((feature) => (Object.hasOwn(feature.cards ?? {}, name) ? [(feature.cards as Record<string, CardBuilder>)[name]] : []))[0];
   const built = builder === undefined ? fallbackCard(name) : builder((params ?? {}) as Params, result as never);
-  return answers === undefined ? built : { ...built, kind: "decision", answers };
+  if (cause === undefined || cause === null) return built;
+  const { answers: _answers, ...rest } = built;
+  return cause.answers === undefined ? { ...rest, kind: "decision" } : { ...rest, kind: "decision", answers: cause.answers };
 }
