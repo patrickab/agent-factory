@@ -270,3 +270,28 @@ Parallel waves on the same lines are wanted. Conflicts must be rare, and cheap w
 | The supervisor's union rule damaged two docs | no union driver (8) |
 | A reviewer's instructions could not be changed after the declaration | contracts read fresh at every review (2), `waves.update` (9) |
 | A wave's type check failed on another wave's merged file | syncs bring open waves onto each merge (7) |
+
+## 11. Views (`views/1` here, a wave of its own in gigachad-bot)
+
+Everything of a run that reaches the supervisor's context is traceable for the user, readable, and the same in Pi's TUI and in gigachad-bot.
+
+### Specification
+- **Two forms of one event.** The text an agent reads stays as it is (written for agents). Every report the factory sends into a session and every result of the `factory` tool also carries the structured data it was rendered from (`details`: event kind, wave, tasks, state, cost, findings with severity and `file:line`, the question, the message sent)
+- **One view model, two renderers.** A card per event kind, defined once (`src/views/`), rendered by the factory's Pi extension in the TUI and by gigachad-bot in the browser. Every factory event carries the factory icon, reports included (today only tool calls do)
+
+  | Event | The card shows |
+  |---|---|
+  | wave merged, rejected, blocked, interrupted | tag, title, state, cost, task progress; findings by severity with file links, collapsed to a count |
+  | a coder asks | the question as text, code spans as code |
+  | the supervisor answers, adds or updates a task, retries, edits a contract | what was decided in one line, the full text below; an answer names the question it answers |
+  | scout report, gate proof | concern or branch, state, the report's sections |
+
+- **The timeline is what happened, in the order it happened.** No regrouping: a card stands where its event arrived. A wave's cards are tied together by its tag on each card, not by moving them
+- **Quiet and attention.** Events that need a ruling (a coder asks, rejected, blocked, can never start) stand out; information (merged, retried, started, synced) is quiet
+- **The switch.** Readable is the default. One toggle per card and one for the session show exactly what the agent has in context for it. The same key in the TUI and in gigachad-bot
+- **Above the composer**, only what fits there without pushing the conversation: one line per open wave (tag, state, cost) and the count of events waiting for a ruling. The decisions of the run are a list opened from there, each entry jumping to its card in the timeline
+- **Detail lives in the timeline**: decisions, merges, rejections and messages are cards there, never only in the strip
+
+### Decisions
+- The decisions list is filled from the supervisor's own actions (`tasks.message` to a question, `tasks.update`, `waves.update`, `waves.add` after a rejection, `contracts.apply`), not from a separate log the supervisor must remember to write
+- gigachad-bot's cards follow its UI rules (`AGENTS.md`: shared primitives, no tooltips, muted)
