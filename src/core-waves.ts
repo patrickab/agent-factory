@@ -177,9 +177,22 @@ async function waveView(file: WaveFile, all?: WaveFile[]): Promise<WaveView> {
   return (await lookWave(file, all)).view;
 }
 
-/** The queued waves among `files` that wait for the wave `id`. */
+/**
+ * The waves among `files` that wait for the wave `id` and have not started (queued, or blocked at their start), not
+ * cancelled ones: a merge pokes them, a cancel makes them never start, and the wave is not removed under them.
+ */
 function queuedAfter(id: string, files: readonly WaveFile[]): WaveFold[] {
-  return files.map((file) => foldWave(file.declaration, file.events)).filter((fold) => fold.stage === "queued" && fold.after.includes(id));
+  return files.map((file) => foldWave(file.declaration, file.events)).filter((fold) => !waveStarted(fold) && fold.stage !== "cancelled" && fold.after.includes(id));
+}
+
+/**
+ * A queued wave that can start and that nothing starts: every wave it names is merged, and neither its runner nor one
+ * of theirs lives (a merged wave's runner died before it poked). It counts as interrupted; `waves.retry` pokes it.
+ */
+export async function queueStalled(fold: WaveFold, look: { waiting: string[]; never: string | null }, running: boolean): Promise<boolean> {
+  if (fold.stage !== "queued" || running || look.never !== null || look.waiting.length > 0) return false;
+  for (const id of fold.after) if ((await liveWaveRunners(id)).length > 0) return false;
+  return true;
 }
 
 /**
@@ -264,8 +277,9 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[]): Promise<Wave
   const { states, views } = await waveTaskViews(full);
   const running = (await liveWaveRunners(fold.id)).length > 0;
   const waves = all ?? (await listWaves());
-  const stuck = (fold.stage === "building" && stuckKeys(full, states).length > 0) || (fold.stage === "queued" && (await queueLook(full, waves)).never !== null);
-  const interrupted = !RESTING_WAVE_STAGES.includes(fold.stage) && !running && !stuck;
+  const queue = fold.stage === "queued" ? await queueLook(full, waves) : null;
+  const stuck = (fold.stage === "building" && stuckKeys(full, states).length > 0) || (queue !== null && queue.never !== null);
+  const interrupted = (!RESTING_WAVE_STAGES.includes(fold.stage) && !running && !stuck) || (queue !== null && (await queueStalled(full, queue, running)));
   let usage: WaveView["usage"] = null;
   const tasks = fold.tasks.map((task) => {
     const taskView = views.get(task.key);
@@ -285,7 +299,7 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[]): Promise<Wave
     "waves.approve": fold.stage === "waiting_approve",
     "waves.cancel": !WAVE_FINAL_STAGES.includes(fold.stage),
     // `tasks.remove` of a task maybe only with force, as for the task itself; its done tasks go with the wave. Not
-    // while a queued wave waits for it.
+    // while a wave that has not started waits for it.
     "waves.remove": !running && [...views.values()].every(removable) && queuedAfter(fold.id, waves).length === 0,
   };
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
@@ -317,7 +331,9 @@ export async function noticeInputs(
  * it, holding the runner's lock: no task starts twice. A record of this wave no `task` event names (a runner died
  * between the launch and its event) is adopted for the first pending task of its title instead of a second launch.
  * Nothing starts unless the wave is `building`. A wave that started queued gets its branch here, cut at its `base`,
- * while none of its tasks started (a runner that died between the `start` event and the branch). Resolves with the
+ * while none of its tasks started (a runner that died between the `start` event and the branch). A branch of that
+ * name it did not cut (another commit than `base`, and no task of the wave exists) throws `refused`: the runner blocks
+ * the wave, as `startQueuedWave` does. Resolves with the
  * started keys; a launch that fails throws (`refused` or `failed`) after the tasks started before it are recorded.
  * `signal` (the runner stops): no further launch, the running one is undone (`launchTask`), and it resolves with the
  * keys started before.
@@ -326,9 +342,13 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
   const { declaration, events } = await readWave(id);
   const fold = foldWave(declaration, events);
   if (fold.stage !== "building" || !waveStarted(fold)) return [];
-  if (fold.after.length > 0 && fold.tasks.every((task) => task.taskId === null) && !(await localBranchExists(fold.repo, fold.branch))) {
-    const made = await runCommand(["git", "branch", fold.branch, fold.base], { cwd: fold.repo });
-    if (made.exitCode !== 0) throw new FactoryError("failed", `cutting its branch ${fold.branch} at ${fold.base} failed: ${oneLine(made.output)}`);
+  if (fold.after.length > 0 && fold.tasks.every((task) => task.taskId === null)) {
+    if (!(await localBranchExists(fold.repo, fold.branch))) {
+      const made = await runCommand(["git", "branch", fold.branch, fold.base], { cwd: fold.repo });
+      if (made.exitCode !== 0) throw new FactoryError("failed", `cutting its branch ${fold.branch} at ${fold.base} failed: ${oneLine(made.output)}`);
+    } else if ((await git(runCommand, fold.repo, ["rev-parse", "--verify", `refs/heads/${fold.branch}^{commit}`])) !== fold.base && !(await listTasks()).some((record) => record.wave === id)) {
+      throw new FactoryError("refused", `its branch ${fold.branch} exists already and is not the one it cut at its start (taken since): delete or rename it`);
+    }
   }
   const { states } = await waveTaskViews(fold);
   const { maxRounds, review } = declaration.overrides;
@@ -556,8 +576,9 @@ export const WAVE_HANDLERS = {
       const { stage, branch } = foldWave(file.declaration, file.events);
       const waiting = queuedAfter(id, await listWaves());
       if (waiting.length > 0) {
-        const names = waiting.map((fold) => `${fold.tag} (${fold.id.slice(0, SHORT_ID_CHARS)})`).join(", ");
-        throw new FactoryError("refused", `wave ${short}: the queued ${waiting.length === 1 ? "wave" : "waves"} ${names} ${waiting.length === 1 ? "waits" : "wait"} for it, cancel or remove ${waiting.length === 1 ? "that" : "those"} first`);
+        const names = waiting.map((fold) => `${fold.tag} (${fold.id.slice(0, SHORT_ID_CHARS)}, ${fold.stage})`).join(", ");
+        const one = waiting.length === 1;
+        throw new FactoryError("refused", `wave ${short}: the ${one ? "wave" : "waves"} ${names} ${one ? "waits" : "wait"} for it and ${one ? "has" : "have"} not started, cancel or remove ${one ? "that" : "those"} first`);
       }
       const records = await waveRecords(id);
       // Every refusal before anything is deleted.

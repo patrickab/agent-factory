@@ -437,7 +437,7 @@ describe("waves", () => {
       expect(taskOf(waiting, "a").taskId).toBeNull();
       // The predecessor: not removable while a queued wave waits for it.
       expect((await getWave(p1)).actions).not.toContain("waves.remove");
-      await expectError(callAction("waves.remove", { id: p1 }), "refused", "the queued wave factory/w3");
+      await expectError(callAction("waves.remove", { id: p1 }), "refused", "the wave factory/w3 (");
       await merge(repo, p1);
       await until(async () => taskOf(await getWave(queued.id), "a").taskId !== null, 20_000);
       const started = await getWave(queued.id);
@@ -539,6 +539,59 @@ describe("waves", () => {
       await until(async () => taskOf(await getWave(queued.id), "a").taskId !== null, 20_000);
       expect(git(repo, "show", "main-factory-w3:1.txt")).toBe("1");
     }, 40_000);
+
+    test("waves.remove of a named wave is refused while a wave that has not started names it, blocked at its start too", async () => {
+      const repo = await registeredRepo();
+      const p1 = await predecessor(repo, "factory/p1", 1);
+      const id = WAVE_N(9);
+      await createWave({ id, repo, tag: "factory/w3", plan: null, title: "w3", request: "r", branch: null, target: "main", base: null, after: [p1], origin: null, createdAt: "2026-01-09T00:00:00.000Z", overrides: {} });
+      await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a")] });
+      await appendWaveEvent(id, { kind: "stage", stage: "blocked", reason: "infra", detail: "its branch main-factory-w3 exists already" });
+      expect((await getWave(p1)).actions).not.toContain("waves.remove");
+      await expectError(callAction("waves.remove", { id: p1 }), "refused", "the wave factory/w3 (50000000, blocked) waits for it and has not started");
+      await callAction("waves.cancel", { id });
+      expect(await callAction("waves.remove", { id: p1 })).toEqual({ removed: p1 });
+    }, 30_000);
+
+    test("queued with every named wave merged and no runner (one died before it poked): interrupted, attention in tasks.wait, waves.retry starts it", async () => {
+      const repo = await registeredRepo();
+      const p1 = await predecessor(repo, "factory/p1", 1);
+      const id = WAVE_N(9);
+      await createWave({ id, repo, tag: "factory/w3", plan: null, title: "w3", request: "r", branch: null, target: "main", base: null, after: [p1], origin: null, createdAt: "2026-01-09T00:00:00.000Z", overrides: {} });
+      await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a")] });
+      git(repo, "merge", "--quiet", "--no-edit", "main-factory-p1");
+      await appendWaveEvent(p1, { kind: "stage", stage: "merged", reason: null });
+      const stalled = await getWave(id);
+      expect([stalled.stage, stalled.interrupted, stalled.actions.includes("waves.retry")]).toEqual(["queued", true, true]);
+      expect(((await callAction("tasks.wait", { wave: id, timeoutMs: 1000 })) as { attention: string[]; timedOut: boolean })).toMatchObject({ attention: [id], timedOut: false });
+      await callAction("waves.retry", { id });
+      await until(async () => taskOf(await getWave(id), "a").taskId !== null, 20_000);
+      expect(git(repo, "show", "main-factory-w3:1.txt")).toBe("1");
+    }, 30_000);
+
+    test("a runner that died between the start event and the branch, the branch taken meanwhile: blocked; waves.retry cuts it once the name is free", async () => {
+      const repo = await registeredRepo();
+      const p1 = await predecessor(repo, "factory/p1", 1);
+      await merge(repo, p1);
+      const id = WAVE_N(9);
+      const main = git(repo, "rev-parse", "main");
+      await createWave({ id, repo, tag: "factory/w3", plan: null, title: "w3", request: "r", branch: null, target: "main", base: null, after: [p1], origin: null, createdAt: "2026-01-09T00:00:00.000Z", overrides: {} });
+      await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a")] });
+      await appendWaveEvent(id, { kind: "start", branch: "main-factory-w3", base: main });
+      git(repo, "branch", "main-factory-w3", "main^");
+      await pokeWave(id);
+      await until(async () => (await getWave(id)).stage === "blocked");
+      const blocked = await restsQueued(id);
+      expect([blocked.reason, blocked.detail, taskOf(blocked, "a").taskId]).toEqual([
+        "infra",
+        "its branch main-factory-w3 exists already and is not the one it cut at its start (taken since): delete or rename it; waves.retry starts it again",
+        null,
+      ]);
+      git(repo, "branch", "-D", "main-factory-w3");
+      await callAction("waves.retry", { id });
+      await until(async () => taskOf(await getWave(id), "a").taskId !== null, 20_000);
+      expect(git(repo, "rev-parse", "refs/heads/main-factory-w3")).toBe(main);
+    }, 30_000);
   });
 });
 

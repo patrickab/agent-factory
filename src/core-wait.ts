@@ -4,7 +4,8 @@
  * - Polls until they rest (no runner lives and the state is a resting one, or it is interrupted; a wave: `merged`,
  *   `cancelled`) or one needs attention (a task resting and not `done`; a wave `rejected`, `blocked`,
  *   `waiting_approve`, interrupted, building stuck or queued after a cancelled wave), or the timeout passes. A queued
- *   wave that can still start neither rests nor needs attention: it starts once the waves it waits for merge
+ *   wave that can still start neither rests nor needs attention: it starts once the waves it waits for merge. One
+ *   whose waves all merged with no runner of its own or theirs left is interrupted (`queueStalled`)
  * - A poll reads only what changed in the session files and looks for runners only where that decides; full views
  *   (`core-tasks.ts`, `core-waves.ts`) are built only for an answer
  */
@@ -13,7 +14,7 @@ import type { ActionName } from "./core.ts";
 import { FactoryError, stringsParam, tagParam, WAIT_TIMEOUT_MS, type Handler } from "./core-shared.ts";
 import { findTask, needsAttention, rests, tasksIn, taskView, type TaskView } from "./core-tasks.ts";
 import { findProof, proofNeedsAttention, proofRests, proofView, type ProofView } from "./gates-prove.ts";
-import { findWave, queueLook, waveLook, type WaveLook } from "./core-waves.ts";
+import { findWave, queueLook, queueStalled, waveLook, type WaveLook } from "./core-waves.ts";
 import { liveRunners } from "./launch.ts";
 import { readFactoryStates, sessionFilePath } from "./runner.ts";
 import type { State } from "./state.ts";
@@ -91,7 +92,9 @@ async function pollWaves(
   for (const file of files) {
     const fold = foldWave(file.declaration, file.events);
     if (fold.stage === "queued") {
-      if ((await queueLook(fold, await all())).never !== null) attention = true;
+      const look = await queueLook(fold, await all());
+      if (look.never !== null) attention = true;
+      else if (look.waiting.length === 0 && (await queueStalled(fold, look, (await liveWaveRunners(fold.id)).length > 0))) attention = true;
       else busy = true;
       continue;
     }

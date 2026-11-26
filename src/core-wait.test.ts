@@ -150,5 +150,11 @@ describe("tasks.wait", () => {
       expect(Date.now() - started).toBeLessThan(3_000);
       expect([never.attention, never.timedOut]).toEqual([[QUEUED], false]);
     });
+
+    test("the action's summary names queued: the one that can never start needs attention, the one that can keeps the wait going", () => {
+      const { summary } = ACTIONS["tasks.wait"];
+      expect(summary).toContain("queued after a wave that was cancelled");
+      expect(summary).toContain("a queued wave that can still start keeps the wait going");
+    });
   });
 });

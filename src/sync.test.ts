@@ -301,7 +301,7 @@ test("a queued wave is left alone when another wave lands, and is synced once it
   const one = await waveRepo(1, "main-factory-w1");
   const { repo } = one;
   const queued = waveId(2);
-  await createWave({ id: queued, repo, tag: "factory/w2", plan: null, title: "Wave 2", request: "r", branch: null, target: "main", origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {}, after: [one.wave] } as never);
+  await createWave({ id: queued, repo, tag: "factory/w2", plan: null, title: "Wave 2", request: "r", branch: null, target: "main", base: null, after: [one.wave], origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
   const land = async (file: string) => {
     const work = join(caseDir, `work-${file}`);
     const before = git(repo, "rev-parse", "main");
