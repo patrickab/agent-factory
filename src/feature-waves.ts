@@ -75,7 +75,7 @@ export const WAVES = feature({
       false,
     ),
     "waves.retry": spec(
-      "Run a blocked or interrupted wave again: a blocked wave with tasks not started or not finished builds again (starts them), else review and merge from the rebase on; an interrupted one resumes from its log. Answers {wave}",
+      "Run a blocked or interrupted wave again: a blocked wave with tasks not started or not finished builds again (starts them), else review and merge from the rebase on; an interrupted one resumes from its log; also retries each interrupted task of the wave. Answers {wave, retried, refused}",
       { id: WAVE_ID },
       ["id"],
       true,

@@ -186,7 +186,8 @@ tasks.wait ...                       (limit reached)
 | `waves.get` | `{id}` | `{wave: WaveView}` | the wave block above |
 | `waves.list` | `{repo?, tag?, origin?, open?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count |
 | `waves.timeline` | `{id, since?}` | `{events: WaveEvent[], next: number}` | none: not offered to agents; the CLI prints JSON |
-| `waves.retry` · `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  reviewing  5/5 done  factory/w1` · `... merging ...` · `... cancelled ...` |
+| `waves.retry` | `{id}` | `{wave: WaveView, retried: string[], refused: {id, why}[]}` | the wave line, `retried tasks: 3f2a, 9c4d` · `refused task 3f2a: <why>`; the card lists them |
+| `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  merging  5/5 done  factory/w1` · `... cancelled ...` |
 | `waves.update` | `{id, title?, request?}` | `{wave: WaveView, changed: boolean}` | the wave line, `updated, the next review reads it` · `nothing changed` |
 | `tasks.update` | `{id, title?, request?, after?, model?}` | `{wave: WaveView, key, changed: boolean, delivery: "pending"\|"sent"\|"kept"\|"starting"}` | the wave line, `task docs updated, <starts with it \| its coder was told \| its coder is told at its next turn \| its coder is told as it starts>` · `task docs: nothing changed` |
 | `contracts.apply` | `{store, name, op}` | `{store, name, changed: string[], notified, kept, done: {wave, tag, key, task}[]}` | `contract core: 1 fact changed · told: factory/w1:docs · next turn: ... · done, may need a follow-up task: ...` · `contract core: nothing changed` |

@@ -224,10 +224,11 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - The reviewer's tools, the same in every pass: `read`, `grep`, `find`, `ls`, `read_diff`, `submit_verdict`, `scout`
   (always waits), `feedback` (role `reviewer`; in the fit pass the wave's, task null), `notify_supervisor {text}` (one
   quiet notice to the wave's origin, the review goes on),
-  `start_fix {title, request}` (adds a `fix:` task to the wave, at most three per wave; then refused, with the hint to
-  use `notify_supervisor`)
+  `start_fix {title, request, model?}` (adds a `fix:` task to the wave, at most three per wave; then refused, with the hint to
+  use `notify_supervisor`; the task runs on the `small` model, `model: "big"` for a fix that needs design; no small model
+  configured: it runs as before)
 - With `reviewEach`, after `merge_gates` the same reviewer does one pass on how the tasks fit together. Its blocker and
-  major findings become one `fix:` task (stage `building`, then reviewed again); the cap of three used up: `rejected` to
+  major findings become one `fix:` task (`model: small`, as the reviewer's `start_fix`; stage `building`, then reviewed again); the cap of three used up: `rejected` to
   the supervisor as before
 - `overrides` are stored with the wave: its tasks start with their `models`, `maxRounds`, `review`, target = the wave
   branch and `merge: auto` (a task merges into the wave branch by itself); `merge` is the wave's own
@@ -243,8 +244,10 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   count as cancelled. Added during `reviewing`, the running review is killed at once
 - `waves.retry {id}`: a `blocked` wave with tasks not started or not finished (a launch failed) builds again (stage
   `building`); any other `blocked` wave runs review and merge again from the rebase (stage `reviewing`); an interrupted
-  one resumes the stage its log holds; it pokes the runner. `waves.approve {id}`: only from `waiting_approve` (the
-  wave's `merge: review`), on to `merging`. Both answer `{wave}`
+  one resumes the stage its log holds; it also retries every task of the wave that is `interrupted` (as `tasks.retry`,
+  one notice for the wave: while a wave is interrupted its tasks' `interrupted` notices are not sent, the wave's lists
+  them), a task refused is named; it pokes the runner. Answers `{wave, retried: ids, refused: [{id, why}]}`. `waves.approve {id}`: only from `waiting_approve` (the
+  wave's `merge: review`), on to `merging`. `waves.approve` answers `{wave}`
 - `waves.cancel {id}`: refused when `merged` or `cancelled`; records `cancelled`, stops the wave's runner and cancels
   its tasks that are not `done` or `cancelled` (as `tasks.cancel`). The wave's branch stays (a queued wave has none).
   Answers `{wave}`
@@ -310,7 +313,10 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   gates and the wave's view lists the files (`resolved`). Any other rebase conflict, at review or at merge, puts the wave
   back to `building` with a task `fix: resolve the conflict of <tag> with <target>` (key `conflict-<n>`): its worktree is
   the wave's whole change on the target's tip with the markers left, its request names the files and the subjects of both
-  sides' commits (`conflicts` in the view). At most two per wave, then `blocked` `conflict`
+  sides' commits (`conflicts` in the view). At most two per wave, then `blocked` `conflict`. A conflict task keeps the big model
+- A failed rebase that git already resolved (`rerere` staged a recorded resolution: rebase in progress, no unmerged path, no
+  conflict marker in the staged files) goes on with `git rebase --continue`, at most once per commit of the branch; the
+  files so resolved are logged. Any other state takes the paths above
 - A failed rebase of another kind, failed gates (`gates`; exit 75: `infra`), a dirty worktree (`dirty`), a failed reviewer
   (`review_failed`) or anything else (`infra`) ends it `blocked` with that `reason`, and nothing is deleted
 - The gates and the reviewer see exactly the committed tree that reaches the target: before the rebase, after it (the

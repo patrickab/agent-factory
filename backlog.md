@@ -18,9 +18,7 @@
 
 Each is small and stands alone. Order: by what cost the run most.
 
-- **`waves.retry` retries the wave's interrupted tasks** and reports once. Today each task needs its own `tasks.retry` and sends its own notice: a reboot with seven tasks was eleven calls and eleven notices
 - **A wave waits for a wave of another repository**: `after` takes `{repo, tag}`. Today the order across repositories is the supervisor's memory; a task then guesses an interface that is not built yet (three review rounds on one small task)
-- **The rebase goes on when git already resolved it**: a conflict that `rerere` staged, no markers left, is continued instead of blocking the wave `infra`
 - **`waves.remove` is slow**: about six minutes per wave, a `git worktree remove` per task with its `node_modules`. Move the worktrees aside under the merge lock, delete them in the background
 - **A handover between tasks is recorded**: a coder that leaves a point of its request to another task has a tool for it (the factory adds the point to that task's request and tells the supervisor). Today the point falls between two coders and only the review finds it
 - **A stale review worktree and a notice per interruption** are covered (polish/2, review/1); **the service that killed the runners** is fixed in gigachad-bot's `run.sh`
