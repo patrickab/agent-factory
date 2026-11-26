@@ -20,7 +20,7 @@ import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchE
 import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
 import { DEFAULT_SETTINGS, loadSettings, modelChoice, registeredRepos, resolveSettings, type StoredSettings } from "./settings.ts";
-import { minorFindings, normalizeModels, parseSettingsFields, type MinorFinding } from "./state.ts";
+import { minorFindings, normalizeModels, parseSettingsFields, type MinorFinding, type ModelSize } from "./state.ts";
 import { mergeTrees, sessionTask } from "./sync.ts";
 import { listTasks, tagInGroup, TaskBusyError, type TaskRecord } from "./tasks.ts";
 import { errorText } from "./util.ts";
@@ -425,8 +425,9 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
         const conflict = fold.conflicts?.find((candidate) => candidate.key === key);
         if (conflict !== undefined) await conflictBranch(fold, conflict);
         const prepare = conflict === undefined ? {} : { beforeRecord: (_branch: string, worktree: string) => leaveMarkers(worktree, conflict) };
-        // The task's size picks its coder's model of the wave's; the reviewer's stays the wave's.
-        record = await launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model, ...(spec.id === undefined ? {} : { id: spec.id }), tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...prepare, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
+        // The task's size picks its coder's model of the wave's; the reviewer's stays the wave's. No small model
+        // anywhere: the task runs as a big one, with the wave's coder.
+        record = await launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model === "small" && models.small === undefined ? "big" : spec.model, ...(spec.id === undefined ? {} : { id: spec.id }), tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...prepare, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
@@ -819,7 +820,7 @@ export const REVIEWER_FIX_CAP = 3;
  * The events of a reviewer's `fix:` task: a pending task `fix-<n>` titled `fix: ...` (a `tasks` event
  * `by: "reviewer"`); null once the wave has its `REVIEWER_FIX_CAP` of them. `fold` is the wave under its log lock.
  */
-export function reviewerFixEvents(fold: WaveFold, fix: { title: string; request: string }): { key: string; events: NewWaveEvent[] } | null {
+export function reviewerFixEvents(fold: WaveFold, fix: { title: string; request: string; model?: ModelSize }): { key: string; events: NewWaveEvent[] } | null {
   const bare = fix.title.trim().replace(/^fix:\s*/i, "");
   const started = fold.fixes ?? 0;
   if (started >= REVIEWER_FIX_CAP) return null;
@@ -827,7 +828,7 @@ export function reviewerFixEvents(fold: WaveFold, fix: { title: string; request:
   let n = started + 1;
   while (keys.has(`fix-${n}`)) n++;
   const key = `fix-${n}`;
-  const tasks = withIds(validateTaskSpecs([{ key, title: `fix: ${bare}`, request: fix.request }], fold.tasks));
+  const tasks = withIds(validateTaskSpecs([{ key, title: `fix: ${bare}`, request: fix.request, model: fix.model ?? "small" }], fold.tasks));
   return { key, events: [{ kind: "tasks", tasks, by: "reviewer" }] };
 }
 
@@ -835,7 +836,7 @@ export function reviewerFixEvents(fold: WaveFold, fix: { title: string; request:
  * The reviewer's `start_fix`: adds the task of `reviewerFixEvents` to the wave and pokes its runner. Refused past
  * `REVIEWER_FIX_CAP` (checked under the log lock) and in the stages `waves.add` refuses. Resolves with the task's key.
  */
-export async function startReviewerFix(waveId: string, fix: { title: string; request: string }, env?: RunnerEnv): Promise<string> {
+export async function startReviewerFix(waveId: string, fix: { title: string; request: string; model?: ModelSize }, env?: RunnerEnv): Promise<string> {
   const bare = fix.title.trim().replace(/^fix:\s*/i, "");
   if (bare === "") throw new FactoryError("invalid", "start_fix needs a title");
   if (fix.request.trim() === "") throw new FactoryError("invalid", "start_fix needs a request");

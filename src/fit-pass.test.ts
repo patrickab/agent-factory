@@ -146,6 +146,11 @@ describe("the fit pass of a reviewEach wave", () => {
     const choice = afterFit(withSupervisorFix, withSupervisorFix, 1, event);
     expect(choice.detail).toEndWith("task fix-2 fixes it");
     expect(choice.events.flatMap((e) => (e.kind === "tasks" ? e.tasks.map((task) => task.key) : []))).toEqual(["fix-2"]);
+    // A reviewer's fix runs on the small model; "big" when asked; the spec shows it.
+    const small = reviewerFixEvents(await fold(), { title: "x", request: "r" })!.events[0]!;
+    const big = reviewerFixEvents(await fold(), { title: "x", request: "r", model: "big" })!.events[0]!;
+    expect(small.kind === "tasks" && small.tasks[0]!.model).toBe("small");
+    expect(big.kind === "tasks" && big.tasks[0]!.model).toBe("big");
     // The fix slots used up meanwhile: rejected, no fourth fix.
     for (let n = 0; n < REVIEWER_FIX_CAP; n++) {
       const added = reviewerFixEvents(await fold(), { title: `fix ${n}`, request: "r" })!;

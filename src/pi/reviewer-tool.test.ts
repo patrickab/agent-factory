@@ -164,6 +164,8 @@ esac
         const result = await call(fix, { title: n === 1 ? "fix(api): handle empty input" : `repair ${n}`, request: `do ${n}` });
         expect([result.isError, result.terminate, result.details]).toEqual([undefined, undefined, { key: `fix-${n}` }]);
       }
+      const models = (await readWave(id)).events.flatMap((e) => (e.kind === "tasks" ? e.tasks.map((t) => t.model) : []));
+      expect(models).toEqual(["small", "small", "small"]);
       const refused = await call(fix, { title: "one more", request: "do 4" });
       expect(refused.isError).toBe(true);
       expect(refused.content[0].text).toContain(NOTIFY_TOOL);
@@ -183,6 +185,18 @@ esac
         ['factory: the reviewer of wave rt/w1 started fix-2 "fix: repair 2"', "quiet"],
         ['factory: the reviewer of wave rt/w1 started fix-3 "fix: repair 3"', "quiet"],
       ]);
+    } finally {
+      await release();
+    }
+  });
+
+  test("start_fix {model: big} writes big into the spec", async () => {
+    const { id, release } = await heldWave();
+    try {
+      const fix = tools({ wave: id, task: null, plan: null }).get(FIX_TOOL)!;
+      await call(fix, { title: "design it", request: "r", model: "big" });
+      const models = (await readWave(id)).events.flatMap((e) => (e.kind === "tasks" ? e.tasks.map((t) => t.model) : []));
+      expect(models).toEqual(["big"]);
     } finally {
       await release();
     }

@@ -14,7 +14,7 @@
  *     worktree), so its cost and store are the task's (the wave's)
  *   - `feedback`: role `reviewer`, stored under the plan with the task and wave (task null in the fit pass)
  *   - `notify_supervisor {text}`: one quiet notice to the wave's origin (`noteToSupervisor`); the review goes on
- *   - `start_fix {title, request}`: a `fix:` task in the wave (`startReviewerFix`), at most `REVIEWER_FIX_CAP` per wave,
+ *   - `start_fix {title, request, model?}`: a `fix:` task in the wave (`startReviewerFix`), at most `REVIEWER_FIX_CAP` per wave,
  *     then refused with the hint to notify the supervisor
  */
 import { readFileSync } from "node:fs";
@@ -44,7 +44,7 @@ export interface ReviewerIds {
 
 /** How the tools reach the factory: tests replace them. */
 export interface ReviewerCore {
-  fix(wave: string, fix: { title: string; request: string }): Promise<string>;
+  fix(wave: string, fix: { title: string; request: string; model?: "small" | "big" }): Promise<string>;
   note(wave: string, text: string, task: string | null): Promise<void>;
   /** Where a scout explores: the task's worktree, else the wave's review worktree. */
   scoutDir(ids: ReviewerIds): Promise<string>;
@@ -115,7 +115,7 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds, core: 
   pi.registerTool({
     name: FIX_TOOL,
     label: "Start fix",
-    description: `Add a \`fix:\` task to the wave: a coder writes the change, you review it like every task. You never edit code yourself. At most ${REVIEWER_FIX_CAP} per wave; after that tell the supervisor with ${NOTIFY_TOOL}.`,
+    description: `Add a \`fix:\` task to the wave: a coder writes the change, you review it like every task. You never edit code yourself. At most ${REVIEWER_FIX_CAP} per wave; after that tell the supervisor with ${NOTIFY_TOOL}. The task runs on the small model; pass model "big" only for a fix that needs design (a new interface, a change across modules), not for a bounded edit.`,
     promptSnippet: "Start a fix: task in the wave for a coder",
     parameters: {
       type: "object",
@@ -123,6 +123,7 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds, core: 
       properties: {
         title: { type: "string", description: "A conventional commit title, e.g. `fix(api): handle empty input`" },
         request: { type: "string", description: "The complete request for the task's coder, who sees nothing else" },
+        model: { type: "string", enum: ["small", "big"], description: "Default small; big only for a fix that needs design" },
       },
     } as never,
     async execute(_toolCallId, params: unknown) {
@@ -130,7 +131,8 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds, core: 
       const request = nonEmptyString(isRecord(params) ? params.request : undefined);
       if (title === undefined || request === undefined) return { ...text(`${FIX_TOOL}: title and request must not be empty`), isError: true };
       try {
-        const key = await core.fix(ids.wave, { title, request });
+        const model = isRecord(params) && (params.model === "small" || params.model === "big") ? params.model : undefined;
+        const key = await core.fix(ids.wave, { title, request, ...(model ? { model } : {}) });
         return text(`Task ${key} added to the wave; it starts at once. Go on with the review.`, { key });
       } catch (error) {
         return failed(error);

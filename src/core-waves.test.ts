@@ -181,6 +181,15 @@ describe("waves", () => {
     await stopWaveRunners(on.id);
   }, 30_000);
 
+  test("no small model anywhere: a small task (a reviewer's fix) runs on the wave's coder model", async () => {
+    const repo = await registeredRepo();
+    const wave = await startWave(repo, [{ ...spec("cheap"), model: "small" }], { tag: `${TAG}-nosmall`, overrides: { models: { big: "a/b" } } });
+    await until(async () => (await getWave(wave.id)).tasks.every((task) => task.taskId !== null));
+    const settings = ((await callAction("tasks.get", { id: taskOf(await getWave(wave.id), "cheap").taskId })) as TaskView).settings?.models;
+    expect(settings).toEqual({ big: "a/b", coder: "a/b" });
+    await stopWaveRunners(wave.id);
+  }, 30_000);
+
   test("a concrete model id in a wave's task is invalid before anything is created; a small model off the list is refused; waves.add takes small too", async () => {
     const repo = await registeredRepo();
     const start = (tasks: unknown[], overrides?: object) => callAction("waves.start", { tag: TAG, title: "t", request: "r", tasks, overrides }, { cwd: repo });
