@@ -402,6 +402,7 @@ Commands (inside a task's own Pi session):
 
 ## Questions to the supervisor
 
+- Coders have `feedback {kind, what, cost?, suggestion?}` (`kind`: runtime, context, request, contract, tools, environment, communication): one call per problem, returns at once, never ends the turn. The entry is a fact under `<plan>/run/feedback/` with task, wave and role, listed by `waves.get` as `feedback:`; without a plan store it stays in the task's session
 - In a task session the coder may call `factory_ask_supervisor {question}` while its task is `running`: it records a
   `factory-question {text}` entry (timeline kind `question`, `TaskView.question`) and the resting state
   `waiting_answer`, and ends the coder's turn. The round's hooks, gates and review do not run; the runner ends. It is

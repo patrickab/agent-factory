@@ -649,7 +649,7 @@ describe("factory_ask_supervisor", () => {
     const worktree = addTaskWorktree();
     const pi = session(worktree);
     await pi.start();
-    expect(pi.tools).toEqual(["factory", "scout", "factory_new_task", "factory_ask_supervisor"]);
+    expect(pi.tools).toEqual(["factory", "scout", "factory_new_task", "feedback", "factory_ask_supervisor"]);
     // A failing gate: had the round's steps run, a gates round would open.
     rmSync(join(worktree, "required.txt"));
     expect(await pi.tool("factory_ask_supervisor", { question: "May required.txt go?" })).toMatchObject({ terminate: true });

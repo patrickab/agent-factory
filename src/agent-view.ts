@@ -306,11 +306,21 @@ function waveStageLines(view: WaveView): string[] {
   }
 }
 
+/** The entries the agents reported: one line each, with their cost and suggestion. */
+function feedbackLines(view: WaveView): string[] {
+  const entries = view.feedback ?? [];
+  if (entries.length === 0) return [];
+  return [
+    `  feedback: ${entries.length}`,
+    ...entries.flatMap((entry) => labelled("    ", `${entry.kind} (${entry.role}, task ${short(entry.task)}): `, [entry.what, entry.cost && `cost: ${entry.cost}`, entry.suggestion && `suggestion: ${entry.suggestion}`].filter(Boolean).join(" · ")))
+  ];
+}
+
 /** One wave: header, title, the lines of its stage, `next:`. Exported for notifications. */
 export function waveBlock(view: WaveView): string {
   const next = view.actions.length === 0 ? "next: none, it runs" : `next: ${view.actions.join(", ")}`;
   const flaky = [...new Set(view.gates.flatMap((gate) => gate.flaky ?? []))];
-  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...flakyLine(flaky), `  ${next}`].join("\n"));
+  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...flakyLine(flaky), ...feedbackLines(view), `  ${next}`].join("\n"));
 }
 
 function waveList(waves: WaveView[]): string {

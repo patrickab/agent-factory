@@ -133,7 +133,7 @@ describe("factory_new_task", () => {
     const { repo, worktree, merged } = repoWithTask();
     const pi = mergedSession(worktree, merged);
     await pi.emit("session_start");
-    expect([...pi.tools.keys()]).toEqual(["factory", "scout", "factory_new_task", "factory_ask_supervisor"]);
+    expect([...pi.tools.keys()]).toEqual(["factory", "scout", "factory_new_task", "feedback", "factory_ask_supervisor"]);
     expect((await pi.newTask({ title: "feat: x", handoff: "do x" })).isError).toBe(true);
 
     await pi.message();

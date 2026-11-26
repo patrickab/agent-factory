@@ -53,6 +53,7 @@ import {
 } from "./waves.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
 import { cancelScouts, scoutUsage } from "./scouts.ts";
+import { waveFeedback } from "./feedback.ts";
 
 export type WaveActionName = "waves.add" | "waves.retry" | "waves.approve" | "waves.cancel" | "waves.remove";
 
@@ -486,7 +487,11 @@ export const WAVE_HANDLERS = {
     return { wave: await waveView(await readWave(id)) };
   },
 
-  "waves.get": async (params) => ({ wave: await waveView(await findWave(params.id)) }),
+  "waves.get": async (params) => {
+    const file = await findWave(params.id);
+    const view = await waveView(file);
+    return { wave: { ...view, feedback: await waveFeedback(file.declaration.plan, view.id) } };
+  },
 
   "waves.list": async (params, { cwd }) => {
     const tag = tagParam("waves.list", params.tag);

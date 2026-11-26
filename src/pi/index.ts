@@ -53,6 +53,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { sessionWidget } from "../session-widget.ts";
 import type { WaveView } from "../waves.ts";
+import { registerFeedbackTool } from "./feedback-tool.ts";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
 import { taskWave, waveMergeRefusal } from "../core.ts";
 import { snapshotTree } from "../git.ts";
@@ -153,6 +154,16 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
         if (session.followUp) session.followUp.spawnedForMessage = true;
         pi.appendEntry("factory-spawn", spawn);
         session.snapshot = applyEntry(session.snapshot, "factory-spawn", spawn);
+      },
+    });
+    registerFeedbackTool(pi, {
+      role: "coder",
+      context: async (ctx) => {
+        const record = await syncRecord(ctx);
+        return record === undefined ? null : { task: record.id, wave: record.wave, plan: record.plan };
+      },
+      keep: (entry) => {
+        pi.appendEntry("factory-feedback", entry);
       },
     });
     registerAskSupervisorTool(pi, {

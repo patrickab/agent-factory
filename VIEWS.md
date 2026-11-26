@@ -88,6 +88,7 @@ type WaveView = {                     // as in the contract
   usage: Usage | null                 // tasks, reviews and scouts
   scoutingCost?: number               // the scouts alone
   actions: string[]
+  feedback?: { kind: string; what: string; cost: string | null; suggestion: string | null; task: string; wave: string | null; role: string }[]   // waves.get only, oldest first
 }
 
 type TimelineEntry = { at: string; kind: string; data: object }   // kinds: task, round, coder, user, gate, review, question, merge, state
@@ -111,6 +112,8 @@ wave 3f2a91c0  rejected  4/5 done  factory/w1  $18.40
     major  src/wave-runner.ts:309  A wave whose remaining tasks can never start stays building forever. Fix: ...
     major  src/core.ts:1060  A task that fails to launch is retried every 10 s, silently. Fix: ...
     minor  src/tasks.ts:94  tasks.import can put a task into a wave. Fix: ...
+  feedback: 1
+    context (coder, task a113f7bb): read 40 files, needed 3 · cost: 2 avoidable rounds · suggestion: ...
   next: waves.add, waves.cancel
 ```
 

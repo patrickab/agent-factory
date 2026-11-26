@@ -21,6 +21,7 @@ import { MODEL_SIZES, normalizeModels, parseSettingsFields, RESTING_STATES, type
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
+import type { FeedbackEntry } from "./feedback.ts";
 
 export { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir };
 
@@ -174,6 +175,8 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   /** The part of `usage.cost` the wave's and its tasks' scouts spent. Always set by the core. */
   scoutingCost?: number;
   actions: string[];
+  /** What the agents reported (`feedback.ts`), oldest first; only `waves.get` reads the store. */
+  feedback?: FeedbackEntry[];
 }
 
 const TASK_KEY = /^[A-Za-z0-9._-]+$/;

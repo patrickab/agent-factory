@@ -9,6 +9,7 @@
 import type { CommitMessage } from "./commitmsg.ts";
 import type { CommandResult } from "./run.ts";
 import { isRecord } from "./util.ts";
+import type { FeedbackEntry } from "./feedback.ts";
 
 /** `waiting_answer`: the coder asked the supervisor (`factory-question`); the next message answers it. */
 export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked" | "merging" | "done" | "cancelled";
@@ -181,6 +182,7 @@ export interface EntryData {
   "factory-commit-message": CommitMessage;
   "factory-spawn": SpawnData;
   "factory-question": QuestionData;
+  "factory-feedback": FeedbackEntry;
 }
 
 export type EntryType = keyof EntryData;
@@ -239,6 +241,7 @@ const REDUCERS: { [K in EntryType]: Reducer<K> } = {
   "factory-commit-message": (snapshot, commitMessage) => snapshot && { ...snapshot, commitMessage },
   "factory-spawn": (snapshot) => snapshot,
   "factory-question": (snapshot, { text }) => snapshot && { ...snapshot, question: text },
+  "factory-feedback": (snapshot) => snapshot,
 };
 
 export function isEntryType(value: string): value is EntryType {
