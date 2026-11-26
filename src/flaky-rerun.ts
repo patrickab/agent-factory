@@ -5,8 +5,9 @@
  * - Provides `runGateStep`: the step's result and, when it failed and then passed, its `flaky` names (the failing test
  *   names read from the first run's output, else the command). A flaky step counts as passed
  * - No rerun after exit `INFRA_EXIT`, a kill or a timeout: those are not the step's to repeat
- * - A step that reruns its own failures says so in its output (`FLAKY_MARK`, `RERAN_MARK` lines, as
- *   `scripts/changed-tests.ts` prints them): it is not run again, and its `FLAKY_MARK` names are its flaky names
+ * - A step that reruns its own failures says so in the last line of its output, one trailer (`rerunsTrailer`, as
+ *   `scripts/changed-tests.ts` prints it): it is not run again, and the trailer's `flaky` names are its flaky names.
+ *   A mark anywhere else (a test's own output) is not read
  * - Every run holds a test slot (`test-slots.ts`) while its command runs: `run` gets the slot's env for the command
  */
 import type { CommandResult } from "./run.ts";
@@ -20,24 +21,28 @@ export interface GateStep {
   flaky: string[] | null;
 }
 
-/** A line `gate-flaky: <name>`: the step reran `<name>` itself, and it passed then. */
-export const FLAKY_MARK = "gate-flaky: ";
-/** A line `gate-reran: <name>`: the step reran `<name>` itself, and it failed again. */
-export const RERAN_MARK = "gate-reran: ";
+/** The trailer `gate-reruns: {"flaky": [...], "reran": [...]}`: names the step reran itself, passing then (`flaky`) or failing again (`reran`). */
+export const RERUNS_MARK = "gate-reruns: ";
 
-/** The names a step's output marks as rerun inside it: `flaky` (passed then), `reran` whether it reran anything. */
+/** The trailer line of a step that reran `flaky` (passed then) and `reran` (failed again) itself; null when it reran nothing. */
+export function rerunsTrailer(flaky: readonly string[], reran: readonly string[]): string | null {
+  return flaky.length === 0 && reran.length === 0 ? null : `${RERUNS_MARK}${JSON.stringify({ flaky, reran })}`;
+}
+
+/** What the output's last line, its trailer (`rerunsTrailer`), says the step reran: `flaky` (passed then), `reran` whether it reran anything. */
 export function innerReruns(output: string): { flaky: string[]; reran: boolean } {
-  const flaky: string[] = [];
-  let reran = false;
-  for (const line of output.split("\n")) {
-    const text = line.trim();
-    if (text.startsWith(RERAN_MARK)) reran = true;
-    if (!text.startsWith(FLAKY_MARK)) continue;
-    reran = true;
-    const name = text.slice(FLAKY_MARK.length).trim();
-    if (name !== "" && !flaky.includes(name) && flaky.length < MAX_NAMES) flaky.push(name);
+  const last = output.trimEnd().split("\n").at(-1)?.trim() ?? "";
+  if (!last.startsWith(RERUNS_MARK)) return { flaky: [], reran: false };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(last.slice(RERUNS_MARK.length));
+  } catch {
+    return { flaky: [], reran: false };
   }
-  return { flaky, reran };
+  const names = (value: unknown) => (Array.isArray(value) ? value.filter((name): name is string => typeof name === "string" && name.trim() !== "").map((name) => name.trim()) : []);
+  const record = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  const flaky = [...new Set(names(record.flaky))].slice(0, MAX_NAMES);
+  return { flaky, reran: flaky.length > 0 || names(record.reran).length > 0 };
 }
 
 /** At most this many names are recorded for one step. */

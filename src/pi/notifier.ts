@@ -24,7 +24,7 @@ import { noticeInputs } from "../core.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
 import { pendingNotices, scoutNoticeKey, type Notice } from "../notify.ts";
 import { callerKey, scoutDirs, scoutsDir, scoutView, type ScoutView } from "../scouts.ts";
-import { proofRests, proofsDir, proofsOf } from "../gates-prove.ts";
+import { proofsDir, proofsOf } from "../gates-prove.ts";
 import { tasksDir } from "../tasks.ts";
 import { wavesDir, type WaveView } from "../waves.ts";
 
@@ -111,7 +111,7 @@ export function startNotifier(options: NotifierOptions): Notifier {
     }
     return scouts;
   };
-  /** This origin's ended or interrupted gate proofs whose notices are delivered: never read again. */
+  /** This origin's ended gate proofs whose notices are delivered: never read again. An interrupted one is read again: it may still end. */
   const finishedProofs = new Set<string>();
   /** Gate proofs of other origins: never read again. */
   const otherProofs = new Set<string>();
@@ -169,7 +169,7 @@ export function startNotifier(options: NotifierOptions): Notifier {
       }
     }
     for (const wave of waves) if (FINAL_WAVE_STAGES.includes(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);
-    for (const proof of proofs) if (proofRests(proof)) finishedProofs.add(proof.id);
+    for (const proof of proofs) if (proof.state !== "running") finishedProofs.add(proof.id);
     if (!stopped) options.onWaves?.([...waves.map((wave) => wave.view).filter((view) => !finishedWaves.has(view.id)), ...finishedWaves.values()]);
   };
 

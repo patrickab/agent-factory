@@ -389,6 +389,9 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
     let task: Pick<FoldedTask, "title" | "request" | "model"> = found;
     if (orphan >= 0) {
       [record] = orphans.splice(orphan, 1);
+      // A runner that died after the launch: the coder got the launched text, a later update reaches it as a follow-up.
+      const launch = events.findLast((event) => event.kind === "launch" && event.key === key);
+      if (launch?.kind === "launch" && launch.request !== undefined) task = { ...found, title: launch.title ?? found.title, request: launch.request };
     } else {
       const spec = await launchSpec(id, key, found.after);
       if (spec === null) continue;

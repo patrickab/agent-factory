@@ -157,6 +157,24 @@ describe("tasks.update", () => {
     await appendWaveEvent(id, { kind: "stage", stage: "cancelled", reason: null });
     expect(await launchSpec(id, "b", [])).toBeNull();
   });
+
+  test("the crash window: a record written, no task event, an update, a restart: the coder has the launched text and gets the update as a follow-up", async () => {
+    const { id, ids } = await writtenWave(5, [spec("a")]);
+    const aId = ids.get("a") as string;
+    // The runner launched (with the text then) and wrote the record, then died before its `task` event.
+    expect(await launchSpec(id, "a", [])).toMatchObject({ request: "do a" });
+    const record = { ...fakeRecord(aId, (await readWave(id)).declaration.repo), title: "Task a", wave: id };
+    await writeTask(record);
+    writeSession(record, [{ type: "custom", customType: "factory-state", data: { state: "running", round: 1, reason: "start" } }]);
+    // No runner lives, but the record does: it started, after and model are fixed.
+    await expectError(update({ id: aId, after: [], model: "small" }), "refused", "has started (starting)");
+    const raced = await update({ id: aId, request: "do a better" });
+    expect([raced.changed, raced.delivery]).toEqual([true, "starting"]);
+    // The restarted runner adopts the record, no second launch, and tells the coder against the launched text.
+    expect(await startWaveTasks(id)).toEqual(["a"]);
+    expect(taskOf(await getWave(id), "a")).toMatchObject({ taskId: aId });
+    expect((await readTask(aId)).contractNotes).toEqual(["Your task changed, follow the new text:\n- request\n  old: do a\n  new: do a better"]);
+  });
 });
 
 describe("waves.update", () => {

@@ -286,7 +286,7 @@ describe("gate proofs", () => {
     return file;
   }
 
-  test("an interrupted proof is reported once and then left alone; another origin's proof is read once", async () => {
+  test("an interrupted proof that later ends is reported again with its result; another origin's proof is read once", async () => {
     const own = proofOf(1, "sess-A");
     const other = proofOf(2, "sess-B");
     const sent: string[] = [];
@@ -295,11 +295,15 @@ describe("gate proofs", () => {
     await notifier.look();
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain("interrupted");
-    // Read again, both would now give a `passed` notice of sess-A.
+    // Read again, the other one would now give a `passed` notice of sess-A too: it is not read again.
     const end = { kind: "end", state: "passed", at: "2026-01-01T00:01:00.000Z" };
     appendFileSync(own, `${JSON.stringify(end)}\n`);
     writeFileSync(other, [{ id: ID(2), repo: join(scratch, "repo"), branch: "main", commit: "0".repeat(40), origin: "sess-A", createdAt: "2026-01-01T00:00:00.000Z" }, end].map((line) => `${JSON.stringify(line)}\n`).join(""));
     await notifier.look();
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toContain("the gates of main pass");
+    // Ended: never read again.
+    await notifier.look();
+    expect(sent).toHaveLength(2);
   });
 });

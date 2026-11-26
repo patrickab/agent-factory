@@ -82,8 +82,9 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 - Gates, three argv lists. Exit 0 passes, 75 = broken environment (the task blocks), else fails. A failed step runs
   once more (not after exit 75, a kill or a timeout): passing then, it counts as passed and is recorded `flaky` (the
   failing test names from its output, else its command) on the task or wave. A step that reruns its own failures
-  prints `gate-flaky: <name>` per name that passed only on its rerun (passed: recorded `flaky`) and `gate-reran:
-  <name>` per name that failed again; a step that printed either is not run once more:
+  prints, as its output's last line, `gate-reruns: {"flaky": [<name>, ...], "reran": [<name>, ...]}`: the names that
+  passed only on its rerun (passed: recorded `flaky`) and those that failed again; such a step is not run once more. A
+  mark on any other line is not read:
 
   | List | What | When |
   |---|---|---|
@@ -95,8 +96,8 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   (a changed `*.test.ts`, the test next to a changed source, the tests importing it, transitively over relative
   imports). The change starts at `$FACTORY_BASE`, else at the merge base with the default branch; `--all` runs every
   test file. One `bun test` process per file, the cores but two at once (`FACTORY_TEST_JOBS` overrides; the factory's test slots set it, below), at low
-  priority; a file that fails beside the others runs once more alone: passing then, it passes and is printed as
-  `gate-flaky: <file>`, else `gate-reran: <file>`. So the gate records it `flaky` and never runs the suite again
+  priority; a file that fails beside the others runs once more alone: passing then, it passes. The files it reran are
+  in its `gate-reruns:` trailer. So the gate records a flaky one `flaky` and never runs the suite again
 - `protected`: globs the coder must not change. Default: `factory.yaml`, `.factory/**`
 - `lockfiles`: file names that trigger `after_merge` and go last in the review patch. Default:
   `uv.lock`, `package-lock.json`, `bun.lock`, `bun.lockb`

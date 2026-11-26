@@ -2,7 +2,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { contractCheck, readContract, stampOf } from "./contracts.ts";
+import { contractCheck, contractsForLaunch, readContract, stampOf } from "./contracts.ts";
+import { waveContracts } from "./core-contracts.ts";
 import { callAction, noticeInputs } from "./core.ts";
 import { caseDir, exitingRunner, expectError, fakeRecord, ID_1, ID_2, ID_3, makeRepo, RUN, scratch, testPath, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { readStore, writeFakeMemoryStore, writeStore } from "./fake-memory-store.ts";
@@ -91,6 +92,13 @@ describe("waves.start contracts", () => {
     process.env.PATH = testPath;
     const { wave } = (await start(repo, { plan: STORE })) as { wave: WaveView };
     expect("contracts" in wave).toBe(false);
+  });
+
+  test("a contract listed twice is listed once, core first even when named after another", async () => {
+    expect(await waveContracts(STORE, ["api", "core", "api"])).toEqual(["core", "api"]);
+    expect(await waveContracts(STORE, ["one", "one"])).toEqual(["core", "one"]);
+    const { prefix } = await contractsForLaunch(STORE, ["core", "api"]);
+    expect(prefix.split("\n").filter((line) => line.startsWith("- api:"))).toHaveLength(1);
   });
 });
 
@@ -197,6 +205,45 @@ describe("contracts.apply", () => {
   test("a full store path inside the contract is taken as given", async () => {
     const answer = (await callAction("contracts.apply", { store: STORE, name: "api", op: { op: "add", path: "run/contract/api/new", text: "added", description: "d" } })) as { changed: string[] };
     expect(answer.changed).toEqual(["run/contract/api/new"]);
+  });
+
+  test("an apply racing a launch: a launched task without its task event yet is told by the apply, or by its check when its session has not started", async () => {
+    const repo = await registeredRepo();
+    const wave = `cafe0000-${RUN}-4000-8000-00000000000c`;
+    const asked = `abc50000-${RUN}-4000-8000-000000000005`;
+    const starting = `abc60000-${RUN}-4000-8000-000000000006`;
+    const stamp = stampOf(await readContract(STORE, "api"));
+    const declaration = { id: wave, repo, tag: "team/w3", plan: STORE, title: "w", request: "r", branch: "main-team-w3", target: "main", base: "abc", origin: "session-0", createdAt: "2026-01-01T00:00:00.000Z", overrides: {}, contracts: ["core", "api"] };
+    await createWave(declaration);
+    await appendWaveEvent(wave, { kind: "tasks", tasks: [{ key: "ask", title: "Task ask", request: "do ask", after: [], id: asked }, { key: "new", title: "Task new", request: "do new", after: [], id: starting }] });
+    await appendWaveEvent(wave, { kind: "stage", stage: "building", reason: null });
+    for (const [key, id] of [["ask", asked], ["new", starting]]) {
+      // Launched with the contract as it was: the record is written, its `task` event is not.
+      await appendWaveEvent(wave, { kind: "launch", key });
+      const record: TaskRecord = { ...fakeRecord(id, repo), plan: STORE, wave, contracts: { api: stamp } };
+      record.sessionDir = join(caseDir, "sessions", key);
+      await writeTask(record);
+    }
+    writeSession(await readTask(asked), [{ type: "custom", customType: "factory-state", data: { state: "waiting_answer", round: 1, reason: "start" } }]);
+
+    const answer = (await callAction("contracts.apply", { store: STORE, name: "api", op: { op: "update", path: "answer", id: "f0", text: "{ok, raced}" } })) as { kept: { key: string }[] };
+    expect(answer.kept.map((task) => task.key)).toEqual(["ask"]);
+    expect((await readTask(asked)).contractNotes).toHaveLength(1);
+    // No session yet: its stamp is the launch's; the check before its first coder turn says it, once.
+    const note = await contractCheck((await readTask(starting)).sessionId);
+    expect(note).toContain("- fact run/contract/api/answer\n  old: (not known: the store was edited directly)\n  new: - {ok, raced}");
+    expect(await contractCheck((await readTask(starting)).sessionId)).toBeNull();
+  });
+
+  test("the facts of a contract are read in one memory-store call", async () => {
+    process.env.FAKE_STORE_LOG = join(caseDir, "store-calls.log");
+    try {
+      expect((await readContract(STORE, "api")).size).toBe(2);
+      const calls = readFileSync(process.env.FAKE_STORE_LOG, "utf8").trim().split("\n");
+      expect(calls.filter((line) => line.startsWith("read"))).toEqual([`read --no-ids ${STORE} run/contract/api/answer run/contract/api/errors/codes`]);
+    } finally {
+      delete process.env.FAKE_STORE_LOG;
+    }
   });
 });
 

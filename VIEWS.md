@@ -76,7 +76,8 @@ type WaveView = {                     // as in the contract
   detail: string | null               // added in factory/w2: the last stage event's why (queued: why it can never start)
   running: boolean; interrupted: boolean
   tasks: { key: string; title: string; after: string[]; taskId: string | null; sessionId: string | null
-           state: string; usage: Usage | null }[]
+           state: string; usage: Usage | null
+           id?: string }[]                // its task id, declared with it (pending too); absent in a log written before ids
   counts: { total: number; done: number }
   reviews: { round: number; at: string; sessionId: string | null; model: string | null
              verdict: "approved" | "rejected" | "failed"; status: string
@@ -94,7 +95,9 @@ type WaveView = {                     // as in the contract
 }
 
 type TimelineEntry = { at: string; kind: string; data: object }   // kinds: task, round, coder, user, gate, review, question, merge, state
-type WaveEvent = { at: string; kind: "tasks" | "task" | "stage" | "gate" | "review" | "merge" | "remote"; [field: string]: unknown }
+type WaveEvent = { at: string; kind: "tasks" | "task" | "stage" | "gate" | "review" | "merge" | "remote" | "update" | "launch" | "contract"; [field: string]: unknown }
+// update: tasks.update {key, title?, request?, after?, model?} or waves.update {title?, request?} · launch: the runner
+// launches the pending task {key, title?, request?: the text it launched with} · contract: contracts.apply {name, paths, done}
 ```
 
 The agent view of one task and one wave, used by every action below:

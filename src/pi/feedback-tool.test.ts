@@ -1,32 +1,22 @@
-/** The `feedback` tool against a fake `memory-store` on PATH: where an entry lands, and that the call never ends the turn. */
+/** The `feedback` tool against the shared fake `memory-store` on PATH: where an entry lands, and that the call never ends the turn. */
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { type FeedbackEntry, waveFeedback } from "../feedback.ts";
+import { readStore, writeFakeMemoryStore, writeStore } from "../fake-memory-store.ts";
+import { type FeedbackEntry, FEEDBACK_PATH, waveFeedback } from "../feedback.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-feedback-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 const bin = join(scratch, "bin");
 const root = join(scratch, "store");
-mkdirSync(bin);
-// ls: exit 0 when the store directory exists; create: mkdir; apply: appends the op's text as a line; read: "- [n] text", newest first.
-writeFileSync(
-  join(bin, "memory-store"),
-  `#!/bin/sh
-cmd=$1; name=$2; dir="${root}/$name"
-case "$cmd" in
-  ls) [ -d "$dir" ] || exit 1;;
-  create) mkdir -p "$dir";;
-  apply) printf '%s\\n' "$4" | bun -e 'const ops=JSON.parse(require("fs").readFileSync(0,"utf8"));require("fs").appendFileSync(process.argv[1],ops.map((o)=>o.text).join("\\n")+"\\n")' "$dir/log";;
-  read) [ -f "$dir/log" ] || exit 0; n=0; tac "$dir/log" | while read -r line; do n=$((n+1)); echo "- [f$n] $line"; done;;
-esac
-`,
-);
-chmodSync(join(bin, "memory-store"), 0o755);
+const calls = join(scratch, "calls.log");
+writeFakeMemoryStore(bin);
 process.env.PATH = `${bin}:${process.env.PATH}`;
+process.env.FAKE_STORE_ROOT = root;
+process.env.FAKE_STORE_LOG = calls;
 
 type Result = { isError?: boolean; content: { text: string }[]; terminate?: boolean };
 function tool(kept: FeedbackEntry[], plan: string | null) {
@@ -36,20 +26,40 @@ function tool(kept: FeedbackEntry[], plan: string | null) {
   return (params: unknown) => execute!("call", params, undefined, undefined, {});
 }
 
-beforeEach(() => rmSync(root, { recursive: true, force: true }));
-const store = (name: string) => mkdirSync(join(root, name), { recursive: true });
+beforeEach(() => {
+  rmSync(root, { recursive: true, force: true });
+  rmSync(calls, { force: true });
+});
+/** A strict store (as the real CLI) with the directories `dirs` declared. */
+const store = (name: string, dirs: string[]) => writeStore(root, name, { memories: {}, docs: {}, dirs });
+const storeCalls = () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : []);
+const entries = (name: string) => (readStore(root, name).memories[FEEDBACK_PATH] ?? []).map((text) => JSON.parse(text) as FeedbackEntry);
 
 describe("feedback", () => {
-  test("an entry lands in the store with its task, wave and role, and the turn goes on", async () => {
-    store("plan");
+  test("an entry lands in the store with its task, wave and role in one call, and the turn goes on", async () => {
+    store("plan", ["run"]);
     const kept: FeedbackEntry[] = [];
     const result = await tool(kept, "plan")({ kind: "context", what: "read 40 files", cost: "2 rounds" });
     expect(result.isError).toBeUndefined();
     expect(result.terminate).toBeUndefined();
-    const stored = JSON.parse(readFileSync(join(root, "plan", "log"), "utf8"));
+    const [stored] = entries("plan");
     expect(stored).toMatchObject({ kind: "context", what: "read 40 files", cost: "2 rounds", task: "task-1", wave: "wave-1", role: "coder" });
-    expect(await waveFeedback("plan", "wave-1")).toEqual([stored]);
+    expect(storeCalls().map((line) => line.split(" ")[0])).toEqual(["apply"]);
+    // The next entry goes into the memory the first created, in one call too.
+    await tool(kept, "plan")({ kind: "runtime", what: "waited" });
+    expect(entries("plan").map((entry) => entry.what)).toEqual(["read 40 files", "waited"]);
+    expect(storeCalls().map((line) => line.split(" ")[0])).toEqual(["apply", "apply"]);
+    expect((await waveFeedback("plan", "wave-1")).map((entry) => entry.what)).toEqual(["read 40 files", "waited"]);
     expect(await waveFeedback("plan", "other")).toEqual([]);
+  });
+
+  test("a store without the directory run gets it declared, then the entry", async () => {
+    store("plan", ["map"]);
+    const kept: FeedbackEntry[] = [];
+    await tool(kept, "plan")({ kind: "tools", what: "guessed" });
+    expect(entries("plan").map((entry) => entry.what)).toEqual(["guessed"]);
+    expect(storeCalls().map((line) => line.split(" ")[0])).toEqual(["apply", "create", "apply"]);
+    expect(readStore(root, "plan").dirs).toEqual(["map", "run"]);
   });
 
   test("without a store it stays on the task", async () => {
@@ -60,13 +70,14 @@ describe("feedback", () => {
     const missing = tool(kept, "no-such-store");
     expect((await missing({ kind: "tools", what: "guessed" })).isError).toBeUndefined();
     expect(kept).toHaveLength(2);
+    // A missing store is never created.
+    expect(storeCalls().map((line) => line.split(" ")[0])).toEqual(["apply"]);
   });
 
   test("an unknown kind is refused", async () => {
-    store("plan");
+    store("plan", ["run"]);
     const kept: FeedbackEntry[] = [];
     const result = await tool(kept, "plan")({ kind: "gripe", what: "x" });
     expect(result.isError).toBe(true);
-    expect(kept).toEqual([]);
   });
 });

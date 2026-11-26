@@ -36,11 +36,13 @@ export async function waveContracts(plan: string | undefined, raw: unknown): Pro
   const bad = raw.find((name) => !isContractName(name));
   if (bad !== undefined) throw new FactoryError("invalid", `waves.start: ${JSON.stringify(bad)} is no contract name (A-Z a-z 0-9 . _ -)`);
   requireMemoryStore("waves.start");
-  const names = [...new Set(raw as string[])];
-  for (const name of names) {
+  const given = [...new Set(raw as string[])];
+  for (const name of given) {
     if ((await contractKind(plan, name)) === null) throw new FactoryError("refused", `waves.start: memory-store ${plan} has no contract ${name} (${CONTRACT_DIR}/${name}/ or ${CONTRACT_DIR}/${name}.md)`);
   }
-  if (!names.includes("core") && (await contractKind(plan, "core")) !== null) names.unshift("core");
+  // Each once, `core` first: named, or read from the store when it holds it.
+  const names = given.filter((name) => name !== "core");
+  if (given.includes("core") || (await contractKind(plan, "core")) !== null) names.unshift("core");
   return names.length === 0 ? undefined : names;
 }
 
@@ -89,7 +91,8 @@ async function applyContract(params: Params): Promise<unknown> {
       if (fold.plan !== store || !(fold.contracts ?? []).includes(name) || fold.stage === "cancelled") continue;
       const done: string[] = [];
       for (const task of fold.tasks) {
-        const record = task.taskId === null ? undefined : records.get(task.taskId);
+        // A task launched before its `task` event (its runner writes it next, or adopts the record) has its record under its declared id.
+        const record = records.get(task.taskId ?? task.id ?? "");
         if (record === undefined) continue;
         const state = (await lastFactoryState(record.sessionDir, record.sessionId))?.state;
         const listed = { wave: fold.id, tag: fold.tag, key: task.key, task: record.id };

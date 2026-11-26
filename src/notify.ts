@@ -16,7 +16,8 @@
  *   `wave:<id>:contract:<index of the event>`
  * - `key` = `<task|wave>:<id>:<event>:<n>`. A task's n is its round, with the state entry's time after `@`: a coder may
  *   ask twice in one round. A wave's n is the index of its last `stage` event in the log for a stage; for
- *   `interrupted`, which no stage event marks, the length of its log; for `unreachable` the keys of the tasks that can
+ *   `interrupted`, which no stage event marks, the count of its events up to the last one a runner wrote (the log's
+ *   length but for the supervisor's `update` and `contract` events after it: they change nothing about the interruption); for `unreachable` the keys of the tasks that can
  *   never start (`unreachableTasks`), not the log's length: the runner's `building` event naming them lands after the
  *   task state that made them so, and must not make the same event a second one (invariant 12); for `never` the waves
  *   it waits for: it can never start only once
@@ -68,12 +69,15 @@ const WAVE_STAGE_EVENTS: Partial<Record<WaveView["stage"], string>> = {
   merged: "was merged",
 };
 
+/** The events a supervisor's action appends with no runner: they do not make an interrupted wave a new event. */
+const SUPERVISOR_EVENTS: readonly string[] = ["update", "contract"];
+
 export function waveNotice({ view, stuck, events }: NoticeWave, origin: string): Notice | null {
   let event: string;
   let n: number | string;
   let what: string;
   if (view.interrupted) {
-    [event, n, what] = ["interrupted", events.length, "was interrupted"];
+    [event, n, what] = ["interrupted", events.findLastIndex((entry) => !SUPERVISOR_EVENTS.includes(entry.kind)) + 1, "was interrupted"];
   } else if (view.stage === "building" && stuck) {
     [event, n, what] = ["unreachable", unreachableTasks(view.tasks).join(","), "has tasks that can never start"];
   } else if (view.stage === "queued" && (stuck || neverStarts(view))) {

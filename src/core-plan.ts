@@ -3,9 +3,11 @@
  * start (`launchSpec`, `recordStart`), so an update racing it is never lost.
  *
  * - Every change is an `update` event in the wave's log (`waves.ts` folds it), checked and appended under its log lock
- * - A pending task's spec is replaced (`after` checked as at `waves.add`); one the runner launches (a `launch` event, no
- *   `task` event yet) or that started keeps its `after` and `model`, and its coder is told the old and new text: at once
- *   while it runs, else on its record for its next coder turn (the notes `contractCheck` hands to the runner)
+ * - A pending task's spec is replaced (`after` checked as at `waves.add`); one the runner launches (a `launch` event
+ *   with a live runner, or a record under its declared id: no `task` event yet) or that started keeps its `after` and
+ *   `model`, and its coder is told the old and new text: at once while it runs, else on its record for its next coder
+ *   turn (the notes `contractCheck` hands to the runner); one being launched as its start is recorded (`recordStart`
+ *   against the `launch` event's text, also when a later runner adopts the record)
  * - `waves.update`: the wave's title and reviewer instructions; a review reads them when it starts
  */
 import { withContractsLock } from "./contracts.ts";
@@ -69,7 +71,7 @@ export async function launchSpec(id: string, key: string, after: readonly string
     // Its `after` changed since the scheduler judged it startable: the next look judges it again.
     if (task.after.length !== after.length || task.after.some((name) => !after.includes(name))) return null;
     spec = { ...task, after: [...task.after] };
-    return [{ kind: "launch", key }];
+    return [{ kind: "launch", key, title: task.title, request: task.request }];
   });
   return spec;
 }
@@ -161,8 +163,6 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   const before = foldWave(file.declaration, file.events).tasks.find((task) => task.key === key);
   const startedRecord = before?.taskId ? await readTask(before.taskId).catch(() => undefined) : undefined;
   const state = startedRecord === undefined ? undefined : (await lastFactoryState(startedRecord.sessionDir, startedRecord.sessionId))?.state;
-  // A `launch` event without a live runner is a launch that died with it (stopped, crashed): the task is pending.
-  const runnerLives = (await liveWaveRunners(waveId)).length > 0;
 
   const refuse = (why: string) => new FactoryError("refused", `task ${key} of wave ${short} ${why}`);
   // Set by the check under the log lock (a closure: typed wide on purpose).
@@ -170,7 +170,7 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   let old: TaskText = { title: "", request: "" };
   let taskId = null as string | null;
   const appended = await busy(() =>
-    appendWaveEvents(waveId, (fold) => {
+    appendWaveEvents(waveId, async (fold) => {
       if (fold.stage === "merged" || fold.stage === "cancelled") throw new FactoryError("refused", `wave ${short} is ${fold.stage}, its tasks cannot change`);
       const task = fold.tasks.find((candidate) => candidate.key === key);
       if (task === undefined) throw new FactoryError("not_found", `wave ${short} has no task ${key}`);
@@ -178,7 +178,12 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
       old = { title: task.title, request: task.request };
       taskId = task.taskId;
       const event: NewWaveEvent = { kind: "update", key };
-      if (task.taskId === null && !(task.launching && runnerLives)) {
+      // Read under the log lock, so no launch slips in between. A record under its declared id: `launchTask` wrote it,
+      // its coder has the launched text (a runner that died before its `task` event; the next one adopts it). A `launch`
+      // event without a live runner and without a record is a launch that died with it: the task is pending.
+      const recorded = task.taskId === null && task.id !== undefined && (await readTask(task.id).then(() => true, () => false));
+      const launching = task.taskId === null && (recorded || (task.launching === true && (await liveWaveRunners(waveId)).length > 0));
+      if (task.taskId === null && !launching) {
         if (after !== undefined) checkAfter(fold, key, after);
         if (after !== undefined && after.join("\0") !== task.after.join("\0")) event.after = after;
         if (model !== undefined && model !== task.model) event.model = model;

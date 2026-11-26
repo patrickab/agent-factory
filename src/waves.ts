@@ -125,8 +125,8 @@ export type WaveEvent =
    * title and request. A started task's `after` and `model` stay what it started with.
    */
   | { at: string; kind: "update"; key?: string; title?: string; request?: string; after?: string[]; model?: ModelSize }
-  /** The runner launches the pending task `key` with its spec as folded now; its `task` event follows (or a `stage` event). */
-  | { at: string; kind: "launch"; key: string }
+  /** The runner launches the pending task `key` with its spec as folded now (`title`, `request`: the text it launched with); its `task` event follows (or a `stage` event). */
+  | { at: string; kind: "launch"; key: string; title?: string; request?: string }
   /** The rebase onto the target `onto` conflicted only where both sides added lines: resolved ours then theirs. */
   | ({ kind: "resolved" } & WaveResolved)
   /** The rebase onto the target conflicted otherwise: the task `key` (added with it) resolves it. */
@@ -427,7 +427,7 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       return event;
     }
     case "launch":
-      return { at, kind, key: str(raw, "key") };
+      return { at, kind, key: str(raw, "key"), ...(typeof raw.title === "string" && typeof raw.request === "string" ? { title: raw.title, request: raw.request } : {}) };
     case "resolved":
       return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), onto: str(raw, "onto"), files: strings(raw, "files") ?? [] };
     case "conflict":
@@ -500,13 +500,13 @@ export async function appendWaveEvent(id: string, event: NewWaveEvent): Promise<
  * read under that lock (a compare-and-append): it returns the events, or null to append nothing; it may throw. Returns
  * the events as written, null when the function returned null.
  */
-export async function appendWaveEvents(id: string, events: NewWaveEvent[] | ((fold: WaveFold) => NewWaveEvent[] | null)): Promise<WaveEvent[] | null> {
+export async function appendWaveEvents(id: string, events: NewWaveEvent[] | ((fold: WaveFold) => NewWaveEvent[] | null | Promise<NewWaveEvent[] | null>)): Promise<WaveEvent[] | null> {
   if (!isWaveId(id)) throw new FactoryError("not_found", `${id} is not a wave id`);
   return withLogLock(id, async () => {
     let chosen: NewWaveEvent[] | null;
     if (typeof events === "function") {
       const file = await readWave(id);
-      chosen = events(foldWave(file.declaration, file.events));
+      chosen = await events(foldWave(file.declaration, file.events));
       if (chosen === null) return null;
     } else {
       chosen = events;

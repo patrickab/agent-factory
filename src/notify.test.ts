@@ -201,6 +201,17 @@ describe("pendingNotices: waves", () => {
     expect(pendingNotices([], [wave({ stage: "rejected" })], new Set(first.map((notice) => notice.key)))).toEqual([]);
     expect(pendingNotices([], [later], new Set(first.map((notice) => notice.key))).map((notice) => notice.key)).toEqual([`wave:${WAVE_ID}:rejected:5`]);
   });
+
+  test("an interrupted wave stays one event while the supervisor updates it or a contract changes; a runner's event after it is a new one", () => {
+    const interrupted = (events: ({ kind: string } & Record<string, unknown>)[]) => wave({ stage: "building", interrupted: true }, false, events);
+    const first = pendingNotices([], [interrupted([{ kind: "tasks" }, { kind: "stage" }])], none);
+    const delivered = new Set(first.map((notice) => notice.key));
+    expect([...delivered]).toEqual([`wave:${WAVE_ID}:interrupted:2`]);
+    const told = interrupted([{ kind: "tasks" }, { kind: "stage" }, { kind: "update" }, { kind: "contract", name: "api", paths: ["run/contract/api/a"], done: [] }, { kind: "update" }]);
+    expect(pendingNotices([], [told], delivered).filter((notice) => notice.key.includes(":interrupted:"))).toEqual([]);
+    const resumed = interrupted([{ kind: "tasks" }, { kind: "stage" }, { kind: "update" }, { kind: "task" }]);
+    expect(pendingNotices([], [resumed], delivered).map((notice) => notice.key)).toEqual([`wave:${WAVE_ID}:interrupted:4`]);
+  });
 });
 
 describe("pendingNotices: order", () => {

@@ -1,19 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
-import { caseDir, expectError, git, makeRepo, useCoreFixture } from "./core-test-kit.ts";
-import { PROOF_RUNNER_PATH, type ProofView } from "./gates-prove.ts";
+import { caseDir, expectError, git, makeRepo, until, useCoreFixture } from "./core-test-kit.ts";
+import { PROOF_KEEP_MS, PROOF_RUNNER_PATH, proofsDir, type ProofView } from "./gates-prove.ts";
 import { worktreePath } from "./launch.ts";
 import { pendingNotices } from "./notify.ts";
+import { procStart } from "./queue.ts";
 
 useCoreFixture();
 
 const ORIGIN = "session-of-the-supervisor";
 
 /** A repo on `main` whose `factory.yaml` holds `yaml`. */
-function repoWith(yaml: string): string {
-  const repo = makeRepo();
+function repoWith(yaml: string, name?: string): string {
+  const repo = makeRepo(true, name);
   writeFileSync(join(repo, "factory.yaml"), yaml);
   git(repo, "commit", "--quiet", "-am", "gates");
   return repo;
@@ -179,5 +181,45 @@ describe("a proof whose runner is gone", () => {
       expect(existsSync(path)).toBe(false);
       expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(path);
     }
+  });
+
+  test("its runner is judged as the merge queue judges a ticket's owner, a zombie as gone", async () => {
+    const repo = repoWith("merge_gates: []\n");
+    const old = "2026-01-01T00:00:00.000Z";
+    const own = `${process.pid} ${await procStart(process.pid)}\n`;
+    expect(await get(proofRecord(repo, old, own))).toMatchObject({ running: true, interrupted: false });
+    // A reused pid: the start time differs.
+    expect(await get(proofRecord(repo, old, `${process.pid} 1\n`))).toMatchObject({ running: false, interrupted: true });
+    // A child that ended and that its parent (exec'd into sleep) never reaps.
+    const parent = Bun.spawn(["/bin/sh", "-c", "true & echo $!; exec /bin/sleep 5"], { stdout: "pipe" });
+    try {
+      const reader = parent.stdout.getReader();
+      const pid = Number(new TextDecoder().decode((await reader.read()).value).trim());
+      reader.releaseLock();
+      await until(async () => (await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "")).includes(") Z "));
+      expect(await get(proofRecord(repo, old, `${pid} ${await procStart(pid)}\n`))).toMatchObject({ running: false, interrupted: true });
+    } finally {
+      parent.kill();
+    }
+  });
+
+  test("gates.prove reads only its repo's proofs and removes the records of those that rest and are older than PROOF_KEEP_MS", async () => {
+    const repo = repoWith("merge_gates: []\n");
+    const elsewhere = repoWith("merge_gates: []\n", "elsewhere");
+    const long = new Date(Date.now() - PROOF_KEEP_MS - 60_000).toISOString();
+    const ended = (id: string) => appendFileSync(join(proofsDir(), `${id}.jsonl`), `${JSON.stringify({ kind: "end", state: "passed", at: long })}\n`);
+    const oldEnded = proofRecord(repo, long, "999999999 1\n");
+    ended(oldEnded);
+    const oldInterrupted = proofRecord(repo, long, "999999999 1\n");
+    const recent = proofRecord(repo, new Date(Date.now() - 60_000).toISOString(), "999999999 1\n");
+    ended(recent);
+    const otherRepo = proofRecord(elsewhere, long, "999999999 1\n");
+    ended(otherRepo);
+    await callAction("gates.prove", {}, { cwd: repo, origin: ORIGIN });
+    for (const id of [oldEnded, oldInterrupted]) {
+      expect(existsSync(join(proofsDir(), `${id}.jsonl`))).toBe(false);
+      expect(existsSync(join(proofsDir(), `${id}.pid`))).toBe(false);
+    }
+    for (const id of [recent, otherRepo]) expect(existsSync(join(proofsDir(), `${id}.jsonl`))).toBe(true);
   });
 });

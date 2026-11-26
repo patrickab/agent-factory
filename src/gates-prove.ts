@@ -11,7 +11,8 @@
  *   its output, `proofs/<id>.failing.log`). Without an `end` it is `running`, or `interrupted` once its runner (noted in
  *   `proofs/<id>.pid` by `gates.prove` and by the runner as it starts: pid and start time) no longer lives, or no note
  *   is there `NOTE_GRACE_MS` after its declaration. `<id>.log` is the runner's output. The worktree an interrupted
- *   proof left is removed by the next `gates.get` of it and the next `gates.prove` in its repo
+ *   proof left is removed by the next `gates.get` of it and the next `gates.prove` in its repo, which also removes the
+ *   records of its repo's proofs that rest and were declared more than `PROOF_KEEP_MS` ago
  * - The runner: a detached worktree of the tip, `hooks.after_create` of the tip, then every `merge_gates` step through
  *   `runGateStep` (one rerun: passing then, the proof is `flaky`). `FACTORY_BASE` is the empty tree: the whole tree is
  *   the change. The worktree is removed (forced: gate output is scratch) before the `end` event is written
@@ -26,7 +27,7 @@ import { branchHasConfig } from "./core-settings.ts";
 import { runGateStep } from "./flaky-rerun.ts";
 import { git } from "./git.ts";
 import { defaultBranch, localBranchExists, runAfterCreate, worktreePath } from "./launch.ts";
-import { procStart } from "./queue.ts";
+import { hostLiveness, procStart } from "./queue.ts";
 import { CommandRunner, runCommand, type CommandResult, type Exec } from "./run.ts";
 import { factoryHome, loadSettings } from "./settings.ts";
 import { onPath, spawnDetached } from "./spawn.ts";
@@ -143,17 +144,22 @@ async function notePid(id: string, pid: number): Promise<void> {
   await rename(temp, proofPidPath(id));
 }
 
+/** A process that ended and was not reaped yet: `/proc` shows it as `Z`. */
+async function zombie(pid: number): Promise<boolean> {
+  const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
+  return stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
+}
+
 /**
- * Whether the proof's runner lives: the noted pid runs (not a zombie) with the noted start time. Without a note it
- * counts as living (`gates.prove` is spawning it) until `NOTE_GRACE_MS` after the declaration.
+ * Whether the proof's runner lives: the noted pid runs with the noted start time (`hostLiveness`, as the merge queue
+ * judges it) and is no zombie. Without a note it counts as living (`gates.prove` is spawning it) until `NOTE_GRACE_MS`
+ * after the declaration.
  */
 async function runnerLives(declaration: ProofDeclaration, now = Date.now()): Promise<boolean> {
   const note = await readFile(proofPidPath(declaration.id), "utf8").catch(() => null);
   if (note === null) return now - Date.parse(declaration.createdAt) < NOTE_GRACE_MS;
-  const [pid, start] = note.trim().split(" ");
-  const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
-  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-  return stat !== "" && fields[0] !== "Z" && fields[19] === start;
+  const [pid = "", start = ""] = note.trim().split(" ");
+  return (await hostLiveness(Number(pid), start)) && !(await zombie(Number(pid)));
 }
 
 /** Proof `id` as the full view shows it. */
@@ -227,11 +233,22 @@ async function removeLeftover(view: ProofView): Promise<void> {
   await removeProofWorktree(runCommand, view.repo, proofWorktree(view)).catch((error: unknown) => log(view.id, `the leftover worktree stays: ${errorText(error)}`));
 }
 
-/** Removes the worktrees the interrupted proofs of `repo` left. */
-async function removeLeftovers(repo: string): Promise<void> {
+/** How long the record of a proof that rests is kept after its declaration. */
+export const PROOF_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * The proofs of `repo` (read by their declaration first): the worktrees the interrupted ones left are removed, and the
+ * records of those that rest and were declared more than `PROOF_KEEP_MS` ago.
+ */
+async function removeLeftovers(repo: string, now = Date.now()): Promise<void> {
   for (const id of await proofIds()) {
+    const declaration = await readProof(id).then((proof) => proof.declaration, () => undefined);
+    if (declaration?.repo !== repo) continue;
     const view = await proofView(id).catch(() => undefined);
-    if (view?.repo === repo) await removeLeftover(view);
+    if (view === undefined) continue;
+    await removeLeftover(view);
+    if (!proofRests(view) || now - Date.parse(view.createdAt) <= PROOF_KEEP_MS || existsSync(proofWorktree(view))) continue;
+    await Promise.all([proofPath(id), proofLogPath(id), proofPidPath(id), failingLogPath(id)].map((path) => rm(path, { force: true })));
   }
 }
 

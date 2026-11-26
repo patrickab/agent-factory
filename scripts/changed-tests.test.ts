@@ -128,6 +128,8 @@ test("gateMarks: the files that passed only alone are the gate helper's flaky na
     { file: "src/a.test.ts", passed: true, output: "", seconds: 1 },
     { file: "src/b.test.ts", passed: false, output: "", seconds: 1 },
   ];
-  expect(innerReruns(gateMarks(results, ["src/a.test.ts"]).join("\n"))).toEqual({ flaky: ["src/a.test.ts"], reran: true });
-  expect(innerReruns(gateMarks(results.slice(0, 1), []).join("\n"))).toEqual({ flaky: [], reran: false });
+  const trailer = gateMarks(results, ["src/a.test.ts"]) as string;
+  expect(innerReruns(`ok src/a.test.ts\nchanged-tests: 1 passed, 1 failed\n${trailer}\n`)).toEqual({ flaky: ["src/a.test.ts"], reran: true });
+  expect(innerReruns(gateMarks(results, []) as string)).toEqual({ flaky: [], reran: true });
+  expect(gateMarks(results.slice(0, 1), [])).toBeNull();
 });

@@ -43,13 +43,32 @@ async function memoryStore(args: string[]): Promise<{ ok: boolean; stdout: strin
   return { ok: result.exitCode === 0, stdout: result.stdout, output: result.output };
 }
 
+/**
+ * The texts `memory-store read --no-ids` prints for `paths`, in one call, each without its header; null for one that is
+ * not found. Each path's section starts at its `## <path>` header, found in order after the one before.
+ */
+async function readPaths(store: string, paths: readonly string[]): Promise<(string | null)[]> {
+  if (paths.length === 0) return [];
+  const result = await memoryStore(["read", "--no-ids", store, ...paths]);
+  if (!result.ok) throw new Error(`memory-store read ${store} ${paths.join(" ")}: ${outputTail(result.output)}`);
+  const lines = result.stdout.split("\n");
+  const isHeader = (line: string, path: string) => line === `## ${path}` || line.startsWith(`## ${path} — `);
+  const starts: number[] = [];
+  for (const path of paths) {
+    const from = starts.length === 0 ? 0 : (starts.at(-1) as number) + 1;
+    const at = lines.findIndex((line, index) => index >= from && isHeader(line, path));
+    if (at < 0) throw new Error(`memory-store read ${store}: no section for ${path}`);
+    starts.push(at);
+  }
+  return paths.map((path, index) => {
+    if (lines[starts[index]].startsWith(`## ${path} — not_found`)) return null;
+    return lines.slice(starts[index] + 1, starts[index + 1] ?? lines.length).join("\n").trim();
+  });
+}
+
 /** The text `memory-store read --no-ids` prints for `path`, without its header; null when it is not found. */
 async function readPath(store: string, path: string): Promise<string | null> {
-  const result = await memoryStore(["read", "--no-ids", store, path]);
-  if (!result.ok) throw new Error(`memory-store read ${store} ${path}: ${outputTail(result.output)}`);
-  const [header = "", ...rest] = result.stdout.split("\n");
-  if (header.startsWith(`## ${path} — not_found`)) return null;
-  return rest.join("\n").trim();
+  return (await readPaths(store, [path]))[0];
 }
 
 /** The directory `dir`'s entries per `memory-store ls`: its subdirectories and its memories and documents; null when it does not exist. */
@@ -79,24 +98,19 @@ export async function contractKind(store: string, name: string): Promise<"dir" |
   return (await readPath(store, contractDocument(name))) === null ? null : "doc";
 }
 
-/** The facts of the contract `name` (path -> text); an empty map when it does not exist. */
+/** The facts of the contract `name` (path -> text), read in one call; an empty map when it does not exist. */
 export async function readContract(store: string, name: string): Promise<ContractFacts> {
-  const facts: ContractFacts = new Map();
+  const paths: string[] = [];
   const walk = async (dir: string): Promise<boolean> => {
     const listed = await listDir(store, dir);
     if (listed === null) return false;
-    for (const path of listed.facts) {
-      const text = await readPath(store, path);
-      if (text !== null) facts.set(path, text);
-    }
+    paths.push(...listed.facts);
     for (const sub of listed.dirs) await walk(sub);
     return true;
   };
-  if (!(await walk(contractDir(name)))) {
-    const text = await readPath(store, contractDocument(name));
-    if (text !== null) facts.set(contractDocument(name), text);
-  }
-  return facts;
+  if (!(await walk(contractDir(name)))) paths.push(contractDocument(name));
+  const texts = await readPaths(store, paths);
+  return new Map(paths.flatMap((path, index) => (texts[index] === null ? [] : [[path, texts[index] as string] as const])));
 }
 
 function sha256(text: string): string {
