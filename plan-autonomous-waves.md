@@ -202,5 +202,25 @@ The scouts' facts are in memory-store `agent-factory/autonomous-waves`, `map/*`.
 - A waiting call ends after 15 minutes with what the scout wrote so far. A cancelled caller cancels its scouts
 - Scout records live in their own directory with caller, tokens and cost, and are summed into the caller's task and wave figures also when the scout was killed
 
-### Order of work, corrected
-`src/core.ts`, `src/waves.ts`, `src/agent-view.ts` and `VIEWS.md` are edited by every wave: the waves run one after another, `waves/1` → `gates/1` → `contracts/1` → `scouts/1` → `review/1` → `skill/1`.
+### Order of work, corrected (the user: waves run in parallel, also on the same files)
+- `waves/1`, `gates/1`, `scouts/1` and `sync/1` run at once, `contracts/1` when `waves/1` merged (both rewrite the parameters of `waves.start`), `review/1` after `contracts/1` and `scouts/1`, `skill/1` last
+- Until `sync/1` is merged and live, a collision shows as a wave's rebase conflict, which the supervisor resolves
+
+## 7. Files in step (`sync/1`)
+
+Parallel tasks and waves may edit the same files. The factory keeps them in step instead of the supervisor keeping them apart.
+
+### Specification
+- **Who has which file** is read from each task's session file: the paths of its `read`, `edit` and `write` tool calls. Nothing is declared
+- **When a change lands** (a task merges into its wave's branch, a wave merges into the target), the factory takes the changed files of that merge and, for every running task below that branch (the wave's own tasks; for the target, the tasks of every open wave on it):
+  1. between two coder turns, rebases the task's worktree onto the new tip, its uncommitted work carried over
+  2. sends the coder a follow-up naming the files it has read or edited that changed, with the subjects of the commits that changed them: "re-read these before you go on"
+  3. a file both sides changed that does not merge cleanly is left with conflict markers and named first in that follow-up: resolving it is the coder's next step, with both intents in front of it
+- An open wave's branch is rebased onto the target the same way when another wave merges, so its review sees no surprise
+- A task that touched none of the changed files is rebased silently, without a message
+- **Contracts and the map** need none of this: a fact is one keyed memory, edits are atomic per fact, and contract changes are announced by section 2
+
+### Decisions
+- A running turn is never interrupted: the rebase waits for the turn's end, before the gates
+- The follow-up counts as no round
+- A conflict the coder cannot settle goes to the supervisor through `factory_ask_supervisor`, as every question does
