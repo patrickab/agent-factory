@@ -83,6 +83,15 @@ describe("a coder's scouts", () => {
     expect(await tracker.held(() => false)).toEqual([]);
   });
 
+  test("a coder whose task is not running is told to read the report with scouts.get", async () => {
+    const { core } = fakeCore("task", 3);
+    const tracker = createScoutTracker({ isCoder: () => true, holds: () => false, core, pollMs: 5 });
+    const { text } = await tracker.call({ concern: "how a works" }, undefined, ctx);
+    expect(text).toContain("scouts.get");
+    expect(text).not.toContain("before your turn ends");
+    expect(await tracker.held(() => false)).toEqual([]);
+  });
+
   test("wait: true answers the report, which the turn end then does not repeat", async () => {
     const { core, started } = fakeCore("task");
     const tracker = createScoutTracker({ isCoder: () => true, core, pollMs: 5 });

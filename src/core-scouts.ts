@@ -61,9 +61,8 @@ async function smallModel(repo: string, waveId: string | null): Promise<string |
 }
 
 async function requireStore(store: string, cwd: string): Promise<void> {
-  const result = await runCommand(["memory-store", "ls", store], { cwd }).catch((error: unknown) => {
-    throw new FactoryError("failed", `memory-store could not run (${errorText(error)}): a scout needs it on PATH`);
-  });
+  const result = await runCommand(["memory-store", "ls", store], { cwd });
+  if (result.exitCode === null) throw new FactoryError("failed", "memory-store could not run: a scout needs it on PATH");
   if (result.exitCode !== 0) throw new FactoryError("refused", `memory store ${store} does not exist: a scout writes the map of an existing store`);
 }
 

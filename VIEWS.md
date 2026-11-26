@@ -55,7 +55,8 @@ type TaskView = {
   running: boolean; interrupted: boolean
   settings: { branch: string; merge: "auto" | "review"; maxRounds: number; review: boolean
               models: { coder: string; reviewer: string } }
-  usage: Usage | null
+  usage: Usage | null                 // coder, reviews and scouts
+  scoutingCost?: number               // the scouts alone
   // added in factory/w2, for the agent view's state lines
   lastMessage: string | null          // the coder's last message (not its answer to the commit message ask)
   failure: string | null              // only in blocked: "<gate argv> (exit N)" + output tail, or the merge's error
@@ -84,7 +85,8 @@ type WaveView = {                     // as in the contract
   gates: { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null; flaky?: string[] }[]
   merge: { at: string; from: string; to: string; queueMs: number } | null
   remote: { number: number | null; url: string | null; pushed: string | null; error: string | null } | null
-  usage: Usage | null
+  usage: Usage | null                 // tasks, reviews and scouts
+  scoutingCost?: number               // the scouts alone
   actions: string[]
 }
 

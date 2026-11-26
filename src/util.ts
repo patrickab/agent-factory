@@ -17,3 +17,8 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function outputTail(output: string, chars: number = ERROR_TAIL_CHARS): string {
   return output.trim().slice(-chars) || "killed";
 }
+
+/** Cost in cents. */
+export function cents(cost: number): number {
+  return Math.round(cost * 100) / 100;
+}

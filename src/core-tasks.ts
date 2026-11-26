@@ -39,7 +39,7 @@ import { runCommand } from "./run.ts";
 import { loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
 import { COMMIT_ASK_TYPE, isFactoryPrompt, messageText, normalizeModels, parseSettingsFields, RESTING_STATES, type Finding, type Settings, type State } from "./state.ts";
 import { listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
-import { errorText, isRecord } from "./util.ts";
+import { cents, errorText, isRecord } from "./util.ts";
 import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
 import { pokeWave } from "./wave-poke.ts";
 import { addScoutUsage, cancelScouts, scoutUsage } from "./scouts.ts";
@@ -233,11 +233,7 @@ export function rawScoutingCost(view: TaskView): number {
   return unroundedScouting.get(view) ?? view.scoutingCost ?? 0;
 }
 
-/** Cost in cents. */
-export function cents(cost: number): number {
-  return Math.round(cost * 100) / 100;
-}
-
+export { cents };
 export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise<TaskView> {
   const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
   const entries = sessionPath === null ? [] : parseEntries(await readFile(sessionPath, "utf8"));

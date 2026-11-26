@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { callAction, type TaskView } from "./core.ts";
 import { caseDir, expectError, fakeRecord, git, ID_1, makeRepo, scratch, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
-import { cancelScout, cancelScouts, readScout, scoutDirs, type ScoutView } from "./scouts.ts";
+import { appendScoutEvent, cancelScout, cancelScouts, readScout, runningScouts, scoutDir, scoutDirs, writeScoutDeclaration, type ScoutView } from "./scouts.ts";
 import { runCommand } from "./run.ts";
 import { ownRunners, signalRunner } from "./spawn.ts";
 import { writeTask } from "./tasks.ts";
@@ -157,6 +157,32 @@ describe("scouts.start", () => {
     await expectError(callAction("scouts.start", { concern: "a" }, { cwd: repo }), "refused", "a scout needs a memory store");
     await expectError(callAction("scouts.start", { concern: "a", store: "no/store" }, { cwd: repo }), "refused", "memory store no/store does not exist");
     expect(await scouts()).toEqual([]);
+  });
+
+  test("a missing memory-store binary is refused as one that could not run, not as a missing store", async () => {
+    const repo = makeRepo();
+    const empty = join(caseDir, "empty-bin");
+    mkdirSync(empty);
+    symlinkSync(Bun.which("git") as string, join(empty, "git"));
+    process.env.PATH = empty;
+    await expectError(callAction("scouts.start", { concern: "a", store: "team/plan" }, { cwd: repo }), "failed", "memory-store could not run");
+  });
+
+  test("a running scout whose pid is not recorded yet counts against the limit", async () => {
+    const repo = makeRepo();
+    createStore("team/plan");
+    scoutPlan({ hold: true });
+    await callAction("scouts.start", { concern: "a", store: "team/plan" }, { cwd: repo, origin: "s" });
+    const caller = { kind: "session", id: "s" } as const;
+    const [first] = await scoutDirs(caller);
+    await until(async () => (await runningScouts(caller)) === 1);
+    // A second scout `running` before its runner's pid is recorded counts too.
+    const { declaration } = await readScout(first);
+    const dir = scoutDir(caller, "ffffffff-0000-4000-8000-000000000000");
+    await writeScoutDeclaration(dir, { ...declaration, id: "ffffffff-0000-4000-8000-000000000000" });
+    await appendScoutEvent(dir, { kind: "state", state: "running" });
+    expect((await readScout(dir)).fold.pid).toBeNull();
+    expect(await runningScouts(caller)).toBe(2);
   });
 
   test("a fifth scout of a caller queues until one of the four ends", async () => {

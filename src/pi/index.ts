@@ -113,7 +113,7 @@ function isMergedTask(snapshot: Snapshot): boolean {
 /** `scoutCore`: how the `scout` tool reaches the core, for tests; Pi passes nothing. */
 export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; scoutPollMs?: number } = {}) {
   const session = newTaskSession();
-  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, core: testing.scoutCore, pollMs: testing.scoutPollMs });
+  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, holds: () => session.snapshot?.state === "running", core: testing.scoutCore, pollMs: testing.scoutPollMs });
   registerFactoryTool(pi, scouts);
   registerScoutTool(pi, scouts);
   /** The state the last `agent_before_settle` pipeline ended in, until `agent_settled` has acted on it. */
@@ -359,7 +359,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     // An aborted run is classified in `agent_settled`, which is also reached when this boundary is skipped.
     if (event.outcome === "aborted") return;
     // Held until the coder's scouts reported: their reports carry the run on, the round's steps wait for its next end.
-    if (event.outcome !== "error") {
+    if (event.outcome !== "error" && commitAsk === undefined) {
       const reports = await scouts.held(() => session.disposed || session.runner.cancelled);
       if (reports.length > 0) return { entries: [...event.entries, ...reports], continue: true };
     }

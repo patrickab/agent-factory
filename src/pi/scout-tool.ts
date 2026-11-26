@@ -47,6 +47,8 @@ const CORE: ScoutCore = {
 export interface ScoutToolOptions {
   /** Whether the session is a coder's: a task's own session. */
   isCoder(): boolean;
+  /** Whether the coder's turn end waits for its scouts: its task is `running` (default: `isCoder`). */
+  holds?(): boolean;
   core?: ScoutCore;
   pollMs?: number;
   waitMs?: number;
@@ -97,8 +99,9 @@ export function createScoutTracker(options: ScoutToolOptions): ScoutTracker {
     async call(params, signal, ctx) {
       const coder = options.isCoder();
       const scout = await core.start(isRecord(params) ? params : {}, { cwd: ctx.cwd, signal, origin: ctx.sessionManager.getSessionId() });
-      const later = coder ? "its report arrives as a message before your turn ends" : "its report arrives as a factory report";
-      if (coder) owed.set(scout.id, scout);
+      const holds = coder && (options.holds?.() ?? true);
+      const later = holds ? "its report arrives as a message before your turn ends" : coder ? "read its report with scouts.get" : "its report arrives as a factory report";
+      if (holds) owed.set(scout.id, scout);
       if (!isRecord(params) || params.wait !== true) return { text: `${scoutBlock(scout)}\n${later}`, result: { scout, timedOut: false } };
       if (!coder) waiting.add(scout.id);
       let view: ScoutView;

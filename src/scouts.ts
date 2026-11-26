@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { factoryHome } from "./settings.ts";
 import { onPath, ownRunner, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { messageText } from "./state.ts";
-import { isRecord } from "./util.ts";
+import { cents, isRecord } from "./util.ts";
 
 export const SCOUT_LIMIT = 4;
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory.
@@ -201,10 +201,6 @@ async function writtenPaths(dir: string): Promise<string[]> {
   return [...new Set(paths)];
 }
 
-export function cents(cost: number): number {
-  return Math.round(cost * 100) / 100;
-}
-
 /** The scout's view; `usage.cost` in cents. */
 export async function scoutView(dir: string): Promise<ScoutView> {
   const { declaration, fold } = await readScout(dir);
@@ -252,7 +248,7 @@ export async function runningScouts(caller: ScoutCaller): Promise<number> {
   let count = 0;
   for (const dir of await scoutDirs(caller)) {
     const scout = await readScout(dir).catch(() => undefined);
-    if (scout?.fold.state === "running" && (await scoutRunnerAlive(scout.fold.pid, dir))) count += 1;
+    if (scout?.fold.state === "running" && (scout.fold.pid === null || (await scoutRunnerAlive(scout.fold.pid, dir)))) count += 1;
   }
   return count;
 }
