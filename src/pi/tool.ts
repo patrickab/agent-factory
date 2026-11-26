@@ -7,11 +7,13 @@
  * - In a task session (`isTaskSession`: Pi started by the runner, or a session holding a `factory-task` entry) only the
  *   actions with `mutates: false` are offered; a mutating one answers as unknown. A task's coder starts a task only
  *   through `factory_new_task` (`followup.ts`)
+ * - `scouts.start` takes the `scout` tool's path (`scout-tool.ts`): its report reaches the session once
  * - A call passes the session's id as `origin`: `tasks.start` and `waves.start` record it, notifications go there
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { callFactoryTool, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolError, factoryToolParameters } from "../factory-tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
+import type { ScoutTracker } from "./scout-tool.ts";
 
 /** Whether the tool runs in a factory task's session: Pi started by the runner, or a session branch holding a `factory-task` entry. */
 export function isTaskSession(branch: Iterable<{ type: string }>): boolean {
@@ -20,7 +22,7 @@ export function isTaskSession(branch: Iterable<{ type: string }>): boolean {
   return false;
 }
 
-export function registerFactoryTool(pi: ExtensionAPI): void {
+export function registerFactoryTool(pi: ExtensionAPI, scouts?: ScoutTracker): void {
   pi.registerTool({
     name: FACTORY_TOOL_NAME,
     label: "Factory",
@@ -31,6 +33,11 @@ export function registerFactoryTool(pi: ExtensionAPI): void {
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
+        const { action, ...rest } = params as Record<string, unknown>;
+        if (scouts !== undefined && action === "scouts.start" && !isTaskSession(ctx.sessionManager.getBranch())) {
+          const { text, result } = await scouts.call(rest, signal, ctx);
+          return { content: [{ type: "text", text }], details: result };
+        }
         const { text, result } = await callFactoryTool(params, isTaskSession(ctx.sessionManager.getBranch()), {
           cwd: ctx.cwd,
           signal,

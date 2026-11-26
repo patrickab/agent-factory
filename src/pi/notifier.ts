@@ -11,13 +11,16 @@
  *   follow-up changes it), a `merged`/`cancelled` wave never (both final; its last view is kept for `onWaves`, until
  *   its file is gone)
  * - `send` is `pi.sendMessage` with `triggerTurn` (public Pi API): the message starts a turn
+ * - Scouts this session started (caller `session` = origin): their directories are watched while they run; one that
+ *   ended reports once (`notify.ts`); a delivered one is not read again. `skipScout`: scouts a tool call waits for
  * - `onWaves`: after every look, the views of every wave this origin declared (the session's widget, `session-widget.ts`)
  */
 import { mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { noticeInputs } from "../core.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
-import { pendingNotices } from "../notify.ts";
+import { pendingNotices, scoutNoticeKey } from "../notify.ts";
+import { callerKey, scoutDirs, scoutsDir, scoutView, type ScoutView } from "../scouts.ts";
 import { tasksDir } from "../tasks.ts";
 import { wavesDir, type WaveView } from "../waves.ts";
 
@@ -32,6 +35,8 @@ export interface NotifierOptions {
   onError?: (error: unknown) => void;
   /** After every look: the views of all of this origin's waves, the finished ones not read again included. */
   onWaves?: (waves: WaveView[]) => void;
+  /** A scout whose report a tool call is waiting for: the call delivers it. */
+  skipScout?: (id: string) => boolean;
 }
 
 export interface Notifier {
@@ -71,6 +76,34 @@ export function startNotifier(options: NotifierOptions): Notifier {
   const finishedTasks = new Map<string, { sessionId: string; path: string; stamp: string | null }>();
   /** This origin's waves that are final and delivered, by id: never read again, their view as last read. */
   const finishedWaves = new Map<string, WaveView>();
+  /** This origin's scouts whose report is delivered: never read again. */
+  const reportedScouts = new Set<string>();
+  const scoutCaller = { kind: "session" as const, id: origin };
+
+  const reported = (id: string) => {
+    reportedScouts.add(id);
+    const dir = join(scoutsDir(), callerKey(scoutCaller), id);
+    watchers.get(dir)?.close();
+    watchers.delete(dir);
+  };
+
+  /** The origin's scouts not reported yet; each one's directory watched. */
+  const openScouts = async (delivered: ReadonlySet<string>): Promise<ScoutView[]> => {
+    const scouts: ScoutView[] = [];
+    for (const dir of await scoutDirs(scoutCaller)) {
+      const id = basename(dir);
+      if (reportedScouts.has(id) || options.skipScout?.(id)) continue;
+      if (delivered.has(scoutNoticeKey(id))) {
+        reported(id);
+        continue;
+      }
+      const scout = await scoutView(dir).catch(() => undefined);
+      if (scout === undefined) continue;
+      watchDir(dir, (name) => name === null || String(name) !== "runner.log");
+      scouts.push(scout);
+    }
+    return scouts;
+  };
 
   const watchDir = (dir: string, filter: (name: string | Buffer | null) => boolean) => {
     if (stopped || watchers.has(dir)) return;
@@ -100,9 +133,13 @@ export function startNotifier(options: NotifierOptions): Notifier {
     for (const task of tasks) {
       if (task.sessionPath !== null) watchDir(dirname(task.sessionPath), (name) => name === null || [...sessionIds].some((id) => basename(String(name)).includes(id)));
     }
-    const pending = pendingNotices(tasks, waves, await readDelivered());
+    const delivered = await readDelivered();
+    const scouts = await openScouts(delivered);
+    const pending = pendingNotices(tasks, waves, delivered, scouts).filter((notice) => !scouts.some((scout) => notice.key === scoutNoticeKey(scout.id) && options.skipScout?.(scout.id)));
     if (stopped) return;
     if (pending.length > 0) for (const notice of await claimNotices(pending)) send(notice.text);
+    // Claimed here or by a racing session: delivered either way.
+    for (const scout of scouts) if (pending.some((notice) => notice.key === scoutNoticeKey(scout.id))) reported(scout.id);
     // Every notice of this look is delivered now (by this session or a racing one): the final ones need no look again.
     for (const task of tasks) {
       if (task.sessionPath !== null && FINAL_TASK_STATES.includes(task.state)) {
@@ -138,6 +175,7 @@ export function startNotifier(options: NotifierOptions): Notifier {
 
   watchDir(tasksDir(), relevant);
   watchDir(wavesDir(), relevant);
+  watchDir(join(scoutsDir(), callerKey(scoutCaller)), relevant);
   const fallback = setInterval(() => void look(), options.fallbackMs ?? FALLBACK_MS);
   fallback.unref?.();
   void look();

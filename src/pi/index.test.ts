@@ -12,6 +12,7 @@ import factory from "./index.ts";
 import { coderRequest } from "../ops.ts";
 import { modelsCommand } from "../models.ts";
 import type { Draft, Settings } from "../state.ts";
+import type { ScoutView } from "../scouts.ts";
 
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
@@ -58,7 +59,7 @@ interface Entry {
 }
 
 /** One extension instance in `cwd`, with what Pi would hold: the session's entries, sent messages, notifications and statuses. */
-function session(cwd: string, branch: Entry[] = []) {
+function session(cwd: string, branch: Entry[] = [], testing: Parameters<typeof factory>[1] = {}) {
   const handlers = new Map<string, (event: any, ctx: any) => unknown>();
   let commandHandler: (args: string, ctx: any) => Promise<void> = async () => undefined;
   const entries: Entry[] = [...branch];
@@ -102,7 +103,7 @@ function session(cwd: string, branch: Entry[] = []) {
       getBranch: () => branch.map((entry) => ({ type: "custom", ...entry })),
     },
   };
-  factory(pi as unknown as ExtensionAPI);
+  factory(pi as unknown as ExtensionAPI, testing);
   const emit = (name: string, event: unknown = {}) => handlers.get(name)?.(event, ctx);
   const states = () => entries.filter((entry) => entry.customType === "factory-state").map((entry) => `${entry.data.state}/${entry.data.reason}`);
   return {
@@ -136,9 +137,28 @@ function session(cwd: string, branch: Entry[] = []) {
 }
 
 describe("wiring", () => {
-  test("registers the factory tool", () => {
-    expect(session(repo).tools).toEqual(["factory"]);
+  test("registers the factory and scout tools", () => {
+    expect(session(repo).tools).toEqual(["factory", "scout"]);
   });
+});
+
+test("a coder's turn does not end before its scouts reported: their reports carry the run on, the round runs at the next end", async () => {
+  let reads = 0;
+  const scout = (state: ScoutView["state"]) => ({ id: "5c0a7000-scout", caller: { kind: "task", id: "t" }, concern: "how a works", state, interrupted: false, usage: null, report: state === "done" ? "MISSING\n1. x" : null, reportPath: null, written: [] }) as unknown as ScoutView;
+  const scoutCore = { start: async () => scout("queued"), get: async () => scout((reads += 1) >= 3 ? "done" : "running") };
+  const worktree = addTaskWorktree();
+  const pi = session(worktree, [], { scoutCore, scoutPollMs: 5 });
+  await pi.start();
+  const call = await pi.tool("scout", { concern: "how a works" });
+  expect(call.content[0].text).toContain("arrives as a message before your turn ends");
+  writeFileSync(join(worktree, "task.txt"), "done\n");
+  expect(await pi.boundary()).toBe(true);
+  expect(reads).toBe(3);
+  expect(pi.of("factory-scout")).toEqual([expect.stringContaining("factory: scout 5c0a7000 reported")]);
+  expect(pi.of("factory-gate")).toEqual([]);
+  await pi.boundary();
+  expect(pi.of("factory-scout")).toHaveLength(1);
+  expect(pi.of("factory-gate").length).toBeGreaterThan(0);
 });
 
 describe("/factory init", () => {
@@ -592,7 +612,7 @@ describe("factory_ask_supervisor", () => {
     const worktree = addTaskWorktree();
     const pi = session(worktree);
     await pi.start();
-    expect(pi.tools).toEqual(["factory", "factory_new_task", "factory_ask_supervisor"]);
+    expect(pi.tools).toEqual(["factory", "scout", "factory_new_task", "factory_ask_supervisor"]);
     // A failing gate: had the round's steps run, a gates round would open.
     rmSync(join(worktree, "required.txt"));
     expect(await pi.tool("factory_ask_supervisor", { question: "May required.txt go?" })).toMatchObject({ terminate: true });

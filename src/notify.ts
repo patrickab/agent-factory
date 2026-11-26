@@ -17,9 +17,14 @@
  *   task state that made them so, and must not make the same event a second one (invariant 12); for `never` the waves
  *   it waits for: it can never start only once
  * - `text`: `factory: <what happened>`, then the agent view block of the task or wave (a rejection carries its findings)
+ * - Scouts a session started (caller `session`): one notice when the scout ended (`done`, `failed`, `cancelled`,
+ *   interrupted), key `scout:<id>:report` (`scoutNoticeKey`), text the scout's block with its report and the report's
+ *   path. A call that waited for the report claims the same key
  */
 import { neverStarts, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
 import type { TaskView } from "./core.ts";
+import { scoutBlock } from "./scout-view.ts";
+import type { ScoutView } from "./scouts.ts";
 import type { WaveView } from "./waves.ts";
 
 export type Notice = { key: string; origin: string; text: string };
@@ -75,8 +80,23 @@ function waveNotice({ view, stuck, events }: NoticeWave, origin: string): Notice
   return { key: `wave:${view.id}:${event}:${n}`, origin, text: `factory: wave ${view.tag} ${what}\n${waveBlock(view)}` };
 }
 
-/** The notices of the events in `tasks` and `waves` whose key is not in `delivered`, waves first. */
-export function pendingNotices(tasks: readonly TaskView[], waves: readonly NoticeWave[], delivered: ReadonlySet<string>): Notice[] {
+/** The one key of a scout's report, whoever delivers it. */
+export function scoutNoticeKey(id: string): string {
+  return `scout:${id}:report`;
+}
+
+function scoutNotice(scout: ScoutView): Notice | null {
+  if (scout.caller.kind !== "session" || scout.caller.id === null) return null;
+  const ended = scout.state === "done" || scout.state === "failed" || scout.state === "cancelled";
+  if (!ended && !scout.interrupted) return null;
+  let what: string = scout.state === "done" ? "reported" : scout.state;
+  if (scout.interrupted) what = "was interrupted";
+  const path = scout.reportPath === null ? "" : `\nreport: ${scout.reportPath}`;
+  return { key: scoutNoticeKey(scout.id), origin: scout.caller.id, text: `factory: scout ${scout.id.slice(0, 8)} ${what}\n${scoutBlock(scout)}${path}` };
+}
+
+/** The notices of the events in `tasks`, `waves` and `scouts` whose key is not in `delivered`, waves first, scouts last. */
+export function pendingNotices(tasks: readonly TaskView[], waves: readonly NoticeWave[], delivered: ReadonlySet<string>, scouts: readonly ScoutView[] = []): Notice[] {
   const notices: Notice[] = [];
   const stages = new Map(waves.map((wave) => [wave.view.id, wave.view.stage]));
   for (const wave of waves) {
@@ -88,6 +108,10 @@ export function pendingNotices(tasks: readonly TaskView[], waves: readonly Notic
     // A wave's task speaks only while its wave builds; an unknown (removed) wave says nothing either.
     if (task.wave !== null && stages.get(task.wave) !== "building") continue;
     const notice = taskNotice(task, task.origin);
+    if (notice !== null) notices.push(notice);
+  }
+  for (const scout of scouts) {
+    const notice = scoutNotice(scout);
     if (notice !== null) notices.push(notice);
   }
   return notices.filter((notice) => !delivered.has(notice.key));

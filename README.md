@@ -128,7 +128,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `actions` = the task actions the core accepts now), `tasks.timeline` (session entries as `{at, kind, data}`,
   `since`/`next` = a byte cursor, read from `since` on), `tasks.diff` (base, patch, per-file added/removed lines),
   `tasks.start|approve|retry|cancel|remove|message`, `tasks.wait`,
-  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below)
+  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below), `scouts.start|get|list` (below)
 - `tasks.list {repo?, tag?}`: `tag` keeps the tasks whose tag is it or starts with `tag + "/"` (`a` holds `a/b`, not
   `ab`)
 - `tasks.wait {ids? | tag? | wave?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique
@@ -348,6 +348,7 @@ factory --core-path                                     # absolute path of src/c
 - In a task's own session (Pi started by the runner, `FACTORY_TASK_SESSION=1`, or a session holding a `factory-task`
   entry) the tool offers only the actions with `mutates: false`; a mutating one (`tasks.start`, `models.set`, ...)
   answers as unknown. A task's coder starts a task only through `factory_new_task` (below)
+- The `scout` tool (Scouts, below)
 - In a session that declared waves (their `origin`), the interactive terminal UI shows them above the editor
   (`src/session-widget.ts`): a header with the active count, how many need the supervisor and their cost, then the
   active waves (those that need the supervisor first, then newest first) and a `<n> finished` line.
@@ -387,6 +388,21 @@ Commands (inside a task's own Pi session):
   round budget and no squash or rebase of the worktree (the state goes back to `running`, reason `answer`). The
   round's steps run when that turn ends, as for any turn. In `waiting_answer` the actions are `tasks.message` and
   `tasks.cancel`; `tasks.wait` counts the task as needing attention
+
+## Scouts
+
+- `scouts.start {concern, questions?, wait?, store?, repo?}`: a read-only `pi -p` child on the project's small model in
+  the caller's working directory (`read`, `grep`, `find`, `ls`, `map_write`). It answers from `map/` of the memory store
+  (the task's or wave's `plan`, else `store`; none: `refused`), explores where the map is not current, writes there and
+  reports `MISSING` / `DECISIONS` / `KEY FACTS` / `MEMORY`. At most four of a caller run, more queue. A scout starts no
+  scout. `scouts.get {id}`, `scouts.list {repo?, caller?}`
+- The Pi tool `scout` (same params) in supervisor sessions and coders, never in a scout's child. `wait: true` returns the
+  report, after 15 minutes at the latest with what it wrote so far; `wait: false` returns its id at once
+- A coder's report arrives as a `factory-scout` message: its turn does not end (`agent_before_settle`) before its
+  scouts reported, the round's steps run at the end of the turn after the reports
+- A supervisor's report arrives as a factory report (`factory-notice`): the report's text and file path. Each scout
+  reports once: a waited call and the notifier claim the same key in `notified.jsonl`. The `factory` tool's
+  `scouts.start` takes the same path
 
 ## How a task runs
 
@@ -439,6 +455,7 @@ Commands (inside a task's own Pi session):
   sessions and patch files
 - `sync/<task id>.jsonl`: a task's due syncs, append-only (`due` lines, `done` lines consume them). The worktree before
   its last sync: the ref `refs/factory/sync/<task id>` in the repo
+- `scouts/<caller kind>-<caller id>/<id>/`: a scout (`scout.json`, `events.jsonl`, `report.md`, `written.jsonl`)
 - Reviews: `<agent dir>/factory-reviews/<session id>/`. Merge lock and queue: in the repo's git common dir
 
 ## Entry protocol

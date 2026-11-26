@@ -38,6 +38,8 @@
  *   task's target branch and merge mode
  * - Notifications (`notifier.ts`): in a session that is not a task's own, the notices of the tasks it started and the
  *   waves it declared arrive as a message that starts a turn (`factory-notice`)
+ * - `scout` (`scout-tool.ts`) in every session: a coder's turn does not end (`agent_before_settle`) before its scouts
+ *   reported, their reports arrive as `factory-scout` messages and the coder goes on; a supervisor's arrive as notices
  * - The waves a session declared show above its editor (`session-widget.ts`), refreshed by the notifier's looks; only
  *   in the interactive terminal UI (`ctx.mode === "tui"`), never in a task's own session
  * - A task of a wave merges into the wave's branch only until the wave's review began (`waveMergeRefusal`, invariant
@@ -80,6 +82,7 @@ import {
 } from "../ops.ts";
 import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, wasInterrupted, type Draft, type Snapshot, type State } from "../state.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
+import { createScoutTracker, registerScoutTool, type ScoutCore } from "./scout-tool.ts";
 import { isTaskSession, registerFactoryTool } from "./tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { errorText } from "../util.ts";
@@ -107,9 +110,12 @@ function isMergedTask(snapshot: Snapshot): boolean {
   return snapshot.state === "done" && snapshot.reason.startsWith("merged");
 }
 
-export default function (pi: ExtensionAPI) {
-  registerFactoryTool(pi);
+/** `scoutCore`: how the `scout` tool reaches the core, for tests; Pi passes nothing. */
+export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; scoutPollMs?: number } = {}) {
   const session = newTaskSession();
+  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, core: testing.scoutCore, pollMs: testing.scoutPollMs });
+  registerFactoryTool(pi, scouts);
+  registerScoutTool(pi, scouts);
   /** The state the last `agent_before_settle` pipeline ended in, until `agent_settled` has acted on it. */
   let roundEnd: State | undefined;
   /** What the `input` handler checked for the user message whose run `before_agent_start` opens next. */
@@ -255,6 +261,7 @@ export default function (pi: ExtensionAPI) {
       notifier = startNotifier({
         origin: ctx.sessionManager.getSessionId(),
         send: (text) => pi.sendMessage({ customType: "factory-notice", content: text, display: true }, { triggerTurn: true }),
+        skipScout: (id) => scouts.waiting.has(id),
         isTaskSession: () => {
           const task = taskSession();
           if (task && widget.ctx !== undefined) {
@@ -351,6 +358,11 @@ export default function (pi: ExtensionAPI) {
     if (!current || current.state !== "running") return;
     // An aborted run is classified in `agent_settled`, which is also reached when this boundary is skipped.
     if (event.outcome === "aborted") return;
+    // Held until the coder's scouts reported: their reports carry the run on, the round's steps wait for its next end.
+    if (event.outcome !== "error") {
+      const reports = await scouts.held(() => session.disposed || session.runner.cancelled);
+      if (reports.length > 0) return { entries: [...event.entries, ...reports], continue: true };
+    }
     const { round, task } = current;
     const stopped = (reason: string): RoundResult => {
       const entries: Draft[] = [stateDraft("blocked", round, reason)];

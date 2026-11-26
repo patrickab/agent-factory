@@ -28,6 +28,7 @@ export const FACTORY_TOOL_DESCRIPTION = [
   'Answers are short text: an id (8 chars are enough), the state, what matters in it, and "next:" with the actions valid now.',
   'Tasks and waves started from a Pi session report back to it when they need you; elsewhere block on "tasks.wait" (ids, tag or wave) instead of polling.',
   "A tag (path segments like plugin/m1/w1) groups related work for tasks.list, waves.list and tasks.wait.",
+  '"scouts.start" sends a read-only scout that answers a concern from the map of a memory store (wait: true for its report, else it reports back).',
 ].join(" ");
 
 /** The actions an agent may call: every one but the `hostOnly` ones and the timelines; in a task session only those with `mutates: false`. */

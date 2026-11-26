@@ -126,14 +126,14 @@ describe("factory_new_task", () => {
   test("is registered in a task session only", async () => {
     const plain = session(scratch, []);
     await plain.emit("session_start");
-    expect([...plain.tools.keys()]).toEqual(["factory"]);
+    expect([...plain.tools.keys()]).toEqual(["factory", "scout"]);
   });
 
   test("works in a follow-up run on a merged task, once per user message", async () => {
     const { repo, worktree, merged } = repoWithTask();
     const pi = mergedSession(worktree, merged);
     await pi.emit("session_start");
-    expect([...pi.tools.keys()]).toEqual(["factory", "factory_new_task", "factory_ask_supervisor"]);
+    expect([...pi.tools.keys()]).toEqual(["factory", "scout", "factory_new_task", "factory_ask_supervisor"]);
     expect((await pi.newTask({ title: "feat: x", handoff: "do x" })).isError).toBe(true);
 
     await pi.message();

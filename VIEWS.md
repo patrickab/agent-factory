@@ -180,6 +180,22 @@ waves.list {repo}
   2 merged or cancelled, not shown
 ```
 
+## Scouts
+
+| Action | Params | Full view | Agent view |
+|---|---|---|---|
+| `scouts.start` | `{concern, questions?, wait?, store?, repo?}` | `{scout: ScoutView, timedOut: boolean}` | the scout block; the Pi tools add where the report arrives |
+| `scouts.get` | `{id}` | `{scout: ScoutView}` | the scout block |
+| `scouts.list` | `{repo?, caller?}` | `{scouts: ScoutView[]}` | one line per scout: id, state, cost, caller, concern |
+
+```
+scout 5c0a7d21  done  $0.12
+concern: how pi-host restarts a session child
+
+MISSING
+1. ...
+```
+
 ## Repositories, settings, models, config
 
 | Action | Params | Full view | Agent view |
@@ -225,6 +241,18 @@ factory: a coder asks
 task 4ae7325b  waiting_answer  factory/w1
   question: waves.start takes `overrides` that the wave's tasks inherit, ...
   next: tasks.message (answers it)
+```
+
+A scout a supervisor session did not wait for (a coder gets the same block as a `factory-scout` message):
+
+```
+factory: scout 5c0a7d21 reported
+scout 5c0a7d21  done  $0.12
+concern: how pi-host restarts a session child
+
+MISSING
+...
+report: ~/.pi/agent/factory/scouts/session-.../5c0a7d21-.../report.md
 ```
 
 ## The action list itself

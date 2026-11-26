@@ -13,6 +13,7 @@ import { startNotifier, type Notifier } from "./notifier.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { writeTask, type TaskRecord } from "../tasks.ts";
 import { createWave } from "../waves.ts";
+import { appendScoutEvent, scoutDir, writeScoutDeclaration } from "../scouts.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-notifier-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -100,6 +101,52 @@ async function until(check: () => boolean, ms = 5_000): Promise<void> {
     await Bun.sleep(10);
   }
 }
+
+/** A scout session `origin` started; `report` makes it done with that report. Answers its directory. */
+async function scoutOf(n: number, origin: string, report?: string): Promise<string> {
+  const caller = { kind: "session" as const, id: origin };
+  const dir = scoutDir(caller, ID(n));
+  await writeScoutDeclaration(dir, { id: ID(n), caller, repo: join(scratch, "repo"), cwd: scratch, concern: "how a works", questions: [], store: "app/plan", commit: "abc", model: null, createdAt: "2026-01-01T00:00:00.000Z" });
+  await appendScoutEvent(dir, { kind: "state", state: "running" });
+  if (report !== undefined) await scoutDone(dir, report);
+  return dir;
+}
+
+async function scoutDone(dir: string, report: string): Promise<void> {
+  writeFileSync(join(dir, "report.md"), report);
+  await appendScoutEvent(dir, { kind: "state", state: "done" });
+}
+
+describe("scout reports to the session that started them", () => {
+  test("a report arrives once as a factory report with its text and path; another session's scout is left alone", async () => {
+    const dir = await scoutOf(1, "sess-A");
+    await scoutOf(2, "sess-B", "B's report");
+    const a = piSession("sess-A");
+    await a.emit("session_start");
+    await Bun.sleep(200);
+    expect(a.sent).toEqual([]);
+    await scoutDone(dir, "MISSING\n1. nothing");
+    await until(() => a.sent.length > 0);
+    expect(a.sent[0].message.customType).toBe("factory-notice");
+    expect(a.sent[0].message.content).toStartWith(`factory: scout ${ID(1).slice(0, 8)} reported`);
+    expect(a.sent[0].message.content).toContain("MISSING\n1. nothing");
+    expect(a.sent[0].message.content).toContain(`report: ${join(dir, "report.md")}`);
+    await a.emit("session_shutdown");
+    const again = piSession("sess-A");
+    await again.emit("session_start");
+    await Bun.sleep(300);
+    expect(again.sent).toEqual([]);
+  });
+
+  test("a scout a call waits for is left to the call", async () => {
+    await scoutOf(1, "sess-A", "the report");
+    const sent: string[] = [];
+    const notifier = startNotifier({ origin: "sess-A", send: (text) => sent.push(text), isTaskSession: () => false, skipScout: (id) => id === ID(1) });
+    stops.push(() => notifier.stop());
+    await notifier.look();
+    expect(sent).toEqual([]);
+  });
+});
 
 describe("the extension delivers notices", () => {
   test("on start: the notice of its own task, as a message that starts a turn; another session's is left alone", async () => {
