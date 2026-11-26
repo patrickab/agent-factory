@@ -14,6 +14,9 @@
  * - Gate proof events (`feature-gates.ts`): `passed`, `flaky`, `failing`, `interrupted`; key `proof:<id>:<event>`
  * - `contract` events (`contracts.apply` changed a contract the wave's done tasks worked by): one notice each, key
  *   `wave:<id>:contract:<index of the event>`
+ * - The wave's reviewer (`pi/reviewer-tool.ts`): one notice per `note` event (`notify_supervisor`), key
+ *   `wave:<id>:note:<index>`, and per `tasks` event `by: "reviewer"` (`start_fix`), key `wave:<id>:fix:<index>`; both
+ *   information (a `quiet` card), not a question
  * - `key` = `<task|wave>:<id>:<event>:<n>`. A task's n is its round, with the state entry's time after `@`: a coder may
  *   ask twice in one round. A wave's n is the index of its last `stage` event in the log for a stage; for
  *   `interrupted`, which no stage event marks, the count of its events up to the last one a runner wrote (the log's
@@ -29,7 +32,7 @@
  *   path. A call that waited for the report claims the same key
  */
 import { neverStarts, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
-import { contractCard, safeCard, taskCard, waveCard, type FactoryCard } from "./cards.ts";
+import { card, contractCard, safeCard, shortId, taskCard, waveCard, type FactoryCard } from "./cards.ts";
 import type { TaskView } from "./core.ts";
 import { FEATURES } from "./features.ts";
 import type { WaveView } from "./waves.ts";
@@ -102,6 +105,21 @@ function contractNotices({ view, events }: NoticeWave, origin: string): Notice[]
   });
 }
 
+/** The reviewer's word to the supervisor: its `note` events and the `fix:` tasks it started, information each. */
+function reviewerNotices({ view, events }: NoticeWave, origin: string): Notice[] {
+  return events.flatMap((entry, index): Notice[] => {
+    if (entry.kind === "note") {
+      const { text, taskId } = entry as { kind: "note"; text: string; taskId: string | null };
+      const about = taskId === null ? "" : ` (reviewing task ${taskId.slice(0, 8)})`;
+      return [{ key: `wave:${view.id}:note:${index}`, origin, text: `factory: the reviewer of wave ${view.tag} notes${about}: ${text}`, card: card("wave", "quiet", `the reviewer of wave ${view.tag} notes${about}`, { tag: view.tag, id: shortId(view.id), text }) }];
+    }
+    if (entry.kind !== "tasks" || (entry as { by?: string }).by !== "reviewer") return [];
+    const { tasks } = entry as { kind: "tasks"; tasks: { key: string; title: string }[] };
+    const started = tasks.map((task) => `${task.key} "${task.title}"`).join(", ");
+    return [{ key: `wave:${view.id}:fix:${index}`, origin, text: `factory: the reviewer of wave ${view.tag} started ${started}`, card: card("wave", "quiet", `the reviewer of wave ${view.tag} started ${tasks.length === 1 ? "a fix task" : `${tasks.length} fix tasks`}`, { tag: view.tag, id: shortId(view.id), rows: tasks.map((task) => ({ label: task.key, text: task.title })) }) }];
+  });
+}
+
 /** The one key of a scout's report, whoever delivers it. */
 export function scoutNoticeKey(id: string): string {
   return `scout:${id}:report`;
@@ -120,7 +138,7 @@ export function pendingNotices(tasks: readonly TaskView[], waves: readonly Notic
     // An interrupted notice delivered under its old key (every event counted) stays delivered.
     const legacy = `wave:${wave.view.id}:interrupted:${wave.events.length}`;
     if (notice !== null && !(wave.view.interrupted && delivered.has(legacy))) notices.push(notice);
-    if (wave.view.origin !== null) notices.push(...contractNotices(wave, wave.view.origin));
+    if (wave.view.origin !== null) notices.push(...contractNotices(wave, wave.view.origin), ...reviewerNotices(wave, wave.view.origin));
   }
   for (const task of tasks) {
     if (task.origin === null) continue;

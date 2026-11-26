@@ -132,7 +132,7 @@ async function reviewTask(fold: StartedWaveFold, key: string, record: TaskRecord
   const existing = await sessionFile(dir, fold.id);
   if (existing !== undefined) stubEarlierRounds(existing);
   const model = resolveModels([fold.overrides.models]).reviewer ?? null;
-  const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,read_diff,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
+  const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,read_diff,scout,feedback,notify_supervisor,start_fix,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
   argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", dir, "--session-id", fold.id);
   if (model) argv.push("--model", model);
   if (prompts.reviewer) argv.push("--append-system-prompt", prompts.reviewer);

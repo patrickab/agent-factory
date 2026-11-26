@@ -117,7 +117,8 @@ export type WaveConflict = { at: string; phase: "review" | "merge"; key: string;
 
 /** One line after the declaration. A `remote` event sets only the fields it carries. */
 export type WaveEvent =
-  | { at: string; kind: "tasks"; tasks: WaveTaskEntry[]; dropped?: string[] }
+  /** `by: "reviewer"`: added by the wave's reviewer (`start_fix`), counted against `REVIEWER_FIX_CAP`; absent otherwise. */
+  | { at: string; kind: "tasks"; tasks: WaveTaskEntry[]; dropped?: string[]; by?: "reviewer" }
   | { at: string; kind: "task"; key: string; taskId: string; sessionId: string }
   | { at: string; kind: "stage"; stage: WaveStage; reason: WaveReason | null; detail?: string }
   /** A queued wave starts: its branch is cut at `base` (after this event), it builds. */
@@ -138,8 +139,9 @@ export type WaveEvent =
   | { at: string; kind: "launch"; key: string; title?: string; request?: string }
   /** The rebase onto the target `onto` conflicted only where both sides added lines: resolved ours then theirs. */
   | ({ kind: "resolved" } & WaveResolved)
-  /** The rebase onto the target conflicted otherwise: the task `key` (added with it) resolves it. */
-  | ({ kind: "conflict" } & WaveConflict);
+  | ({ kind: "conflict" } & WaveConflict)
+  /** The wave's reviewer told the supervisor `text` (`notify_supervisor`), while reviewing the task `taskId` (null: none). */
+  | { at: string; kind: "note"; text: string; taskId: string | null };
 
 /** One `update` event as `waves.get` shows it: the task's `key` (null: the wave's own) and the fields it changed. */
 export type WaveUpdate = { at: string; key: string | null; fields: string[] };
@@ -195,6 +197,8 @@ export interface WaveFold extends WaveDeclaration {
   conflicts?: WaveConflict[];
   /** The `task_review` events, oldest first; absent when none. */
   taskReviews?: WaveTaskReview[];
+  /** How many tasks the wave's reviewer added (`start_fix`); absent when none. */
+  fixes?: number;
 }
 
 /** A wave that has its branch: declared without `after`, or started (`start` event). */
@@ -398,6 +402,7 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
         if (!Array.isArray(raw.dropped) || !raw.dropped.every((key) => typeof key === "string")) throw new Error("dropped must be an array of keys");
         event.dropped = [...raw.dropped];
       }
+      if (raw.by === "reviewer") event.by = "reviewer";
       return event;
     }
     case "task":
@@ -454,6 +459,8 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), onto: str(raw, "onto"), files: strings(raw, "files") ?? [] };
     case "conflict":
       return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), key: str(raw, "key"), head: str(raw, "head"), onto: str(raw, "onto"), files: strings(raw, "files") ?? [] };
+    case "note":
+      return { at, kind, text: str(raw, "text", false), taskId: strOrNull(raw, "taskId") };
     default:
       throw new Error(`kind ${JSON.stringify(kind)} is no wave event`);
   }
@@ -629,6 +636,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
           if (fold.tasks.some((task) => task.key === spec.key)) continue;
           fold.tasks.push({ key: spec.key, title: spec.title, request: spec.request, after: [...spec.after], model: spec.model ?? "big", taskId: null, sessionId: null, ...(spec.id === undefined ? {} : { id: spec.id }) });
         }
+        if (event.by === "reviewer") fold.fixes = (fold.fixes ?? 0) + event.tasks.length;
         break;
       case "task": {
         const task = fold.tasks.find((candidate) => candidate.key === event.key);
@@ -682,6 +690,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         break;
       }
       case "contract":
+      case "note":
         break;
       case "resolved": {
         const { kind: _kind, ...resolved } = event;
