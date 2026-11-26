@@ -342,7 +342,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
     if (!(await localBranchExists(fold.repo, fold.branch))) {
       const made = await runCommand(["git", "branch", fold.branch, fold.base], { cwd: fold.repo });
       if (made.exitCode !== 0) throw new FactoryError("failed", `cutting its branch ${fold.branch} at ${fold.base} failed: ${oneLine(made.output)}`);
-    } else if ((await git(runCommand, fold.repo, ["rev-parse", "--verify", `refs/heads/${fold.branch}^{commit}`])) !== fold.base && !(await listTasks()).some((record) => record.wave === id)) {
+    } else if (!(await listTasks()).some((record) => record.wave === id) && !(await ownEmptyBranch(fold.repo, fold.branch, fold.base, fold.target))) {
       throw new FactoryError("refused", `its branch ${fold.branch} exists already and is not the one it cut at its start (taken since): delete or rename it`);
     }
   }
@@ -677,4 +677,16 @@ function resolveAfter(raw: unknown, waves: readonly WaveFile[], target: string, 
     if (!ids.includes(found.id)) ids.push(found.id);
   }
   return ids;
+}
+
+/**
+ * Whether the local branch is the wave's own: at `base`, or (a sync fast-forwards an empty wave branch when another
+ * wave merges) holding `base` as an ancestor and no commit beyond `target`.
+ */
+async function ownEmptyBranch(repo: string, branch: string, base: string, target: string): Promise<boolean> {
+  const tip = await git(runCommand, repo, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (tip === base) return true;
+  if ((await runCommand(["git", "merge-base", "--is-ancestor", base, tip], { cwd: repo })).exitCode !== 0) return false;
+  const beyond = await runCommand(["git", "rev-list", "--count", `${target}..${tip}`], { cwd: repo });
+  return beyond.exitCode === 0 && beyond.output.trim() === "0";
 }

@@ -70,9 +70,10 @@ function parseMark(raw: Record<string, unknown>): DueMark | undefined {
 }
 
 /** The marks of the task's sync log no `done` line consumed yet, oldest first, and how many `due` lines it holds. */
-async function readMarks(taskId: string): Promise<{ marks: DueMark[]; upTo: number }> {
+async function readMarks(taskId: string): Promise<{ marks: DueMark[]; ats: (string | undefined)[]; upTo: number }> {
   const text = await readFile(syncLogPath(taskId), "utf8").catch(() => "");
   const due: (DueMark | undefined)[] = [];
+  const times: (string | undefined)[] = [];
   let consumed = 0;
   for (const line of text.split("\n")) {
     let raw: unknown;
@@ -82,10 +83,14 @@ async function readMarks(taskId: string): Promise<{ marks: DueMark[]; upTo: numb
       continue;
     }
     if (!isRecord(raw)) continue;
-    if (raw.kind === "due") due.push(parseMark(raw));
+    if (raw.kind === "due") {
+      due.push(parseMark(raw));
+      times.push(typeof raw.at === "string" ? raw.at : undefined);
+    }
     else if (raw.kind === "done" && typeof raw.due === "number") consumed = Math.max(consumed, raw.due);
   }
-  return { marks: due.slice(consumed).filter((mark): mark is DueMark => mark !== undefined), upTo: due.length };
+  const kept = due.flatMap((mark, index) => (index >= consumed && mark !== undefined ? [{ mark, at: times[index] }] : []));
+  return { marks: kept.map((entry) => entry.mark), ats: kept.map((entry) => entry.at), upTo: due.length };
 }
 
 /** The marks of the task's sync log no `done` line consumed yet, oldest first. */
@@ -120,10 +125,10 @@ export async function syncRoundPassed(exec: Exec, root: string, taskId: string):
     if (!existsSync(path)) return;
     const { gitDir } = await primaryCheckout(exec, root);
     await withMergeLock(gitDir, async () => {
-      const { marks } = await readMarks(taskId);
+      const { marks, ats } = await readMarks(taskId);
       if (marks.length === 0) return void (await rm(path, { force: true }));
       const temp = `${path}.${process.pid}.tmp`;
-      await writeFile(temp, marks.map((mark) => `${JSON.stringify({ kind: "due", ...mark })}\n`).join(""), "utf8");
+      await writeFile(temp, marks.map((mark, index) => `${JSON.stringify({ kind: "due", ...mark, at: ats[index] })}\n`).join(""), "utf8");
       await rename(temp, path);
     });
   } catch {

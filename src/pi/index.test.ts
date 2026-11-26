@@ -161,6 +161,43 @@ test("a coder's turn does not end before its scouts reported: their reports carr
   expect(pi.of("factory-gate").length).toBeGreaterThan(0);
 });
 
+describe("the commit message ask", () => {
+  const scoutCore = () => {
+    const scout = { id: "5c0a7000-scout", caller: { kind: "task", id: "t" }, concern: "c", state: "running", interrupted: false, usage: null, report: null, reportPath: null, written: [] } as unknown as ScoutView;
+    return { start: async () => scout, get: async () => scout };
+  };
+  const answer = (branch: Entry[], text: string) => branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } } as never);
+  const startAsked = async (branch: Entry[]) => {
+    const worktree = addTaskWorktree();
+    const pi = session(worktree, branch, { scoutCore: scoutCore(), scoutPollMs: 5 });
+    await pi.command(`start ${JSON.stringify({ request: "Add task.txt", title: "Add task file", settings: { branch: "main", merge: "review", maxRounds: 3, review: false, models: {} } })}`);
+    writeFileSync(join(worktree, "task.txt"), "done\n");
+    expect(await pi.boundary()).toBe(true);
+    expect(pi.of("factory-commit-ask")).toHaveLength(1);
+    await pi.tool("scout", { concern: "c" });
+    return { worktree, pi };
+  };
+
+  test("the turn end is not held for a scout while the ask is open; the answer is the commit message", async () => {
+    const branch: Entry[] = [];
+    const { pi } = await startAsked(branch);
+    answer(branch, "feat: add the task file\n\n- adds task.txt");
+    expect(await pi.boundary()).toBe(false);
+    expect(pi.of("factory-scout")).toEqual([]);
+    expect(pi.of("factory-commit-message")).toEqual([{ title: "feat: add the task file", body: "- adds task.txt" }]);
+  });
+
+  test("a coder that changed files instead of answering gets its round run again, its text is no commit message", async () => {
+    const branch: Entry[] = [];
+    const { worktree, pi } = await startAsked(branch);
+    answer(branch, "feat: add the task file\n\n- adds task.txt");
+    writeFileSync(join(worktree, "more.txt"), "more\n");
+    await pi.boundary();
+    expect(pi.of("factory-commit-message")).toEqual([]);
+    expect(pi.of("factory-gate").length).toBeGreaterThan(0);
+  });
+});
+
 describe("/factory init", () => {
   test("writes the draft into the main checkout, uncommitted, from a worktree too, and never overwrites", async () => {
     rmSync(join(repo, "factory.yaml"));

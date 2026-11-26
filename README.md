@@ -199,9 +199,8 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   declared `queued`, stored with `after` as ids, without `branch` and `base` (null; its branch name is reserved, taken
   already: refused). It starts (a `start` event sets both, the branch is cut off the target's tip, its tasks start) when
   every wave it names is `merged`: their runner pokes it, nothing polls. Its branch taken by then: `blocked`
-  (`waves.retry` queues it again). A named wave `rejected` or `blocked` keeps it queued; `waves.cancel` of one makes it a wave that can never start (a `stage`
-  event, still `queued`, its `detail` says why; reported once, attention in `tasks.wait`). `waves.remove` of a wave a
-  queued one names is refused. `waves.add` cannot change `after`; it adds tasks to a queued wave, which stays queued
+  (`waves.retry` queues it again); a branch of its name taken after the start event, before its first task launched, blocks it too (`infra`). A named wave `rejected` or `blocked` keeps it queued; `waves.cancel` of one makes it a wave that can never start (a `stage`
+  event, still `queued`, its `detail` says why; reported once, attention in `tasks.wait`). `waves.remove` of a wave that any wave not yet started names is refused. `waves.add` cannot change `after`; it adds tasks to a queued wave, which stays queued
 - `overrides` are stored with the wave: its tasks start with their `models`, `maxRounds`, `review`, target = the wave
   branch and `merge: auto` (a task merges into the wave branch by itself); `merge` is the wave's own
 - A task's `model` (`"small"` | `"big"`, default `big`) picks which of the wave's two models its coder runs with,
@@ -261,7 +260,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - Poked by `waves.start`, `waves.add`, `waves.retry`, `waves.approve`, by the runner of a wave that merged (every queued wave naming it) and by a wave's task whose runner ends with the task at rest (`FACTORY_TASK_WAVE`
   is set on the runners of a wave's tasks). A poke writes `waves/<id>.poke` and starts a runner unless a live one holds
   the lock: that one sees the marker and looks again before it ends, a second runner never starts
-- `queued`: no runner drives it. Poked (by the merge of a wave it names, `waves.add`), its runner starts it when every
+- `queued`: a queued wave whose named waves are all `merged` and that has no runner is interrupted (a merged wave's runner may die before it pokes): attention in `tasks.wait`, `waves.retry` starts it. Poked (by the merge of a wave it names, `waves.add`), its runner starts it when every
   wave it names is `merged`, else rests; one of them cancelled: it records why once (`stage` event, still `queued`)
 - `building`: starts the tasks whose `after` are all `done` (target = the wave branch); a blocked task holds the wave
   here. Once every task is `done` or `cancelled`: `reviewing` (all cancelled: `cancelled`). A task that fails to
@@ -298,16 +297,16 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 
 - Parallel tasks and waves may edit the same files: a merge reaches the running tasks below its branch at the end of
   their coder turn, not at their own merge
-- A task merges into its wave's branch: the wave's other tasks in `running` get a due sync. A wave merges into its
+- A task merges into its wave's branch: the wave's other tasks in `running`, `waiting_answer`, `merging` and `waiting_approve` get a due sync. A wave merges into its
   target: the branch of every other `building` wave on that target is rebased onto it first (no worktree; a conflict
-  or a checkout leaves it as it is), then its tasks in `running` get one. Plain tasks are never synced
+  or a checkout leaves it as it is), then its tasks in those states get one. Plain tasks are never synced
 - At the end of the coder turn, before the gates: the worktree's snapshot, then a three-way merge of the task's whole
   change onto the branch's tip, left uncommitted (untracked files too); the tip is the task's base from then on. Two
   merges before the turn ends make one sync
 - The task has read or edited a changed file (its `read`, `edit`, `write` calls, `session-files.ts`): one
   `factory-sync` message to the coder, the changed files with the subjects of their commits, conflicting files first
   with their markers left, and "re-read these". It counts as no round; the gates run at the end of the next turn.
-  Markers of that sync still in a file it named then: said once more. Without such a file: no message
+  Markers of that sync still in a file it named then: said once more. Without such a file, or with HEAD already on the tip: no message
 - Every sync is a `factory-sync` session entry (`synced` with tip, named and conflicting files; `failed` with the error
   and whether the snapshot was restored; `reminded`; `cleared`). A failure restores HEAD, worktree and index, consumes
   the due syncs and blocks nothing: the task meets the change at its merge
@@ -477,7 +476,7 @@ Commands (inside a task's own Pi session):
 - `waves/<id>.jsonl`: a wave, append-only: line 1 its declaration, every later line one event; `waves/<id>.lock` its
   runner's lock, `.log.lock` the append lock, `.poke` an unseen poke, `.log` the runner's output, `.reviews/` its reviewer's
   sessions and patch files
-- `sync/<task id>.jsonl`: a task's due syncs, append-only (`due` lines, `done` lines consume them). The worktree before
+- `sync/<task id>.jsonl`: a task's due syncs (`due` lines, `done` lines consume them); a round that passed its gates rewrites it with the unconsumed `due` lines (none: it goes) and drops the ref, the task's removal drops both. The worktree before
   its last sync: the ref `refs/factory/sync/<task id>` in the repo
 - `scouts/<caller kind>-<caller id>/<id>/`: a scout (`scout.json`, `events.jsonl`, `report.md`, `written.jsonl`)
 - `proofs/<id>.jsonl`: a gate proof, append-only, written by its runner: line 1 its declaration, then one `step` per

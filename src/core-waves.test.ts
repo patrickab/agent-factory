@@ -592,6 +592,26 @@ describe("waves", () => {
       await until(async () => taskOf(await getWave(id), "a").taskId !== null, 20_000);
       expect(git(repo, "rev-parse", "refs/heads/main-factory-w3")).toBe(main);
     }, 30_000);
+
+    test("a runner that died before the first launch, another wave merged and fast-forwarded the empty branch: waves.retry starts the wave", async () => {
+      const repo = await registeredRepo();
+      const p1 = await predecessor(repo, "factory/p1", 1);
+      await merge(repo, p1);
+      const p2 = await predecessor(repo, "factory/p2", 2);
+      const id = WAVE_N(9);
+      const base = git(repo, "rev-parse", "main");
+      await createWave({ id, repo, tag: "factory/w3", plan: null, title: "w3", request: "r", branch: null, target: "main", base: null, after: [p1], origin: null, createdAt: "2026-01-09T00:00:00.000Z", overrides: {} });
+      await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a")] });
+      await appendWaveEvent(id, { kind: "start", branch: "main-factory-w3", base });
+      git(repo, "branch", "main-factory-w3", base);
+      await merge(repo, p2);
+      // The sync of the merge moved the empty branch along.
+      git(repo, "branch", "-f", "main-factory-w3", "main");
+      await callAction("waves.retry", { id });
+      await until(async () => taskOf(await getWave(id), "a").taskId !== null, 20_000);
+      expect((await getWave(id)).stage).toBe("building");
+      expect(git(repo, "show", "main-factory-w3:2.txt")).toBe("2");
+    }, 30_000);
   });
 });
 
