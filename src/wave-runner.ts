@@ -39,6 +39,7 @@ import { withoutPaths } from "./agent-view.ts";
 import { loadTaskFiles, type FactoryConfig } from "./config.ts";
 import { FactoryError, oneLine, pokeQueuedAfter, startQueuedWave, startWaveTasks, waveReviewWorktree, waveTaskViews } from "./core.ts";
 import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, treeDiff, uncommittedFiles } from "./git.ts";
+import { runGateStep } from "./flaky-rerun.ts";
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
 import { INFRA_EXIT } from "./pipeline.ts";
@@ -241,8 +242,13 @@ async function removeWorktree(declaration: WaveDeclaration): Promise<void> {
 }
 
 /** One `gate` event of a run of commands: passed when every one passed, the output tail of the last one run. */
-function gateEvent(phase: "review" | "merge", results: { result: Pick<CommandResult, "output" | "durationMs">; passed: boolean }[], commit: string | null = null): NewWaveEvent {
+function gateEvent(
+  phase: "review" | "merge",
+  results: { result: Pick<CommandResult, "output" | "durationMs">; passed: boolean; flaky?: string[] | null }[],
+  commit: string | null = null,
+): NewWaveEvent {
   const last = results.at(-1);
+  const flaky = results.flatMap((run) => run.flaky ?? []);
   return {
     kind: "gate",
     phase,
@@ -250,6 +256,7 @@ function gateEvent(phase: "review" | "merge", results: { result: Pick<CommandRes
     wallMs: results.reduce((sum, run) => sum + run.result.durationMs, 0),
     log: last === undefined ? null : outputTail(last.result.output),
     ...(commit === null ? {} : { commit }),
+    ...(flaky.length === 0 ? {} : { flaky }),
   };
 }
 
@@ -297,12 +304,12 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
     // The rebased branch on the forge, its request opened (once): recorded, never blocking.
     if (!stopping) remote = await publishWave(fold);
     const gated = await git(runner.run, root, ["rev-parse", "HEAD"]);
-    const gates: { argv: string[]; result: CommandResult; passed: boolean }[] = [];
+    const gates: { argv: string[]; result: CommandResult; passed: boolean; flaky: string[] | null }[] = [];
     try {
       for (const argv of config.merge_gates) {
         log(id, `gate ${argv.join(" ")}`);
-        const result = await runner.run(argv, { cwd: root });
-        gates.push({ argv, result, passed: passed(result) });
+        const { result, flaky } = await runGateStep(argv, () => runner.run(argv, { cwd: root }), () => stopping);
+        gates.push({ argv, result, passed: passed(result), flaky });
         if (!passed(result)) break;
       }
     } finally {
@@ -413,7 +420,7 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
     gated,
   });
   const gates = outcome.gates.filter((gate: GateData) => gate.phase === "merge_gates");
-  const gate = gates.length === 0 ? [] : [gateEvent("merge", gates.map((data) => ({ result: { output: data.outputTail, durationMs: data.durationMs }, passed: data.exitCode === 0 && !data.killed })))];
+  const gate = gates.length === 0 ? [] : [gateEvent("merge", gates.map((data) => ({ result: { output: data.outputTail, durationMs: data.durationMs }, passed: data.exitCode === 0 && !data.killed, flaky: data.flaky })))];
   const { result } = outcome;
   switch (result.kind) {
     case "merged":

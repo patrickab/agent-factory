@@ -357,6 +357,55 @@ describe("mergeTask", () => {
     expect(gitIn(repo, "log", "--format=%s")).toBe("moved\nmain edit\nbase");
   });
 
+  describe("a failed merge gate runs once more", () => {
+    /** A task with a change whose merge gates run (main moved), and a count file its gate appends to. */
+    function moved(branch: string): { worktree: string; count: string; runs: () => number } {
+      const worktree = addWorktree(branch);
+      gitIn(repo, "commit", "--quiet", "--allow-empty", "-m", "moved");
+      writeFileSync(join(worktree, "feature.txt"), "feature\n");
+      const count = join(scratch, `count-${counter}-${branch}`);
+      return { worktree, count, runs: () => (existsSync(count) ? readFileSync(count, "utf8").split("\n").filter(Boolean).length : 0) };
+    }
+
+    test("fails then passes: merged, flaky on its gate data", async () => {
+      const { worktree, count, runs } = moved("task-flaky");
+      const gate = ["sh", "-c", `echo run >> ${count}; [ $(wc -l < ${count}) -ge 2 ] || { echo "(fail) merge > races [1ms]"; exit 1; }`];
+      const outcome = await mergeTask(input(worktree, await taskIn(worktree), gated([gate])));
+      expect(outcome.result.kind).toBe("merged");
+      expect(outcome.gates).toMatchObject([{ phase: "merge_gates", exitCode: 0, flaky: ["merge > races"] }]);
+      expect(runs()).toBe(2);
+    });
+
+    test("fails twice: gate_failed, not flaky", async () => {
+      const { worktree, count, runs } = moved("task-twice");
+      const outcome = await mergeTask(input(worktree, await taskIn(worktree), gated([["sh", "-c", `echo run >> ${count}; exit 1`]])));
+      expect(outcome.result.kind).toBe("gate_failed");
+      expect(outcome.gates).toHaveLength(1);
+      expect(outcome.gates[0]).not.toHaveProperty("flaky");
+      expect(runs()).toBe(2);
+    });
+
+    test("no rerun after exit 75", async () => {
+      const { worktree, count, runs } = moved("task-infra");
+      const outcome = await mergeTask(input(worktree, await taskIn(worktree), gated([["sh", "-c", `echo run >> ${count}; exit 75`]])));
+      expect(outcome.result).toMatchObject({ kind: "gate_failed", gate: { result: { exitCode: 75 } } });
+      expect(runs()).toBe(1);
+    });
+
+    test("no rerun after a kill", async () => {
+      const { worktree } = moved("task-killed");
+      let gateRuns = 0;
+      const exec: MergeInput["exec"] = async (argv, options) => {
+        if (argv[0] !== "the-gate") return runner.run(argv, options);
+        gateRuns += 1;
+        return { exitCode: null, killed: true, timedOut: false, durationMs: 1, stdout: "", stdoutTruncated: false, output: "" };
+      };
+      const outcome = await mergeTask({ ...input(worktree, await taskIn(worktree), gated([["the-gate"]])), exec });
+      expect(outcome.result.kind).toBe("gate_failed");
+      expect(gateRuns).toBe(1);
+    });
+  });
+
   test("a target checked out nowhere is moved by compare-and-swap: no working tree touched, after_merge skipped", async () => {
     const worktree = addWorktree("task-i");
     const task = await taskIn(worktree);

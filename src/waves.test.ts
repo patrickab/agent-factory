@@ -255,6 +255,14 @@ describe("foldWave", () => {
     expect(() => parseWaveEvent({ ...events[0], commit: 3 })).toThrow("commit must be a string or null");
   });
 
+  test("a gate event's flaky names are kept and folded into the view; an old event without them still parses", () => {
+    const old = { at: "t1", kind: "gate", phase: "review", passed: true, wallMs: 1, log: null };
+    expect(parseWaveEvent(old)).toEqual(old as WaveEvent);
+    const flaky = parseWaveEvent({ ...old, flaky: ["a > b", 3] });
+    expect(flaky).toEqual({ ...old, flaky: ["a > b"] } as WaveEvent);
+    expect(foldWave(declaration(ONE), [flaky]).gates).toEqual([{ at: "t1", phase: "review", passed: true, wallMs: 1, log: null, flaky: ["a > b"] }]);
+  });
+
   test("remote: each event sets the fields it carries", () => {
     const fold = foldWave(declaration(ONE), [
       { at: "t1", kind: "remote", number: 12, url: "https://forge/pr/12" },

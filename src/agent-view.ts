@@ -136,7 +136,7 @@ function taskStateLines(view: TaskView): string[] {
 
 /** One task: header, title, the lines of its state, `next:`. Exported for notifications. */
 export function taskBlock(view: TaskView): string {
-  return scrub([taskHeader(view), `  ${view.title}`, ...taskStateLines(view), `  ${taskNext(view)}`].join("\n"));
+  return scrub([taskHeader(view), `  ${view.title}`, ...taskStateLines(view), ...flakyLine(view.flaky), `  ${taskNext(view)}`].join("\n"));
 }
 
 /** One line of a list: the header and the title. */
@@ -242,6 +242,11 @@ function tailLines(text: string): string {
   return [first, ...rest.slice(-GATE_TAIL_LINES)].join("\n");
 }
 
+/** `flaky: <names>`: gate steps that failed and then passed on their rerun; nothing when none. Tasks and waves alike. */
+function flakyLine(names: readonly string[]): string[] {
+  return names.length === 0 ? [] : labelled("  ", "flaky: ", names.join(", "));
+}
+
 /** The failed gate run's last lines. */
 function gateTail(view: WaveView): string[] {
   const failed = view.gates.findLast((gate) => !gate.passed);
@@ -303,7 +308,8 @@ function waveStageLines(view: WaveView): string[] {
 /** One wave: header, title, the lines of its stage, `next:`. Exported for notifications. */
 export function waveBlock(view: WaveView): string {
   const next = view.actions.length === 0 ? "next: none, it runs" : `next: ${view.actions.join(", ")}`;
-  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), `  ${next}`].join("\n"));
+  const flaky = [...new Set(view.gates.flatMap((gate) => gate.flaky ?? []))];
+  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...flakyLine(flaky), `  ${next}`].join("\n"));
 }
 
 function waveList(waves: WaveView[]): string {

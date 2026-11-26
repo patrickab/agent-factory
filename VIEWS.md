@@ -61,6 +61,7 @@ type TaskView = {
   failure: string | null              // only in blocked: "<gate argv> (exit N)" + output tail, or the merge's error
   review: { round: number; status: string; approved: boolean; findings: Finding[] } | null   // the last review
   merged: string | null               // the commit the last merge landed
+  flaky: string[]                     // gate steps that failed, then passed on their rerun: failing test names, else commands
   actions: string[]                   // tasks.* valid now
 }
 
@@ -80,7 +81,7 @@ type WaveView = {                     // as in the contract
              verdict: "approved" | "rejected" | "failed"; status: string
              findings: { severity: "blocker" | "major" | "minor"; file: string; line: number | null; text: string }[]
              usage: Usage | null; wallMs: number }[]
-  gates: { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null }[]
+  gates: { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null; flaky?: string[] }[]
   merge: { at: string; from: string; to: string; queueMs: number } | null
   remote: { number: number | null; url: string | null; pushed: string | null; error: string | null } | null
   usage: Usage | null
@@ -117,7 +118,7 @@ failed gate and the last lines of its output, or the merge's error) and, blocked
 (done). Of a wave: `blocked: <reason>` with `why: <detail>`, the failed gate's last lines or the failed review ·
 the findings (rejected, waiting_approve) · `cannot start: <keys>` (unreachable tasks) · `merged <from>..<to>` ·
 `remote: <url>` · `waits for: <ids>` (queued), with `queued: can never start` in the header and `why: <detail>` when a
-wave it waits for was cancelled.
+wave it waits for was cancelled. Of both: `flaky: <names>` when a gate step passed only on its rerun.
 
 ## Tasks
 

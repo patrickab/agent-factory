@@ -35,6 +35,7 @@ function task(over: Partial<TaskView> = {}): TaskView {
     failure: null,
     review: null,
     merged: null,
+    flaky: [],
     actions: ["tasks.cancel", "tasks.message"],
     ...over,
   };
@@ -388,6 +389,17 @@ describe("taskBlock per state", () => {
       ],
     ],
     [
+      "done with a flaky gate: its names",
+      { state: "done", reason: "merged", running: false, merged: "40ca0ce1234", flaky: ["a > b", "make check"], actions: ["tasks.remove"] },
+      [
+        "task 4ae7325b  done  round 1  factory/w1  $2.10",
+        "  feat(waves): declare a wave",
+        "  done: merged · merged 40ca0ce1",
+        "  flaky: a > b, make check",
+        "  next: tasks.remove",
+      ],
+    ],
+    [
       "blocked by its review: the findings",
       {
         state: "blocked",
@@ -507,6 +519,17 @@ describe("waveBlock per stage", () => {
         ...Array.from({ length: 20 }, (_v, i) => `    line ${i + 5}`),
         "  next: waves.retry, waves.add, waves.cancel",
       ],
+    ],
+    [
+      "merged with a flaky gate: its names",
+      {
+        stage: "merged",
+        running: false,
+        merge: { at: "2025-01-02T11:10:00.000Z", from: "aaaaaaa1", to: "bbbbbbb2", queueMs: 1 },
+        gates: [{ at: "2025-01-02T11:00:00.000Z", phase: "review", passed: true, wallMs: 1, log: "ok", flaky: ["a > b"] }],
+        actions: [],
+      },
+      ["wave 3f2a91c0  merged  1/3 done  factory/w1  $18.40", head, "  merged aaaaaaa1..bbbbbbb2 into master", "  flaky: a > b", "  next: none, it runs"],
     ],
     [
       "blocked: review failed",

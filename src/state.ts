@@ -73,6 +73,8 @@ export interface GateData {
   killed: boolean;
   durationMs: number;
   outputTail: string;
+  /** A step that failed and then passed on its rerun: its failing test names, else its command. Absent otherwise. */
+  flaky?: string[];
 }
 
 export interface Finding {
@@ -327,8 +329,8 @@ export function passed(result: CommandResult): boolean {
   return result.exitCode === 0 && !result.killed;
 }
 
-export function gateData(round: number, phase: GatePhase, argv: string[], result: CommandResult): GateData {
-  return {
+export function gateData(round: number, phase: GatePhase, argv: string[], result: CommandResult, flaky: string[] | null = null): GateData {
+  const data: GateData = {
     round,
     phase,
     argv,
@@ -337,6 +339,8 @@ export function gateData(round: number, phase: GatePhase, argv: string[], result
     durationMs: result.durationMs,
     outputTail: result.output.slice(-OUTPUT_TAIL_CHARS),
   };
+  if (flaky !== null) data.flaky = flaky;
+  return data;
 }
 
 /** `approved` is never the reviewer's own claim: it follows from the severities. */

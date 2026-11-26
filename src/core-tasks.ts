@@ -87,6 +87,8 @@ export interface TaskView {
   review: { round: number; status: string; approved: boolean; findings: Finding[] } | null;
   /** The commit the last successful merge landed, null before one. Added in factory/w2. */
   merged: string | null;
+  /** The `flaky` names of the task's gate records (steps that failed and then passed on their rerun), in order. */
+  flaky: string[];
   /** The task actions the core would accept now (`remove` maybe only with `force`). */
   actions: TaskActionName[];
 }
@@ -211,6 +213,16 @@ function taskOutcome(entries: Record<string, unknown>[], blocked: boolean): Pick
   return { lastMessage, failure: blocked ? (failedGate ?? mergeError) : null, review, merged };
 }
 
+/** The `flaky` names of every `factory-gate` entry, without repeats. */
+function flakyNames(entries: Record<string, unknown>[]): string[] {
+  const names = new Set<string>();
+  for (const entry of entries) {
+    const flaky = customData(entry, "factory-gate")?.flaky;
+    if (Array.isArray(flaky)) for (const name of flaky) if (typeof name === "string") names.add(name);
+  }
+  return [...names];
+}
+
 /** The unrounded usage of a task view, for sums (the view itself shows cost in cents), and the unrounded scouting cost. */
 const unroundedUsage = new WeakMap<object, NonNullable<TaskView["usage"]>>();
 const unroundedScouting = new WeakMap<object, number>();
@@ -288,6 +300,7 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
     usage: usage === null ? null : { ...(usage as NonNullable<TaskView["usage"]>), cost: cents((usage as NonNullable<TaskView["usage"]>).cost) },
     scoutingCost: cents(scouting?.cost ?? 0),
     ...taskOutcome(entries, last?.state === "blocked"),
+    flaky: flakyNames(entries),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
   const continuable = waveStage === null || waveStage === "building";

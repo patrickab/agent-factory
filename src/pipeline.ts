@@ -16,6 +16,7 @@
  */
 import { COMMIT_MESSAGE_PROMPT, commitMessageFallback, parseCommitMessage } from "./commitmsg.ts";
 import { protectedPaths, type FactoryConfig } from "./config.ts";
+import { runGateStep } from "./flaky-rerun.ts";
 import type { TaskDiff } from "./git.ts";
 import type { MergeOutcome } from "./merge.ts";
 import type { CommandResult } from "./run.ts";
@@ -166,8 +167,9 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
     for (const [phase, commands] of [["hooks", config.hooks.after_code], ["gates", config.gates]] as const) {
       for (const argv of commands) {
         steps.status(`round ${round}: ${phase} ${argv.join(" ")}`);
-        const result = await steps.runCommand(argv);
-        drafts.push(customDraft("factory-gate", gateData(round, phase, argv, result)));
+        // A failed gate runs once more before it counts (`runGateStep`); hooks run once.
+        const { result, flaky } = phase === "gates" ? await runGateStep(argv, () => steps.runCommand(argv), steps.cancelled) : { result: await steps.runCommand(argv), flaky: null };
+        drafts.push(customDraft("factory-gate", gateData(round, phase, argv, result, flaky)));
         if (steps.cancelled()) return end("cancelled", "cancelled");
         if (result.exitCode === INFRA_EXIT && !result.killed) return end("blocked", `infra: ${lastLine(result.output)}`);
         if (!passed(result)) return problem(phase, commandFeedback(round, argv, result));

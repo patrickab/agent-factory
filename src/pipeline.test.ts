@@ -144,6 +144,42 @@ describe("runRound", () => {
     expect(result.continue).toBe(false);
   });
 
+  describe("a failed gate runs once more", () => {
+    /** Steps whose `lint` returns `results` in turn (the last one after them), every other command passing. */
+    const lintSteps = (...results: CommandResult[]) => {
+      let runs = 0;
+      const steps = fakeSteps({ runCommand: async (argv) => (argv[0] === "lint" ? results[Math.min(runs++, results.length - 1)] : commandResult(0)) });
+      return Object.assign(steps, { lintRuns: () => runs });
+    };
+
+    test("fails then passes: passed, flaky recorded on its gate entry, no round used", async () => {
+      const steps = lintSteps(commandResult(1, "(fail) lint > under load [3ms]"), commandResult(0));
+      const result = await runRound(snapshotOf(), steps);
+      expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-gate", "factory-review", "factory-state"]);
+      expect(result.entries[1]).toMatchObject({ data: { phase: "gates", argv: ["lint"], exitCode: 0, flaky: ["lint > under load"] } });
+      expect((result.entries[2] as { data: object }).data).not.toHaveProperty("flaky");
+      expect(lastState(result.entries)).toEqual({ state: "merging", round: 1, reason: "passed" });
+    });
+
+    test("fails twice: a round problem as before", async () => {
+      const result = await runRound(snapshotOf(), lintSteps(commandResult(1), commandResult(2, "E501")));
+      expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-round", "custom_message"]);
+      expect(result.entries[1]).toMatchObject({ data: { argv: ["lint"], exitCode: 2 } });
+      expect((result.entries[1] as { data: object }).data).not.toHaveProperty("flaky");
+      expect(result.entries[2]).toMatchObject({ data: { round: 2, trigger: "gates" } });
+    });
+
+    test.each([
+      ["exit 75", commandResult(75), "factory-state" as const],
+      ["a kill", commandResult(null), "factory-round" as const],
+    ])("no rerun after %s", async (_name, first, after) => {
+      const steps = lintSteps(first, commandResult(0));
+      const result = await runRound(snapshotOf(), steps);
+      expect(steps.lintRuns()).toBe(1);
+      expect(kinds(result.entries).slice(0, 3)).toEqual(["factory-gate", "factory-gate", after]);
+    });
+  });
+
   test("a failing hook is a round problem with trigger hooks", async () => {
     const result = await runRound(snapshotOf(), fakeSteps({ runCommand: async () => commandResult(1) }));
     expect(kinds(result.entries)).toEqual(["factory-gate", "factory-round", "custom_message"]);

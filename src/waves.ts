@@ -87,7 +87,8 @@ export type WaveReview = {
   usage: Usage | null;
   wallMs: number;
 };
-export type WaveGate = { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null };
+/** `flaky`: the failing test names (else the commands) of the steps that failed and then passed on their rerun; absent when none. */
+export type WaveGate = { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null; flaky?: string[] };
 /** The commit range that reached the target. */
 export type WaveMerge = { at: string; from: string; to: string; queueMs: number };
 export type WaveRemote = { number: number | null; url: string | null; pushed: string | null; error: string | null };
@@ -330,6 +331,7 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       const event: WaveEvent = { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), passed: raw.passed, wallMs: num(raw, "wallMs"), log: strOrNull(raw, "log") };
       const commit = strOrNull(raw, "commit");
       if (commit !== null) event.commit = commit;
+      if (Array.isArray(raw.flaky)) event.flaky = raw.flaky.filter((name): name is string => typeof name === "string");
       return event;
     }
     case "review": {

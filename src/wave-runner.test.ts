@@ -326,7 +326,8 @@ describe("the wave runner", () => {
       const repo = await waveRepo(config(count, 1));
       await runWave(WAVE);
       const wave = await getWave();
-      expect([wave.stage, wave.reason, wave.reviews, runs(count)]).toEqual(["blocked", "gates", [], 1]);
+      // A failed step runs once more before it counts.
+      expect([wave.stage, wave.reason, wave.reviews, runs(count)]).toEqual(["blocked", "gates", [], 2]);
       expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", false]]);
       expect(existsSync(promptLog)).toBe(false);
       expect(git(repo, "log", "--format=%s", "main")).toBe("init");
@@ -358,6 +359,45 @@ describe("the wave runner", () => {
       expect([wave.stage, runs(count), wave.gates.map((gate) => [gate.phase, gate.passed])]).toEqual(["merged", 2, [["review", true], ["merge", true]]]);
       expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\nmain: add d\ninit");
     }, 30_000);
+  });
+
+  describe("a failed gate runs once more", () => {
+    /** `merge_gates` append a line to the count file and exit 1 on the runs in `failOn` (1-based). */
+    const config = (count: string, failOn: number[]) =>
+      `gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "echo run >> ${count}; n=$(wc -l < ${count}); case \\" ${failOn.join(" ")} \\" in *\\" $n \\"*) echo '(fail) wave > races'; exit 1;; esac"]\n`;
+    const runs = (count: string) => (existsSync(count) ? readFileSync(count, "utf8").split("\n").filter(Boolean).length : 0);
+
+    test("review: fails then passes, the wave goes on and its gate event records flaky", async () => {
+      const count = join(caseDir, "merge-gates");
+      await waveRepo(config(count, [1]), "done", { merge: "review" });
+      await runWave(WAVE);
+      const wave = await getWave();
+      expect([wave.stage, runs(count)]).toEqual(["waiting_approve", 2]);
+      expect(wave.gates).toEqual([{ at: expect.any(String), phase: "review", passed: true, wallMs: expect.any(Number), log: expect.any(String), flaky: ["wave > races"] }]);
+    });
+
+    test("merge: fails then passes, merged with flaky on the merge gate event", async () => {
+      const count = join(caseDir, "merge-gates");
+      const repo = await waveRepo(config(count, [2]), "done", { merge: "review" });
+      await runWave(WAVE);
+      commit(repo, "d.txt", "d\n", "main: add d");
+      await holding(() => callAction("waves.approve", { id: WAVE }));
+      await runWave(WAVE);
+      const wave = await getWave();
+      expect([wave.stage, runs(count)]).toEqual(["merged", 3]);
+      expect(wave.gates.map((gate) => [gate.phase, gate.passed, gate.flaky])).toEqual([["review", true, undefined], ["merge", true, ["wave > races"]]]);
+    }, 30_000);
+
+    test.each([
+      ["exit 75", "exit 75", "infra" as const],
+      ["a kill", "kill -9 $$", "gates" as const],
+    ])("no rerun after %s", async (_name, end, reason) => {
+      const count = join(caseDir, "merge-gates");
+      await waveRepo(`gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "echo run >> ${count}; ${end}"]\n`);
+      await runWave(WAVE);
+      const wave = await getWave();
+      expect([wave.stage, wave.reason, runs(count)]).toEqual(["blocked", reason, 1]);
+    });
   });
 
   test("a failing after_create hook blocks it (infra) and removes the review worktree it created: waves.retry prepares a fresh one", async () => {

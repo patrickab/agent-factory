@@ -34,6 +34,7 @@ function task(over: Partial<TaskView> = {}): TaskView {
     failure: null,
     review: null,
     merged: null,
+    flaky: [],
     actions: ["tasks.cancel"],
     ...over,
   };

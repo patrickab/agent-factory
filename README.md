@@ -77,7 +77,9 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 - `hooks.after_create`: argv lists, run once in a new task worktree
 - `hooks.after_code`: run after every coder turn, before the gates
 - `hooks.after_merge`: run in the main checkout after a merge that changed a lockfile
-- Gates, three argv lists. Exit 0 passes, 75 = broken environment (the task blocks), else fails:
+- Gates, three argv lists. Exit 0 passes, 75 = broken environment (the task blocks), else fails. A failed step runs
+  once more (not after exit 75, a kill or a timeout): passing then, it counts as passed and is recorded `flaky` (the
+  failing test names from its output, else its command) on the task or wave:
 
   | List | What | When |
   |---|---|---|
@@ -124,7 +126,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   (the coder's open question while `waiting_answer`, else null), `running` = a live runner holds it,
   `interrupted`, the task's settings, token (`input` uncached, `output`, `cacheRead`, `cacheWrite`) and cost usage of coder and reviews, `lastMessage` (the coder's last
   message, not its commit message), `failure` (while `blocked`: the failed gate with its output tail, or the merge's
-  error), `review` (the last one: round, status, approved, findings), `merged` (the commit the last merge landed),
+  error), `review` (the last one: round, status, approved, findings), `merged` (the commit the last merge landed), `flaky` (gate steps that passed on their rerun),
   `actions` = the task actions the core accepts now), `tasks.timeline` (session entries as `{at, kind, data}`,
   `since`/`next` = a byte cursor, read from `since` on), `tasks.diff` (base, patch, per-file added/removed lines),
   `tasks.start|approve|retry|cancel|remove|message`, `tasks.wait`,
@@ -283,7 +285,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - `waves.get {id}` / `waves.list {repo?, tag?}` (tag: equal or prefix + `/`) answer `WaveView`s: the declaration
   (without `overrides`), `stage`, `detail` (the last `stage` event's why, else null), each task's `state` (`pending`
   before it started) and `usage`, `counts` (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus
-  reviews), `reviews`, `gates`, `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
+  reviews), `reviews`, `gates` (each with `flaky` when a step passed on its rerun), `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
   answers `{events, next}` (`since`/`next` count events)
 
 ### Files in step (`src/sync.ts`)

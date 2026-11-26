@@ -27,6 +27,7 @@
 import { basename, join } from "node:path";
 import { commitMessageFallback, commitText, type CommitMessage } from "./commitmsg.ts";
 import type { FactoryConfig } from "./config.ts";
+import { runGateStep } from "./flaky-rerun.ts";
 import {
   addAllArgs,
   assertCheckoutReady,
@@ -231,8 +232,8 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       try {
         for (const argv of skip ? [] : mergeGates) {
           status(`merge gate ${argv.join(" ")}`);
-          const gate = await exec(argv, { cwd: root, ...(env ? { env } : {}) });
-          gates.push(gateData(round, "merge_gates", argv, gate));
+          const { result: gate, flaky } = await runGateStep(argv, () => exec(argv, { cwd: root, ...(env ? { env } : {}) }));
+          gates.push(gateData(round, "merge_gates", argv, gate, flaky));
           if (!passed(gate)) return { kind: "gate_failed", gate: { argv, result: gate } };
         }
       } finally {

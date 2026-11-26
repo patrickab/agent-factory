@@ -85,6 +85,7 @@ describe("task reads", () => {
       failure: null,
       review: { round: 1, status: "unknown", approved: false, findings: [] },
       merged: null,
+      flaky: [],
       actions: ["tasks.retry", "tasks.cancel", "tasks.remove", "tasks.message"],
     });
   });
@@ -111,6 +112,18 @@ describe("task reads", () => {
     // A failure fed back to the coder in a later round is not why the task stopped.
     writeSession(record, [...head, gate(2, "x"), custom("factory-round", { round: 2, trigger: "gates" }), custom("factory-state", { state: "blocked", round: 2, reason: "pipeline_error: boom" })]);
     expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ failure: null });
+  });
+
+  test("tasks.get: the flaky names of the gate records, none for old records without them", async () => {
+    const record = fakeRecord(ID_1, "/r");
+    await writeTask(record);
+    const custom = (customType: string, data: object) => ({ type: "custom", customType, timestamp: "t", data });
+    const gate = (flaky?: string[]) => custom("factory-gate", { round: 1, phase: "gates", argv: ["bun", "test"], exitCode: 0, killed: false, durationMs: 1, outputTail: "", ...(flaky ? { flaky } : {}) });
+    const head = [sessionEntries[0], sessionEntries[1], custom("factory-round", { round: 1, trigger: "start" })];
+    writeSession(record, [...head, gate(), custom("factory-state", { state: "merging", round: 1, reason: "passed" })]);
+    expect(((await callAction("tasks.get", { id: ID_1 })) as TaskView).flaky).toEqual([]);
+    writeSession(record, [...head, gate(["a > b"]), custom("factory-round", { round: 2, trigger: "gates" }), gate(["a > b", "c"]), custom("factory-state", { state: "merging", round: 2, reason: "passed" })]);
+    expect(((await callAction("tasks.get", { id: ID_1 })) as TaskView).flaky).toEqual(["a > b", "c"]);
   });
 
   test("tasks.get before the session file exists: nulls", async () => {
