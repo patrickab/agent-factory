@@ -224,3 +224,21 @@ Parallel tasks and waves may edit the same files. The factory keeps them in step
 - A running turn is never interrupted: the rebase waits for the turn's end, before the gates
 - The follow-up counts as no round
 - A conflict the coder cannot settle goes to the supervisor through `factory_ask_supervisor`, as every question does
+
+## 8. Throughput (`throughput/1`, the user's design after the first parallel run)
+
+Parallel waves on the same lines are wanted. Conflicts must be rare, and cheap when they happen.
+
+### Specification
+- **Test queue**: full-suite runs (`merge_gates`) of all waves and repositories on the machine run through one queue, a fixed number at a time (default 1), each with all cores. Per-turn `gates` and `task_gates` take slots from the same pool, so nothing oversubscribes the machine. A wave's reviewer starts when its full suite passed
+- **After a merge into the target**: every open wave branch and its running tasks are brought onto it (section 7)
+- **Conflicts, three steps, cheapest first**:
+  1. both sides only added lines at one place (lists, imports, docs): the factory keeps both, no model involved, then runs the gates
+  2. anything else: the wave's reviewer gets both sides' commits and the conflicting hunks and starts a `fix: <...>` task in the wave (a coder writes the resolution, the reviewer reviews it like every task)
+  3. the reviewer cannot settle it, or its fix task used up its rounds: `notify_supervisor`
+- **The reviewer's authority**: it may start `fix:` tasks in the waves it reviews, for conflicts and for its own blocker and major findings at the wave's final pass. At most three per wave, then the supervisor. Each is reported to the supervisor as information, not as a question
+- **Registrations per feature**: actions, renderers and notices are registered from one module per feature, collected by a list that merges by union, so two waves adding a feature do not meet in `core.ts`, `agent-view.ts` or `notify.ts`
+
+### Decisions
+- The reviewer never edits code itself: whoever approves a change did not write it
+- The supervisor's part is the contracts: shared interfaces are agreed before the waves start, so what is left to collide is lists and docs
