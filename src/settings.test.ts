@@ -233,7 +233,7 @@ describe("resolveSettings", () => {
   test("preview is stored and passed through, false by default; resolveSettings leaves it out", async () => {
     await saveSettings(REPO, { preview: true });
     expect(await loadSettings(REPO)).toEqual({ preview: true });
-    expect(resolveRepoSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main", preview: true, remote: false });
+    expect(resolveRepoSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main", preview: true, remote: false, squash: false });
     expect(resolveRepoSettings({}, {}, "main").preview).toBe(false);
     expect(resolveSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
   });
@@ -246,6 +246,16 @@ describe("resolveSettings", () => {
     expect(resolveRepoSettings({}, {}, "main").remote).toBe(false);
     expect(resolveSettings({ remote: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
     expect(() => parseStoredSettings({ remote: "yes" })).toThrow("remote must be a boolean");
+  });
+
+  test("squash is stored, false by default, an override wins; resolveSettings leaves it out", async () => {
+    await saveSettings(REPO, { squash: true });
+    expect(await loadSettings(REPO)).toEqual({ squash: true });
+    expect(resolveRepoSettings({ squash: true }, {}, "main").squash).toBe(true);
+    expect(resolveRepoSettings({ squash: true }, { squash: false }, "main").squash).toBe(false);
+    expect(resolveRepoSettings({}, {}, "main").squash).toBe(false);
+    expect(resolveSettings({ squash: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
+    expect(() => parseStoredSettings({ squash: "yes" })).toThrow("squash must be a boolean");
   });
 
   test("the result does not share the models object of an input", () => {

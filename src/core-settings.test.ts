@@ -134,7 +134,7 @@ describe("branches, settings, config", () => {
   test("settings.get and settings.set: stored, resolved, defaults; preview passes through; invalid values refused", async () => {
     const repo = makeRepo();
     // Nothing stored: no model (Pi's session model), not the ones of defaults.yaml.
-    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, remote: false };
+    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, remote: false, squash: false };
     expect(await callAction("settings.get", { repo })).toEqual({ stored: {}, resolved: defaults, defaults });
     // The names as before, as the settings panel sends them: answered and stored as they are, big added equal to coder.
     const set = await callAction("settings.set", { repo, settings: { merge: "review", preview: true, models: { coder: "a/b" } } });

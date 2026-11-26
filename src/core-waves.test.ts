@@ -101,6 +101,17 @@ describe("waves", () => {
     expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
   });
 
+  test("waves.start stores squash resolved, only when on: the stored setting, an override over it", async () => {
+    const repo = await registeredRepo();
+    await callAction("settings.set", { repo, settings: { squash: true } });
+    const on = await startWave(repo, [spec("a")], { tag: "squash/on" });
+    const off = await startWave(repo, [spec("a")], { tag: "squash/off", overrides: { squash: false } });
+    for (const wave of [on, off]) await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null);
+    expect((await readWave(on.id)).declaration.overrides.squash).toBe(true);
+    expect("squash" in (await readWave(off.id)).declaration.overrides).toBe(false);
+    await expectError(startWave(repo, [spec("a")], { tag: "squash/bad", overrides: { squash: "yes" } }), "invalid", "overrides.squash must be a boolean");
+  });
+
   test("a task with after starts once its predecessor is done (its runner pokes the wave); a wave without changes ends merged", async () => {
     // The wave runner never polls in this test: only the pokes of the tasks' runners move it on.
     process.env.FACTORY_WAVE_POLL_MS = "600000";

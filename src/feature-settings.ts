@@ -3,7 +3,7 @@ import { SETTINGS_HANDLERS } from "./core-settings.ts";
 import { card, type CardRow } from "./cards.ts";
 import { plural } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
-import { feature, REMOTE, REPO, SETTINGS_PROPERTIES, spec } from "./feature.ts";
+import { feature, REMOTE, REPO, SETTINGS_PROPERTIES, spec, SQUASH } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 
 type SettingsAnswer = { stored: Record<string, unknown>; resolved: Record<string, unknown>; defaults: Record<string, unknown> };
@@ -56,7 +56,7 @@ export const SETTINGS = feature({
     "settings.get": spec("The repository's stored settings, them resolved over the defaults, and the defaults", { repo: REPO }, ["repo"], false),
     "settings.set": spec(
       "Replace the repository's stored settings",
-      { repo: REPO, settings: { type: "object", description: "The stored settings", properties: { ...SETTINGS_PROPERTIES, preview: { type: "boolean" }, remote: REMOTE } } },
+      { repo: REPO, settings: { type: "object", description: "The stored settings", properties: { ...SETTINGS_PROPERTIES, preview: { type: "boolean" }, remote: REMOTE, squash: SQUASH } } },
       ["repo", "settings"],
       true,
     ),

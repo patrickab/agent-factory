@@ -52,9 +52,10 @@ const WAVE_REASONS: readonly WaveReason[] = ["conflict", "gates", "dirty", "infr
 /**
  * The settings `waves.start` got, stored with the wave. Its tasks start with `models`, `maxRounds` and `review` from
  * them, `branch` = the wave's branch and `merge: "auto"`; `merge` is the wave's own (`review`: wait for approve), so is
- * `remote` (the wave is shown on the origin's forge, `remote.ts`; absent = off).
+ * `remote` (the wave is shown on the origin's forge, `remote.ts`; absent = off), and `squash` (the wave lands as one
+ * commit, `merge.ts`; absent = off, stored only when on).
  */
-export type WaveOverrides = { models?: ModelChoice; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; remote?: boolean };
+export type WaveOverrides = { models?: ModelChoice; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; remote?: boolean; squash?: boolean };
 
 /**
  * Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. `after`:
@@ -103,9 +104,13 @@ export type WaveReview = {
 export type WaveTaskReview = WaveReview & { key: string; taskId: string; tree: string; base: string; contracts: string | null };
 /** `flaky`: the failing test names (else the commands) of the steps that failed and then passed on their rerun; absent when none. */
 export type WaveGate = { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null; flaky?: string[] };
-/** The commit range that reached the target. */
-export type WaveMerge = { at: string; from: string; to: string; queueMs: number };
-export type WaveRemote = { number: number | null; url: string | null; pushed: string | null; error: string | null };
+/**
+ * The commit range that reached the target. A `squash` wave's (one commit, `to`) also names `ref`, the ref that keeps
+ * its task commits, and `commits`, how many; absent otherwise.
+ */
+export type WaveMerge = { at: string; from: string; to: string; queueMs: number; ref?: string; commits?: number };
+/** `merged`: the forge's commit of a `squash` wave it merged (absent until then). */
+export type WaveRemote = { number: number | null; url: string | null; pushed: string | null; error: string | null; merged?: string | null };
 /** A rebase onto the target whose conflicts were all additions on both sides, resolved by the factory (`additions-merge.ts`). */
 export type WaveResolved = { at: string; phase: "review" | "merge"; onto: string; files: string[] };
 /**
@@ -320,9 +325,12 @@ export function parseWaveOverrides(raw: unknown, prefix = "overrides."): WaveOve
   const { branch: _branch, models, ...fields } = parseSettingsFields(raw, prefix);
   // Old declarations stored `{coder, reviewer}`: read as the contract's compatibility line says.
   const parsed: WaveOverrides = models === undefined ? fields : { ...fields, models: normalizeModels(models) };
-  if (raw.remote === undefined) return parsed;
-  if (typeof raw.remote !== "boolean") throw new Error(`${prefix}remote must be a boolean`);
-  return { ...parsed, remote: raw.remote };
+  for (const key of ["remote", "squash"] as const) {
+    if (raw[key] === undefined) continue;
+    if (typeof raw[key] !== "boolean") throw new Error(`${prefix}${key} must be a boolean`);
+    parsed[key] = raw[key];
+  }
+  return parsed;
 }
 
 /** A string array, or undefined when absent. */
@@ -430,15 +438,19 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       return { at, kind, ...parseReview(raw) };
     case "task_review":
       return { at, kind, ...parseReview(raw), key: str(raw, "key"), taskId: str(raw, "taskId"), tree: str(raw, "tree"), base: str(raw, "base"), contracts: strOrNull(raw, "contracts") };
-    case "merge":
-      return { at, kind, from: str(raw, "from"), to: str(raw, "to"), queueMs: num(raw, "queueMs") };
+    case "merge": {
+      const event: WaveEvent = { at, kind, from: str(raw, "from"), to: str(raw, "to"), queueMs: num(raw, "queueMs") };
+      if (raw.ref !== undefined) event.ref = str(raw, "ref");
+      if (raw.commits !== undefined) event.commits = num(raw, "commits");
+      return event;
+    }
     case "remote": {
       const event: WaveEvent = { at, kind };
       if ("number" in raw) {
         if (raw.number !== null && typeof raw.number !== "number") throw new Error("number must be a number or null");
         event.number = raw.number;
       }
-      for (const key of ["url", "pushed", "error"] as const) if (key in raw) event[key] = strOrNull(raw, key);
+      for (const key of ["url", "pushed", "error", "merged"] as const) if (key in raw) event[key] = strOrNull(raw, key);
       return event;
     }
     case "contract":

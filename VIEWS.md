@@ -87,8 +87,8 @@ type WaveView = {                     // as in the contract
              usage: Usage | null; wallMs: number }[]
   minors: { round: number; task?: string; file: string; line: number | null; text: string }[]   // its tasks' (task: key), then its own
   gates: { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null; flaky?: string[] }[]
-  merge: { at: string; from: string; to: string; queueMs: number } | null
-  remote: { number: number | null; url: string | null; pushed: string | null; error: string | null } | null
+  merge: { at: string; from: string; to: string; queueMs: number; ref?: string; commits?: number } | null   // ref, commits: a squash wave's task commits
+  remote: { number: number | null; url: string | null; pushed: string | null; error: string | null; merged?: string | null } | null   // merged: the forge's squash commit
   usage: Usage | null                 // tasks, reviews and scouts
   scoutingCost?: number               // the scouts alone
   actions: string[]
@@ -98,7 +98,8 @@ type WaveView = {                     // as in the contract
 }
 
 type TimelineEntry = { at: string; kind: string; data: object }   // kinds: task, round, coder, user, gate, review, question, merge, state
-type WaveEvent = { at: string; kind: "tasks" | "task" | "stage" | "gate" | "review" | "merge" | "remote" | "update" | "launch" | "contract"; [field: string]: unknown }
+type WaveEvent = { at: string; kind: "tasks" | "task" | "stage" | "gate" | "review" | "merge" | "remote" | "update" | "launch" | "contract" | "task_review" | "resolved" | "conflict" | "note"; [field: string]: unknown }
+// task_review: a task's review inside the wave · resolved: additions-only conflict resolved by the factory · conflict: a rebase conflict left to a task · note: {text, taskId} a supervisor note
 // update: tasks.update {key, title?, request?, after?, model?} or waves.update {title?, request?} · launch: the runner
 // launches the pending task {key, title?, request?: the text it launched with} · contract: contracts.apply {name, paths, done}
 ```
@@ -131,7 +132,7 @@ State-dependent lines of a task: `question:` (waiting_answer) · `blocked: <reas
 failed gate and the last lines of its output, or the merge's error) and, blocked by its review, the findings ·
 `interrupted:` · `waits for tasks.approve` (waiting_approve) · `done: merged · merged <commit>` and `last message:`
 (done). Of a wave: `blocked: <reason>` with `why: <detail>`, the failed gate's last lines or the failed review ·
-the findings (rejected, waiting_approve) · `cannot start: <keys>` (unreachable tasks) · `merged <from>..<to>` ·
+the findings (rejected, waiting_approve) · `cannot start: <keys>` (unreachable tasks) · `merged <from>..<to>` · `history: <ref> (<n> commits)` (squash) ·
 `remote: <url>` · `waits for: <ids>` (queued), with `queued: can never start` in the header and `why: <detail>` when a
 wave it waits for was cancelled. Of both: `flaky: <names>` when a gate step passed only on its rerun; `minor findings: N` with one line each (a review's
 lines list only blocker and major findings: only they reject).
@@ -245,7 +246,7 @@ gates.get {id: "9c1d"}
 | `branches.list` | `{repo}` | `{branches: {name, default: boolean, hasConfig: boolean}[]}` | `master (default) · waves (factory.yaml)` |
 | `models.get` | `{}` | `{models: string[]}` | one id per line |
 | `models.set` | `{models}` | `{models: string[]}` | `2 models set` |
-| `settings.get` | `{repo}` | `{stored, resolved, defaults}` each `{branch, merge, maxRounds, review, models: {coder, reviewer}, preview, remote}` | the resolved values, one per line, `(default)` after those not stored |
+| `settings.get` | `{repo}` | `{stored, resolved, defaults}` each `{branch, merge, maxRounds, review, models: {coder, reviewer}, preview, remote, squash}` | the resolved values, one per line, `(default)` after those not stored |
 | `settings.set` | `{repo, settings}` | as `settings.get` | the changed values only |
 | `config.get` | `{repo, branch?}` | `{exists: boolean, text: string \| null, draft: string \| null, source: string[]}` | `factory.yaml (committed on waves)` + the text; without one: `no factory.yaml` + the draft |
 | `config.write` | `{repo, text, overwrite?}` | `{path: string}` | `wrote factory.yaml (not committed)` |

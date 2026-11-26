@@ -310,6 +310,26 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   the target: `merged` without a review. `factory.yaml` and the reviewer prompt come from the target's tip
 - `merging`: the normal merge queue (`merge_gates` only when the target moved since the review's run, fast-forward of
   the target); `merge` records the commit range and the queue wait
+- With the repository setting `squash` (default off, stored resolved in the wave's declaration like `remote`; off: nothing
+  changes) the wave lands as one commit. After the rebase and the merge gates: `refs/factory/waves/<tag with "/" as "-">-<first 8 of
+  the wave id>` is set to the rebased tip (the task commits stay under it), one commit with the tip's tree on the target's tip is
+  made (`commit-tree`, no signing; subject = the wave's title, body = one `- <task commit subject>` per commit, a blank line,
+  `Wave: <tag>`, `Commits: <ref name>`; no model call), the target moves to it as always (under the merge lock, hooks and checkout
+  handling unchanged) and the wave's branch is deleted. The squash commit's tree must equal the gated tip's tree, else nothing
+  moves; a target that moved since the rebase fails the move and the wave is rebased again. A wave of one commit lands as that
+  commit. The runner decides by git state (the ref exists, the target's tip has the ref's tree and the wave's message), so a
+  rerun after any step ends with one commit, the ref, no branch and one `merge` event. The `merge` event gets `ref` and
+  `commits`; the views show `history: <ref> (<n> commits)`. The factory never deletes the ref (`waves.remove` skips the
+  branch delete when it is gone; "the target has all of it" holds for the tree)
+- With `squash` and `remote` both on the forge makes the squash: the branch is pushed (`--force-with-lease`), and only when
+  origin's target equals the local target and a request is known the request is merged on the forge with squash and branch
+  deletion and the same message (`gh pr merge --squash --delete-branch`, `glab mr merge --squash --remove-source-branch`).
+  Then origin's target is fetched, its tree must equal the gated tree (else `blocked` `infra`, nothing moved locally) and the
+  local target moves to the forge's commit (`merge.to`; `remote.merged` records it). Never a second landing: origin's target
+  differing, no request, an unsupported forge or a refusal with the request still open land locally and push the target,
+  the reason recorded in the `remote` event's `error` (`landed locally: <reason>`). Merged on the forge but the fetch failed:
+  `blocked` `infra` ("merged on the forge, the local target is behind"); `waves.retry` resumes at the fetch. `remote` off: no
+  forge command runs
 - The reviewer has no time limit, a wave's and a task's alike: it runs until it answers or is cancelled
   (`waves.cancel`, `tasks.cancel`). `timeout`, a status of older review entries, still reads
 - A rebase conflict where both sides only added lines (lists, imports, docs) is resolved by the factory, ours then
@@ -553,13 +573,14 @@ Commands (inside a task's own Pi session):
   messages for the live runner (`<inbox>.read`: how far it sent them)
 - `sessions/<repo dir name>/` (`/a/b` -> `--a-b--`): the Pi session files of a repository's tasks, apart from
   Pi's own sessions (`pi -r` does not list them). The task's truth is its `factory-*` session entries
-- `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models` (`coder` with its alias `big`, `reviewer`, `small`), `preview`, `remote`); the file registers the repo
+- `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models` (`coder` with its alias `big`, `reviewer`, `small`), `preview`, `remote`, `squash`); the file registers the repo
 - `models.yaml`: the factory models, a YAML list of `provider/model` ids
 - `waves/<id>.jsonl`: a wave, append-only: line 1 its declaration, every later line one event; `waves/<id>.lock` its
   runner's lock, `.log.lock` the append lock, `.poke` an unseen poke, `.log` the runner's output, `.reviews/` its reviewer's
   sessions and patch files
 - `sync/<task id>.jsonl`: a task's due syncs (`due` lines, `done` lines consume them); a round that passed its gates rewrites it with the unconsumed `due` lines (none: it goes) and drops the ref, the task's removal drops both. The worktree before
   its last sync: the ref `refs/factory/sync/<task id>` in the repo
+- `refs/factory/waves/<tag>-<wave id, 8>` in the repo: the task commits of a wave landed with `squash`; the factory never deletes it
 - `scouts/<caller kind>-<caller id>/<id>/`: a scout (`scout.json`, `events.jsonl`, `report.md`, `written.jsonl`)
 - `proofs/<id>.jsonl`: a gate proof, append-only, written by its runner: line 1 its declaration, then one `step` per
   gate step and one `end`; `.pid` its runner (pid and start time, written by `gates.prove` and by the runner itself), `.log` the runner's output, `.failing.log` the

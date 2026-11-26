@@ -93,3 +93,4 @@ export const SETTINGS_PROPERTIES: Record<string, Schema> = {
 };
 
 export const REMOTE: Schema = { type: "boolean", description: "Push a wave's branch, open its pull/merge request on the origin's forge (gh, glab), comment the reviews, push the target after the merge" };
+export const SQUASH: Schema = { type: "boolean", description: "Land a wave as one commit (its title, its commits' subjects), its task commits kept under refs/factory/waves/<tag>-<id>; with remote the forge squash-merges the request and the local target follows" };

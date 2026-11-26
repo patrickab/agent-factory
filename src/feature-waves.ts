@@ -4,7 +4,7 @@ import { afterNames, plural, short, timelineView, waveBlock, waveList, waveRecei
 import type { Params } from "./core-shared.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
 import { waveCause } from "./decisions.ts";
-import { feature, REMOTE, REPO, SETTINGS_PROPERTIES, spec, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
+import { feature, REMOTE, REPO, SETTINGS_PROPERTIES, spec, SQUASH, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 import type { WaveView } from "./waves.ts";
 
@@ -37,7 +37,7 @@ export const WAVES = feature({
           description:
             "Contracts (memory-store directories run/contract/<name>/ or documents run/contract/<name>.md in plan) the wave's coders work by; core is added when it exists. Needs plan and memory-store on PATH",
         },
-        overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, remote: REMOTE } },
+        overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, remote: REMOTE, squash: SQUASH } },
         reviewEach: {
           type: "boolean",
           description:

@@ -6,7 +6,9 @@
  * - Provides the settings of a repository, one YAML file per repository named after its URI-encoded path, read and
  *   written (`loadSettings`, `saveSettings`) with the checks a `/factory start` payload has (`parseSettingsFields`)
  *   plus `preview`, a boolean the plugin stores for its clients and never acts on, and `remote`, whether a wave of the
- *   repository is shown on its forge (`remote.ts`; `waves.start` stores it resolved in the wave's declaration). The
+ *   repository is shown on its forge (`remote.ts`; `waves.start` stores it resolved in the wave's declaration), and
+ *   `squash`, whether a wave of the repository lands as one commit, its task commits kept under a ref (`merge.ts`;
+ *   stored in the wave's declaration only when on). The
  *   file is the repository's registration (`registeredRepos`, `unregisterRepo`)
  * - Provides the default models, `defaults.yaml` at the package root (`loadDefaults`, `defaultModels`): a broken or
  *   missing file throws naming its path. Only a wave's task that asks for `small` where nothing names one reads it
@@ -22,7 +24,7 @@ import { MODEL_SIZES, normalizeModels, parseSettingsFields, type ModelChoice, ty
 import { errorText, isRecord } from "./util.ts";
 
 /** `Settings` as stored or passed: every key optional, `branch` absent = the repository's default branch; `models` normalized (`normalizeModels`). */
-export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: ModelChoice; preview?: boolean; remote?: boolean };
+export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: ModelChoice; preview?: boolean; remote?: boolean; squash?: boolean };
 
 /** The task's `coder` (with its alias `big`) and `reviewer`, and the project's `small`, each only when set: an absent role runs with Pi's session model. */
 export type ResolvedModels = Settings["models"];
@@ -30,10 +32,10 @@ export type ResolvedModels = Settings["models"];
 /** The settings a task gets. */
 export type TaskSettings = Settings;
 
-/** The settings a repository's task gets, with `preview` (absent = `false`), which only clients read, and `remote` (absent = `false`). */
-export type ResolvedSettings = TaskSettings & { preview: boolean; remote: boolean };
+/** The settings a repository's task gets, with `preview` (absent = `false`), which only clients read, `remote` and `squash` (absent = `false`). */
+export type ResolvedSettings = TaskSettings & { preview: boolean; remote: boolean; squash: boolean };
 
-export const DEFAULT_SETTINGS: Readonly<Omit<ResolvedSettings, "branch" | "models">> = { merge: "auto", maxRounds: 2, review: false, preview: false, remote: false };
+export const DEFAULT_SETTINGS: Readonly<Omit<ResolvedSettings, "branch" | "models">> = { merge: "auto", maxRounds: 2, review: false, preview: false, remote: false, squash: false };
 
 /** `defaults.yaml` at the root of the package. */
 export const DEFAULTS_PATH = join(import.meta.dirname, "..", "defaults.yaml");
@@ -93,7 +95,7 @@ export function parseStoredSettings(raw: unknown): StoredSettings {
   if (!isRecord(raw)) throw new Error("settings must be a mapping");
   const { models, ...fields } = parseSettingsFields(raw);
   const settings: StoredSettings = models === undefined ? fields : { ...fields, models: normalizeModels(models) };
-  for (const key of ["preview", "remote"] as const) {
+  for (const key of ["preview", "remote", "squash"] as const) {
     if (raw[key] === undefined) continue;
     if (typeof raw[key] !== "boolean") throw new Error(`${key} must be a boolean`);
     settings[key] = raw[key];
@@ -164,12 +166,13 @@ export async function saveSettings(repo: string, settings: StoredSettings): Prom
   }
 }
 
-/** `resolveSettings` with the stored `preview` and `remote`. */
+/** `resolveSettings` with the stored `preview`, `remote` and `squash`. */
 export function resolveRepoSettings(stored: StoredSettings, overrides: StoredSettings, branch: string): ResolvedSettings {
   return {
     ...resolveSettings(stored, overrides, branch),
     preview: stored.preview ?? DEFAULT_SETTINGS.preview,
     remote: overrides.remote ?? stored.remote ?? DEFAULT_SETTINGS.remote,
+    squash: overrides.squash ?? stored.squash ?? DEFAULT_SETTINGS.squash,
   };
 }
 

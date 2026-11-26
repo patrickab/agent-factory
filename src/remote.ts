@@ -9,6 +9,11 @@
  * - `publishMerge`, after the fast-forward: pushes the wave's branch and the target, so the forge shows the request
  *   merged with its commits. `mergePending` is the `remote` event the merge's own append records before its stage
  *   change: a runner that dies before the push leaves the log saying the push is missing, never silent
+ * - `landOnForge`, a `squash` wave's landing in place of `publishMerge`: the branch pushed, merged on the forge with
+ *   squash and branch deletion, its commit (`merged`) fetched and checked to carry the gated tree. Origin's target not
+ *   the local one, no request, no supported forge, or a refusal with the request still open: the wave lands locally and
+ *   `publishTarget` pushes the target, the reason in its event. Never a second landing: origin's target that already is
+ *   this wave's landing (parent the local target, the gated tree) is taken as it is
  * - The forge is the origin URL's as configured (`remote.origin.url`, before any `insteadOf`): a host naming github
  *   runs `gh`, one naming gitlab runs `glab`; any other is recorded `unsupported` (the pushes still happen)
  * - Every step appends a `remote` event (the fields it learnt; `error` null on success, the failure's text otherwise).
@@ -165,4 +170,155 @@ export async function publishMerge(wave: RemoteWave, exec: Exec = runCommand): P
     await run(exec, wave.repo, ["git", "push", "origin", `refs/heads/${wave.target}:refs/heads/${wave.target}`]);
     return { pushed: (await run(exec, wave.repo, ["git", "rev-parse", "--verify", `refs/heads/${wave.target}^{commit}`])).trim() };
   });
+}
+
+/** How a `squash` wave lands with `remote` on (`landOnForge`). */
+export type ForgeLanding =
+  /** The forge's squash commit, fetched, with the gated tree: the local target moves to it. */
+  | { kind: "forge"; commit: string }
+  /** Nothing merged on the forge: the wave lands locally, then `publishTarget` pushes the target with `reason`. */
+  | { kind: "local"; reason: string }
+  /** Nothing moves locally: the wave blocks (`infra`) with `error`. */
+  | { kind: "blocked"; error: string };
+
+/** The block of a forge merge whose commit is not here (yet): `waves.retry` fetches again. */
+export const FORGE_BEHIND = "merged on the forge, the local target is behind";
+
+function failure(error: unknown): string {
+  return error instanceof RemoteError ? error.message : oneLine(errorText(error));
+}
+
+/** Origin's target commit (`git ls-remote`), null when origin has no such branch. */
+async function originTip(exec: Exec, wave: RemoteWave): Promise<string | null> {
+  const out = await run(exec, wave.repo, ["git", "ls-remote", "origin", `refs/heads/${wave.target}`]);
+  return out.trim().split(/\s+/)[0] || null;
+}
+
+async function treeOf(exec: Exec, wave: RemoteWave, commit: string): Promise<string> {
+  return (await run(exec, wave.repo, ["git", "rev-parse", "--verify", `${commit}^{tree}`])).trim();
+}
+
+/** Origin's target fetched; `commit` must be here then. */
+async function fetchTarget(exec: Exec, wave: RemoteWave, commit: string): Promise<void> {
+  await run(exec, wave.repo, ["git", "fetch", "--quiet", "--no-tags", "origin", `refs/heads/${wave.target}`]);
+  await run(exec, wave.repo, ["git", "rev-parse", "--verify", "--quiet", `${commit}^{commit}`]);
+}
+
+/** The request's state as the forge reports it (`open`, `merged`, `closed`, ...) and its commit on the target when merged. */
+async function requestState(exec: Exec, wave: RemoteWave, forge: Forge, request: string): Promise<{ state: string; commit: string | null }> {
+  const argv = forge === "github" ? ["gh", "pr", "view", request, "--json", "state,mergeCommit"] : ["glab", "mr", "view", request, "--output", "json"];
+  const data = JSON.parse(await run(exec, wave.repo, argv)) as Record<string, unknown>;
+  const state = String(data.state ?? "unknown").toLowerCase();
+  const sha = (value: unknown) => (typeof value === "string" && value !== "" ? value : null);
+  const commit = forge === "github" ? sha((data.mergeCommit as { oid?: unknown } | null | undefined)?.oid) : (sha(data.merge_commit_sha) ?? sha(data.squash_commit_sha));
+  return { state: state === "opened" ? "open" : state, commit };
+}
+
+/**
+ * The forge's commit `merged` fetched and checked: its tree must be `head`'s (the gated tree). A failed fetch blocks
+ * with `FORGE_BEHIND` (`waves.retry` runs this again), another tree blocks too; each recorded in a `remote` event.
+ */
+export async function fetchForgeLanding(wave: RemoteWave, merged: string, head: string, exec: Exec = runCommand): Promise<ForgeLanding> {
+  try {
+    await fetchTarget(exec, wave, merged);
+  } catch (error) {
+    const text = `${FORGE_BEHIND}: ${failure(error)}`;
+    await record(wave, { error: text });
+    return { kind: "blocked", error: `${text}; waves.retry fetches it again` };
+  }
+  const [tree, gated] = await Promise.all([treeOf(exec, wave, merged), treeOf(exec, wave, head)]).catch((error: unknown) => [failure(error), null]);
+  if (tree === gated) return { kind: "forge", commit: merged };
+  const text = `the forge's commit ${merged.slice(0, 12)} has not the gated tree${gated === null ? `: ${tree}` : ""}; nothing moved locally`;
+  await record(wave, { error: text });
+  return { kind: "blocked", error: text };
+}
+
+/**
+ * A `squash` wave with `remote` on, in place of the local move: `head` the gated tip, `target` the local target it sits
+ * on, `message` the squash's (subject, blank line, body). Merges on the forge only when origin's target is `target`
+ * and a request is known; see `ForgeLanding`. Records `merged` before the fetch, so a retry resumes there.
+ */
+export async function landOnForge(wave: RemoteWave, landing: { head: string; target: string; message: string }, exec: Exec = runCommand): Promise<ForgeLanding> {
+  const { head, target, message } = landing;
+  const local = (reason: string): ForgeLanding => ({ kind: "local", reason });
+  let forge: Forge | null;
+  let origin: string | null;
+  try {
+    forge = forgeOf(await originUrl(exec, wave.repo));
+    origin = await originTip(exec, wave);
+  } catch (error) {
+    return local(failure(error));
+  }
+  if (origin !== target) {
+    // An earlier run's forge landing whose record was lost: origin's target on the local one with the gated tree.
+    if (origin !== null) {
+      const earlier = await fetchTarget(exec, wave, origin)
+        .then(async () => (await run(exec, wave.repo, ["git", "rev-parse", "--verify", `${origin}^`])).trim() === target && (await treeOf(exec, wave, origin)) === (await treeOf(exec, wave, head)))
+        .catch(() => false);
+      if (earlier) {
+        await record(wave, { merged: origin, error: null });
+        return { kind: "forge", commit: origin };
+      }
+    }
+    return local(`${wave.target} on origin is ${origin === null ? "missing" : origin.slice(0, 12)}, not the local ${target.slice(0, 12)}`);
+  }
+  if (forge === null) return local("unsupported: the origin is neither GitHub nor GitLab");
+  const request = wave.remote?.number ?? wave.remote?.url ?? null;
+  if (request === null) return local("no request is known");
+  try {
+    await pushBranch(exec, wave);
+  } catch (error) {
+    return local(failure(error));
+  }
+  const [subject = "", ...rest] = message.split("\n");
+  const body = rest.join("\n").replace(/^\n+/, "");
+  const argv =
+    forge === "github"
+      ? ["gh", "pr", "merge", String(request), "--squash", "--delete-branch", "--subject", subject, "--body", body]
+      : ["glab", "mr", "merge", String(request), "--squash", "--remove-source-branch", "--yes", "--squash-message", message];
+  let refused: string | null = null;
+  try {
+    await run(exec, wave.repo, argv);
+  } catch (error) {
+    refused = failure(error);
+  }
+  const state = await requestState(exec, wave, forge, String(request)).catch((error: unknown) => ({ state: "unknown", commit: null, error: failure(error) }));
+  if (state.state !== "merged") {
+    if (refused === null) {
+      // The merge said yes, the request does not say merged: nothing may land a second time, nothing is known to fetch.
+      const text = `${FORGE_BEHIND}: the request is ${state.state}${"error" in state ? ` (${state.error})` : ""}`;
+      await record(wave, { error: text });
+      return { kind: "blocked", error: text };
+    }
+    if (state.state === "open") return local(`the forge refused the merge: ${refused}`);
+    const text = `the forge refused the merge (${refused}) and the request is ${state.state}: nothing moved`;
+    await record(wave, { error: text });
+    return { kind: "blocked", error: text };
+  }
+  const merged = state.commit ?? (await originTip(exec, wave).catch(() => null));
+  if (merged === null || merged === target) {
+    const text = `${FORGE_BEHIND}: its commit is not known`;
+    await record(wave, { error: text });
+    return { kind: "blocked", error: text };
+  }
+  await record(wave, { merged, error: null });
+  return fetchForgeLanding(wave, merged, head, exec);
+}
+
+/**
+ * After a `squash` wave landed locally with `remote` on: the target pushed (the branch is gone); `reason`, why the forge
+ * did not merge it, stays in the event's `error`.
+ */
+export async function publishTarget(wave: RemoteWave, reason: string | null, exec: Exec = runCommand): Promise<WaveRemote | null> {
+  if (wave.overrides.remote !== true) return wave.remote;
+  const landed = reason === null ? null : `landed locally: ${reason}`;
+  let fields: Partial<WaveRemote>;
+  try {
+    await originUrl(exec, wave.repo);
+    await run(exec, wave.repo, ["git", "push", "origin", `refs/heads/${wave.target}:refs/heads/${wave.target}`]);
+    fields = { pushed: (await run(exec, wave.repo, ["git", "rev-parse", "--verify", `refs/heads/${wave.target}^{commit}`])).trim(), error: landed };
+  } catch (error) {
+    fields = { error: landed === null ? failure(error) : `${landed}; ${failure(error)}` };
+  }
+  return record(wave, fields);
 }

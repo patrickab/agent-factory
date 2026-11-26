@@ -658,7 +658,10 @@ export const WAVE_HANDLERS = {
     const stored = await loadSettings(repo);
     // Resolved once, here: the wave's tasks, review and merge read only the declaration.
     const { merge, maxRounds, review, models } = resolveSettings(stored, overrides, "");
+    const squash = overrides.squash ?? stored.squash ?? DEFAULT_SETTINGS.squash;
     overrides = { merge, maxRounds, review, models: modelChoice(models), remote: overrides.remote ?? stored.remote ?? DEFAULT_SETTINGS.remote };
+    // Stored only when on: a wave that does not squash keeps the declaration it had, byte for byte.
+    if (squash) overrides.squash = true;
     await requireFactoryModels(wantedModels(models, specs));
     target ??= stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
@@ -925,7 +928,8 @@ export const WAVE_HANDLERS = {
         const removed = await runCommand(["git", "worktree", "remove", ...(params.force === true ? ["--force"] : []), review], { cwd: repo });
         if (removed.exitCode !== 0) throw new FactoryError("failed", `wave ${short}: removing its review worktree ${review} failed: ${oneLine(removed.output)}`);
       }
-      // Only a merged wave's branch: the target has all of it. Any other branch may hold work nobody merged.
+      // Only a merged wave's branch: the target has all of it (a `squash` wave's runner deleted it already, its commits
+      // stay under their ref, which the factory never deletes). Any other branch may hold work nobody merged.
       if (stage === "merged" && branch !== null && (await localBranchExists(repo, branch))) {
         const deleted = await runCommand(["git", "branch", "-D", branch], { cwd: repo });
         if (deleted.exitCode !== 0) throw new FactoryError("failed", `wave ${short}: deleting its branch ${branch} failed: ${oneLine(deleted.output)}`);

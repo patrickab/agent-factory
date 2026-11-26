@@ -12,7 +12,7 @@
  *   tasks that can never start, failing gates, a wait that ended on attention. Everything else is `quiet`
  * - Cost is in cents. A card has no undefined field and no empty list: it survives a JSON round trip unchanged
  */
-import { neverStarts, unreachableTasks } from "./agent-view.ts";
+import { historyText, neverStarts, unreachableTasks } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
 import type { TaskView } from "./core-tasks.ts";
 import { FEATURES } from "./features.ts";
@@ -138,6 +138,7 @@ export function waveCard(view: WaveView, title: string, tone: CardTone = "quiet"
       ...row("waits for", view.stage === "queued" ? view.after.map(shortId).join(", ") : null),
       ...row("can never start", unreachable.join(", ")),
       ...row("merged", view.merge === null ? null : `${view.merge.from.slice(0, 7)}..${view.merge.to.slice(0, 7)} into ${view.target}`),
+      ...row("history", view.merge?.ref === undefined ? null : historyText(view.merge)),
       ...row("pull request", view.remote?.url),
       ...row("tasks", view.tasks.map((task) => `${task.key} ${task.state}`).join(", ")),
     ],

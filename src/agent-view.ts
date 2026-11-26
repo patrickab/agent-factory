@@ -285,6 +285,11 @@ function gateTail(view: WaveView): string[] {
   return [`  gates failed (${failed.phase}), last lines:`, ...lines.map((line) => `    ${line}`)];
 }
 
+/** A squash wave's task commits: `<ref> (<n> commits)`. */
+export function historyText(merge: { ref?: string; commits?: number }): string {
+  return `${merge.ref} (${merge.commits ?? 0} ${merge.commits === 1 ? "commit" : "commits"})`;
+}
+
 function remoteLines(view: WaveView): string[] {
   if (view.remote === null) return [];
   const lines: string[] = [];
@@ -326,6 +331,7 @@ function waveStageLines(view: WaveView): string[] {
     case "merged":
       return [
         ...(view.merge ? [`  merged ${short(view.merge.from)}..${short(view.merge.to)} into ${view.target}`] : []),
+        ...(view.merge?.ref === undefined ? [] : [`  history: ${historyText(view.merge)}`]),
         ...(lastReview && lastReview.findings.length > 0 ? reviewLines(lastReview, true) : []),
         ...remoteLines(view),
       ];

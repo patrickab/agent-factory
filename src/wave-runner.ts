@@ -13,9 +13,15 @@
  *   unsquashed, the merge gates (the full suite, once per wave), the reviewer on the whole diff since the target; then `merging` (`waiting_approve` with the wave's `merge: review`), `rejected` or `blocked`.
  *   `merging`: the merge queue, merge gates (only when the target moved since the review's run) and the fast-forward
  *   (`mergeTask` `asIs`), then `merged` or `blocked`
+ * - With the wave's `squash` on, the target moves to one commit in place of the fast-forward to the branch's tip: its
+ *   task commits are kept under `waveCommitsRef`, the message is `squashMessage`, and the wave's branch is deleted
+ *   before the `merge` event. A rerun of the step decides by git state whether it landed (`landedSquash`)
  * - With the wave's `remote` on (`remote.ts`, every step a `remote` event, a failure never blocks): after the rebase
  *   the wave's branch is pushed and the request opened (once), each recorded verdict is commented, and after the
- *   fast-forward the branch and the target are pushed. Off: no call
+ *   fast-forward the branch and the target are pushed. Off: no call. With `squash` too the wave is merged on the forge
+ *   (`landOnForge`) and the target moves to the forge's commit; a forge that did not merge it: the local landing, then
+ *   the target pushed (`publishTarget`). A merge on the forge whose fetch failed resumes at the fetch: a retry that
+ *   finds `remote.merged` goes from `reviewing` straight to `merging`
  * - Every step appends its event (`gate`, `review`, `merge`, `stage`). A stage change is a compare-and-append on the
  *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there.
  *   While it reviews, the runner watches the log: once the stage left `reviewing` it kills the gates and the reviewer
@@ -46,10 +52,10 @@ import { FactoryError, oneLine, pokeQueuedAfter, startQueuedWave, startWaveTasks
 import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, treeDiff, uncommittedFiles } from "./git.ts";
 import { runGateStep } from "./flaky-rerun.ts";
 import { runAfterCreate } from "./launch.ts";
-import { mergeTask, rebaseWorktree } from "./merge.ts";
+import { forwardTarget, mergeTask, rebaseWorktree, type SquashLanding } from "./merge.ts";
 import { resolveAdditions } from "./additions-merge.ts";
 import { CONFLICT_TASKS, conflictTask, REVIEWER_FIX_CAP, reviewerFixEvents, undoConflictBranch } from "./core-waves.ts";
-import { commentReview, mergePending, publishMerge, publishWave } from "./remote.ts";
+import { commentReview, fetchForgeLanding, landOnForge, mergePending, publishMerge, publishTarget, publishWave, type ForgeLanding } from "./remote.ts";
 import { runReview } from "./review.ts";
 import { fitFix, reviewFit, reviewNext, type ReviewEachDeps } from "./review-each.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
@@ -502,6 +508,57 @@ function conflicted<T>(
   );
 }
 
+/** `refs/factory/waves/<tag with "/" as "-">-<first 8 of the id>`: where a `squash` wave keeps its task commits. */
+export function waveCommitsRef(declaration: Pick<WaveDeclaration, "id" | "tag">): string {
+  return `refs/factory/waves/${declaration.tag.replaceAll("/", "-")}-${declaration.id.slice(0, 8)}`;
+}
+
+/** A `squash` wave's commit message: its title, one `- <subject>` per commit, its tag and the ref of its commits. */
+export function squashMessage(declaration: Pick<WaveDeclaration, "id" | "tag" | "title">, subjects: readonly string[]): string {
+  return `${declaration.title}\n\n${subjects.map((subject) => `- ${subject}`).join("\n")}\n\nWave: ${declaration.tag}\nCommits: ${waveCommitsRef(declaration)}`;
+}
+
+/** The block of a forge landing resumed at its fetch that failed. */
+const FORGE_RESUME = "merged on the forge, moving the local target failed";
+/** The block of a move that found the target moved after the forge merged the wave. */
+const FORGE_MOVED = "merged on the forge";
+
+/** What a landed `squash` wave's `merge` event says: the target's range and the ref of its commits. */
+type SquashLanded = { from: string; to: string; ref: string; commits: number };
+
+/**
+ * Whether the target's tip is this `squash` wave's landing, from git alone: its ref exists and the tip is the ref's
+ * commit (a wave of one commit) or has the ref's tree and the wave's message. Null when not (or no ref).
+ */
+async function landedSquash(fold: StartedWaveFold, forged: string | null = null): Promise<SquashLanded | null> {
+  const ref = waveCommitsRef(fold);
+  const exec = runner.cleanup;
+  const verify = (name: string) => git(exec, fold.repo, ["rev-parse", "--verify", "--quiet", `${name}^{commit}`]).catch(() => null);
+  const head = await verify(ref);
+  if (head === null) return null;
+  const to = await git(exec, fold.repo, ["rev-parse", `refs/heads/${fold.target}^{commit}`]);
+  const from = await verify(`${to}^`);
+  if (from === null) return null;
+  const log = await git(exec, fold.repo, ["log", "--reverse", "--format=%s", `${from}..${head}`]);
+  const subjects = log === "" ? [] : log.split("\n");
+  if (to !== head) {
+    // The forge's commit (`forged`) has the forge's message: its tree decides.
+    const [tip, kept] = await Promise.all([git(exec, fold.repo, ["rev-parse", `${to}^{tree}`]), git(exec, fold.repo, ["rev-parse", `${head}^{tree}`])]);
+    // A wave of one commit lands as that commit, unless the forge squashed it (`forged`): then one subject will do.
+    if (tip !== kept || subjects.length < (to === forged ? 1 : 2)) return null;
+    if (to !== forged && (await git(exec, fold.repo, ["show", "-s", "--format=%B", to])) !== squashMessage(fold, subjects)) return null;
+  }
+  return { from, to, ref, commits: subjects.length };
+}
+
+/** Deletes a landed `squash` wave's branch, its review worktree first (git refuses a branch checked out). Logs a failure. */
+async function dropBranch(fold: StartedWaveFold): Promise<void> {
+  await removeWorktree(fold);
+  if ((await runner.cleanup(["git", "rev-parse", "--verify", "--quiet", `refs/heads/${fold.branch}`], { cwd: fold.repo })).exitCode !== 0) return;
+  const deleted = await runner.cleanup(["git", "branch", "-D", fold.branch], { cwd: fold.repo });
+  if (deleted.exitCode !== 0) log(fold.id, `the branch ${fold.branch} stays: ${outputTail(deleted.output)}`);
+}
+
 /**
  * `merging`: the merge queue, merge gates and the fast-forward of the target. The merge gates are skipped on the
  * commit they passed on before the review (`gated`): they run again only when the target moved since.
@@ -514,6 +571,69 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
     const landed = to === "merged";
     await moveStage(id, "merging", to, reason, detail === null ? null : pathFree(fold, detail), events, landed);
     if (!stopping || landed) await removeWorktree(fold);
+  };
+  const squash = fold.overrides.squash === true;
+  /** A `squash` wave with `remote` on lands on its forge (`landOnForge`). */
+  const onForge = squash && fold.overrides.remote === true;
+  /** The forge's commit, once it merged the wave (also from an earlier run's log). */
+  let forged: string | null = onForge ? (fold.remote?.merged ?? null) : null;
+  /** Why the forge did not merge it: the wave landed locally. */
+  let fallback: string | null = null;
+  /** The end of a landing: the branch gone (`squash`), the `merge` event, the other waves in step, the push. */
+  const landed = async (merge: { from: string; to: string; ref?: string; commits?: number }, queueMs: number, gate: NewWaveEvent[]) => {
+    if (squash) await dropBranch(fold);
+    const onTheForge = forged !== null && merge.to === forged;
+    // The push still to come is in the log before the resting stage: a runner that dies in between leaves it said.
+    await leave("merged", null, null, [...gate, { kind: "merge", ...merge, queueMs }, ...(onTheForge ? [] : mergePending(fold))]);
+    await archiveWave(fold).catch((error: unknown) => log(id, `the archive failed: ${oneLine(errorText(error))}`));
+    // Files in step (`sync.ts`): the other building waves on the target are rebased onto it, their running tasks marked.
+    if (merge.from !== "" && merge.to !== "") {
+      const synced = await waveLanded(runner.cleanup, fold.repo, id, fold.target, merge.from, merge.to).catch((error: unknown) => [`files in step: ${errorText(error)}`]);
+      for (const line of synced) log(id, line);
+    }
+    // The target moved: the forge gets it, the request shows merged (recorded, never blocking). Merged on the forge: it has it.
+    if (onTheForge) return;
+    await (squash ? publishTarget(fold, fallback) : publishMerge(fold));
+  };
+  // A runner that died after the target moved: the landing is finished, never made twice.
+  if (squash) {
+    const done = await landedSquash(fold, forged).catch((error: unknown) => {
+      log(id, `looking for a landing failed: ${errorText(error)}`);
+      return null;
+    });
+    if (done !== null) return landed(done, 0, []);
+  }
+  // Merged on the forge, the local target not moved yet: from the fetch, never a second merge.
+  if (forged !== null) {
+    const merged = forged;
+    const resumed = await (async () => {
+      const head = await git(runner.cleanup, fold.repo, ["rev-parse", "--verify", `${waveCommitsRef(fold)}^{commit}`]);
+      const fetched = await fetchForgeLanding(fold, merged, head);
+      if (fetched.kind !== "forge") return fetched;
+      await forwardTarget(runner.cleanup, runner.cleanup, fold.repo, task, fetched.commit);
+      return fetched;
+    })().catch((error: unknown): ForgeLanding => ({ kind: "blocked", error: `${FORGE_RESUME}: ${oneLine(errorText(error))}` }));
+    if (resumed.kind !== "forge") return leave("blocked", "infra", resumed.kind === "blocked" ? resumed.error : resumed.reason);
+    const done = await landedSquash(fold, merged).catch(() => null);
+    if (done === null) return leave("blocked", "infra", `${FORGE_RESUME}: ${fold.target} is not the wave's landing after the move`);
+    return landed(done, 0, []);
+  }
+  const landing: SquashLanding | undefined = squash ? { ref: waveCommitsRef(fold), message: (subjects) => squashMessage(fold, subjects) } : undefined;
+  /** The forge merges the gated tip with the squash's message; else the local landing (`fallback` says why). */
+  const land = async ({ head, onto }: { head: string; onto: string }) => {
+    // Merged on the forge already (the move found the target moved since): never a second landing, the wave blocks.
+    if (forged !== null) return { error: `${FORGE_MOVED} (${forged.slice(0, 12)}), but ${fold.target} moved here meanwhile: nothing more lands; put ${fold.target} on that commit by hand, or waves.retry once it descends from it` };
+    const subjects = (await git(runner.cleanup, fold.repo, ["log", "--reverse", "--format=%s", `${onto}..${head}`])).split("\n");
+    const result = await landOnForge(fold, { head, target: onto, message: squashMessage(fold, subjects) });
+    if (result.kind === "local") {
+      fallback = result.reason;
+      log(id, `merge: lands locally: ${result.reason}`);
+      return null;
+    }
+    if (result.kind === "blocked") return { error: result.error };
+    forged = result.commit;
+    fallback = null;
+    return { commit: result.commit };
   };
   let root: string;
   let config: FactoryConfig;
@@ -550,6 +670,8 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
       asIs: true,
       gated,
       stop: () => stopping,
+      ...(landing === undefined ? {} : { squash: landing }),
+      ...(onForge ? { land } : {}),
     });
   let outcome = await merging();
   // Additions on both sides at one place: resolved, then the merge again, its gates on the result.
@@ -566,21 +688,12 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
   const gate = gates.length === 0 ? [] : [gateEvent("merge", gates.map((data) => ({ result: { output: data.outputTail, durationMs: data.durationMs }, passed: data.exitCode === 0 && !data.killed, flaky: data.flaky })))];
   const { result } = outcome;
   switch (result.kind) {
-    case "merged":
-      // The push still to come is in the log before the resting stage: a runner that dies in between leaves it said.
-      await leave("merged", null, null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }, ...mergePending(fold)]);
-      await archiveWave(fold).catch((error: unknown) => log(id, `the archive failed: ${oneLine(errorText(error))}`));
-      // Files in step (`sync.ts`): the other building waves on the target are rebased onto it, their running tasks marked.
-      {
-        const from = before as string | null;
-        const to = result.merge.commit;
-        if (from !== null && to !== null) {
-          const synced = await waveLanded(runner.cleanup, fold.repo, id, fold.target, from, to).catch((error: unknown) => [`files in step: ${errorText(error)}`]);
-          for (const line of synced) log(id, line);
-        }
-      }
-      // The target moved: the forge gets it, the request shows merged (recorded, never blocking).
-      return void (await publishMerge(fold));
+    case "merged": {
+      const range = { from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "" };
+      // The ref and the count from git: the commits the target's new tip stands for.
+      const squashed = squash ? await landedSquash(fold, forged).catch(() => null) : null;
+      return landed(squashed ?? range, queueMs, gate);
+    }
     case "conflict":
       return conflicted(fold, "merge", result.files, leave, gate);
     case "gate_failed":
@@ -612,6 +725,11 @@ async function step(id: string): Promise<Next> {
   }
   if (RESTING_WAVE_STAGES.includes(fold.stage)) return "rest";
   if (!waveStarted(fold)) throw new Error(`the wave is ${fold.stage} but has no branch (no start event)`);
+  // Merged on the forge, not landed here (a retry after the fetch failed): the merge step resumes at the fetch.
+  if (fold.stage === "reviewing" && fold.overrides.squash === true && fold.overrides.remote === true && (fold.remote?.merged ?? null) !== null && fold.merge === null) {
+    await moveStage(id, "reviewing", "merging", null, "merged on the forge: the local target moves to its commit");
+    return "again";
+  }
   if (fold.stage === "reviewing") {
     await whileAt(id, "reviewing", () => review(fold));
     return "again";
