@@ -47,12 +47,12 @@ import { runGateStep } from "./flaky-rerun.ts";
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
 import { resolveAdditions } from "./additions-merge.ts";
-import { CONFLICT_TASKS, conflictTask, undoConflictBranch } from "./core-waves.ts";
+import { CONFLICT_TASKS, conflictTask, REVIEWER_FIX_CAP, reviewerFixEvents, undoConflictBranch } from "./core-waves.ts";
 import { commentReview, mergePending, publishMerge, publishWave } from "./remote.ts";
 import { runReview } from "./review.ts";
-import { reviewNext, type ReviewEachDeps } from "./review-each.ts";
+import { fitFix, reviewFit, reviewNext, type ReviewEachDeps } from "./review-each.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
-import { INFRA_EXIT, passed, type GateData, type Task } from "./state.ts";
+import { INFRA_EXIT, passed, type Finding, type GateData, type ReviewStatus, type ReviewUsage, type Task } from "./state.ts";
 import { lockFile, TaskBusyError } from "./tasks.ts";
 import { errorText, outputTail } from "./util.ts";
 import { clearPoke, WAVE_LOCK_ENV, waveLockPath, wavePokePath, waveReviewsDir } from "./wave-poke.ts";
@@ -370,31 +370,41 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
     }
     const round = fold.reviews.length + 1;
     log(id, `review round ${round}`);
-    // What each done task was asked and its coder's last message (the risks it named): the reviewer may have no shell.
-    const { states, views } = await waveTaskViews(fold);
-    const waveTasks = fold.tasks
-      .filter((spec) => states.get(spec.key) === "done")
-      .map((spec) => ({ title: spec.title, request: spec.request, lastMessage: views.get(spec.key)?.lastMessage ?? null }));
-    const data = await runReview({
-      exec: runner.run,
-      root,
-      round,
-      task,
-      followUps: [],
-      diff,
-      // The wave's reviewer model: its own when it names one, else Pi's session model.
-      model: resolveModels([fold.overrides.models]).reviewer ?? null,
-      rolePrompt: prompts.reviewer,
-      reviewsDir: waveReviewsDir(id),
-      cancelled: () => runner.cancelled,
-      wave: true,
-      waveTasks,
-    });
+    let data: { status: ReviewStatus; findings: Finding[]; model: string | null; sessionId: string | null; usage: ReviewUsage; wallMs: number; approved: boolean };
+    if (fold.reviewEach === true) {
+      // Review per task: the wave's reviewer session, which judged each task, passes once on how they fit together.
+      const fit = await reviewFit(fold, { root, round, diff }, { ...reviewEachDeps, log: (text) => log(id, text) });
+      // Cut short: the step runs again (or the stage moved on, or the runner stops).
+      if (fit === null) return stopping ? undefined : removeWorktree(fold);
+      data = { ...fit, usage: fit.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, approved: fit.verdict === "approved" };
+    } else {
+      // What each done task was asked and its coder's last message (the risks it named): the reviewer may have no shell.
+      const { states, views } = await waveTaskViews(fold);
+      const waveTasks = fold.tasks
+        .filter((spec) => states.get(spec.key) === "done")
+        .map((spec) => ({ title: spec.title, request: spec.request, lastMessage: views.get(spec.key)?.lastMessage ?? null }));
+      const whole = await runReview({
+        exec: runner.run,
+        root,
+        round,
+        task,
+        followUps: [],
+        diff,
+        // The wave's reviewer model: its own when it names one, else Pi's session model.
+        model: resolveModels([fold.overrides.models]).reviewer ?? null,
+        rolePrompt: prompts.reviewer,
+        reviewsDir: waveReviewsDir(id),
+        cancelled: () => runner.cancelled,
+        wave: true,
+        waveTasks,
+      });
+      data = { ...whole, sessionId: sessionIdOf(whole.sessionFile) };
+    }
     const verdict = data.status !== "ok" ? "failed" : data.approved ? "approved" : "rejected";
-    const event: NewWaveEvent = {
+    const event: Extract<NewWaveEvent, { kind: "review" }> = {
       kind: "review",
       round,
-      sessionId: sessionIdOf(data.sessionFile),
+      sessionId: data.sessionId,
       model: data.model,
       verdict,
       status: data.status,
@@ -404,6 +414,7 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
     };
     let moved: boolean;
     if (verdict === "failed") moved = await leave("blocked", "review_failed", `the reviewer gave no verdict (${data.status})`, [event]);
+    else if (fold.reviewEach === true) moved = await afterFit(fold, round, event, leave);
     else if (verdict === "rejected") moved = await leave("rejected", null, null, [event]);
     else moved = await leave(fold.overrides.merge === "review" ? "waiting_approve" : "merging", null, null, [event]);
     // Only a recorded verdict reaches the forge.
@@ -411,6 +422,40 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
   } catch (error) {
     return leave("blocked", "infra", `review: ${oneLine(errorText(error))}`);
   }
+}
+
+/** The count of `findings` that reject, as text: `1 major`, `2 blocker and 1 major`. */
+function rejecting(findings: readonly { severity: string }[]): string {
+  const count = (severity: string) => findings.filter((finding) => finding.severity === severity).length;
+  return [
+    [count("blocker"), "blocker"],
+    [count("major"), "major"],
+  ]
+    .filter(([n]) => (n as number) > 0)
+    .map(([n, severity]) => `${n} ${severity}`)
+    .join(" and ");
+}
+
+/**
+ * The stage after a `reviewEach` wave's fit pass: approved goes on to merge; its blocker and major findings become one
+ * `fix:` task (`reviewerFixEvents`, counted against `REVIEWER_FIX_CAP`) and the wave builds again; with the cap used up
+ * the wave is `rejected` to the supervisor. A task the reviewer added during the pass (`start_fix`) builds too.
+ */
+async function afterFit(
+  fold: StartedWaveFold,
+  round: number,
+  event: Extract<NewWaveEvent, { kind: "review" }>,
+  leave: (to: WaveStage, reason: WaveReason | null, detail: string | null, events: NewWaveEvent[]) => Promise<boolean>,
+): Promise<boolean> {
+  const file = await readWave(fold.id);
+  const now = foldWave(file.declaration, file.events);
+  const added = now.tasks.filter((spec) => !fold.tasks.some((before) => before.key === spec.key)).map((spec) => spec.key);
+  if (added.length > 0) return leave("building", null, `the reviewer added ${added.join(", ")} in its pass on how the tasks fit together`, [event]);
+  if (event.verdict === "approved") return leave(fold.overrides.merge === "review" ? "waiting_approve" : "merging", null, null, [event]);
+  const found = `the pass on how the tasks fit together found ${rejecting(event.findings)}`;
+  const fix = reviewerFixEvents(now, fitFix(round, event.findings));
+  if (fix === null) return leave("rejected", null, `${found}; the wave's ${REVIEWER_FIX_CAP} fix tasks are used up`, [event]);
+  return leave("building", null, `${found}: task ${fix.key} fixes it`, [event, ...fix.events]);
 }
 
 /** How often a merge resolves additions-only conflicts and tries again (the target moves on meanwhile). */

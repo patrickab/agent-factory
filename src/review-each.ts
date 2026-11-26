@@ -28,7 +28,7 @@ import { readReviewerOutput, VERDICT_TOOL } from "./review.ts";
 import type { Exec } from "./run.ts";
 import { lastFactoryState } from "./runner.ts";
 import { resolveModels } from "./settings.ts";
-import { approvedFrom, type ReviewData, type ReviewStatus } from "./state.ts";
+import { approvedFrom, type Finding, type ReviewData, type ReviewStatus } from "./state.ts";
 import { listTasks, type TaskRecord } from "./tasks.ts";
 import { errorText } from "./util.ts";
 import { appendWaveEvents, waveReviewsDir, type NewWaveEvent, type StartedWaveFold, type TaskStates, type WaveTaskReview } from "./waves.ts";
@@ -99,6 +99,58 @@ export function taskReviewPrompt(input: {
   return lines.join("\n");
 }
 
+/** One run of the wave's reviewer session: the same argv, directory, model and tools at every resume. */
+interface ReviewerRun {
+  status: ReviewStatus;
+  findings: Finding[];
+  sessionId: string | null;
+  model: string | null;
+  usage: ReturnType<typeof readReviewerOutput>["usage"];
+  wallMs: number;
+}
+
+/**
+ * Resumes the wave's reviewer session on `prompt` with `diffFile` behind `read_diff`, after stubbing every earlier tool
+ * result; `taskId` the task under review (null: the wave's fit pass). Null when cut short.
+ */
+async function runWaveReviewer(fold: StartedWaveFold, prompt: string, diffFile: string, taskId: string | null, deps: ReviewEachDeps): Promise<ReviewerRun | null> {
+  const { exec } = deps;
+  const dir = waveReviewsDir(fold.id);
+  // The wave's base: the same role prompt at every resume of the session.
+  const { prompts } = await loadTaskFiles(exec, fold.repo, fold.base);
+  const existing = await sessionFile(dir, fold.id);
+  if (existing !== undefined) stubEarlierRounds(existing);
+  const model = resolveModels([fold.overrides.models]).reviewer ?? null;
+  const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,read_diff,scout,feedback,notify_supervisor,start_fix,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
+  argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", dir, "--session-id", fold.id);
+  if (model) argv.push("--model", model);
+  if (prompts.reviewer) argv.push("--append-system-prompt", prompts.reviewer);
+  argv.push(prompt);
+  const env: Record<string, string> = { PI_CACHE_RETENTION: "long", [REVIEW_DIFF_ENV]: diffFile, FACTORY_REVIEW_WAVE: fold.id };
+  if (taskId !== null) env.FACTORY_REVIEW_TASK = taskId;
+  if (fold.plan !== null) env.FACTORY_REVIEW_PLAN = fold.plan;
+  const child = await exec(argv, { cwd: dir, env, maxStdoutChars: REVIEWER_STDOUT_MAX_CHARS });
+  if (child.killed || deps.cancelled()) return null;
+  const output = readReviewerOutput(child.stdout);
+  let status: ReviewStatus = "ok";
+  if (child.exitCode !== 0) status = "failed";
+  else if (output.findings === null) status = "malformed";
+  const findings = status === "ok" ? (output.findings ?? []) : [];
+  return {
+    status,
+    findings: findings.map((finding) => ({ severity: finding.severity, file: finding.file, line: finding.line, text: finding.text })),
+    sessionId: output.sessionId,
+    model,
+    usage: output.usage,
+    wallMs: child.durationMs,
+  };
+}
+
+/** The verdict of a reviewer run: only a blocker or major finding rejects. */
+function verdictOf(run: Pick<ReviewerRun, "status" | "findings">): "approved" | "rejected" | "failed" {
+  return run.status !== "ok" ? "failed" : approvedFrom(run.status, run.findings) ? "approved" : "rejected";
+}
+
 /** Runs the reviewer on the task `key` in its `round` and answers the `task_review` event; null when cut short. */
 async function reviewTask(fold: StartedWaveFold, key: string, record: TaskRecord, round: number, deps: ReviewEachDeps): Promise<NewWaveEvent | null> {
   const spec = fold.tasks.find((task) => task.key === key);
@@ -108,8 +160,8 @@ async function reviewTask(fold: StartedWaveFold, key: string, record: TaskRecord
   await mkdir(dir, { recursive: true });
   const worktree = record.worktree;
   const base = await git(exec, worktree, ["merge-base", "HEAD", `refs/heads/${fold.branch}`]);
-  // The wave's base: the same role prompt and lockfiles at every resume of the session.
-  const { config, prompts } = await loadTaskFiles(exec, fold.repo, fold.base);
+  // The wave's base: the same lockfiles at every review.
+  const { config } = await loadTaskFiles(exec, fold.repo, fold.base);
   const tree = await snapshotTree(exec, worktree);
   const reviews = fold.taskReviews ?? [];
   const previous = reviews.filter((review) => review.taskId === record.id && review.round < round).at(-1);
@@ -129,25 +181,9 @@ async function reviewTask(fold: StartedWaveFold, key: string, record: TaskRecord
     since: sinceTree === base ? "base" : (previous?.round ?? "base"),
     contracts: contracts.text === null ? null : reviews.length > 0 && lastHash === contracts.hash ? "unchanged" : contracts.text,
   });
-  const existing = await sessionFile(dir, fold.id);
-  if (existing !== undefined) stubEarlierRounds(existing);
-  const model = resolveModels([fold.overrides.models]).reviewer ?? null;
-  const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,read_diff,scout,feedback,notify_supervisor,start_fix,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
-  argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", dir, "--session-id", fold.id);
-  if (model) argv.push("--model", model);
-  if (prompts.reviewer) argv.push("--append-system-prompt", prompts.reviewer);
-  argv.push(prompt);
-  const env: Record<string, string> = { PI_CACHE_RETENTION: "long", [REVIEW_DIFF_ENV]: diffFile, FACTORY_REVIEW_WAVE: fold.id, FACTORY_REVIEW_TASK: record.id };
-  if (fold.plan !== null) env.FACTORY_REVIEW_PLAN = fold.plan;
   deps.log(`review of task ${key}, round ${round}`);
-  const child = await exec(argv, { cwd: dir, env, maxStdoutChars: REVIEWER_STDOUT_MAX_CHARS });
-  if (child.killed || deps.cancelled()) return null;
-  const output = readReviewerOutput(child.stdout);
-  let status: ReviewStatus = "ok";
-  if (child.exitCode !== 0) status = "failed";
-  else if (output.findings === null) status = "malformed";
-  const findings = status === "ok" ? (output.findings ?? []) : [];
-  const verdict = status !== "ok" ? "failed" : approvedFrom(status, findings) ? "approved" : "rejected";
+  const run = await runWaveReviewer(fold, prompt, diffFile, record.id, deps);
+  if (run === null) return null;
   return {
     kind: "task_review",
     key,
@@ -156,13 +192,78 @@ async function reviewTask(fold: StartedWaveFold, key: string, record: TaskRecord
     tree,
     base,
     contracts: contracts.hash,
-    sessionId: output.sessionId,
-    model,
-    verdict,
-    status,
-    findings: findings.map((finding) => ({ severity: finding.severity, file: finding.file, line: finding.line, text: finding.text })),
-    usage: output.usage,
-    wallMs: child.durationMs,
+    sessionId: run.sessionId,
+    model: run.model,
+    verdict: verdictOf(run),
+    status: run.status,
+    findings: run.findings,
+    usage: run.usage,
+    wallMs: run.wallMs,
+  };
+}
+
+/** The prompt of the wave's fit pass. */
+export function fitPassPrompt(input: {
+  wave: Pick<StartedWaveFold, "title" | "branch" | "target" | "request">;
+  round: number;
+  worktree: string;
+  tasks: { key: string; title: string }[];
+  contracts: string | null | "unchanged";
+}): string {
+  const lines = [
+    `Review how the tasks of the wave "${input.wave.title}" fit together (wave review round ${input.round}): every task is done and merged into ${input.wave.branch}, the wave is rebased onto ${input.wave.target} and its merge_gates passed.`,
+    `Its review worktree is ${input.worktree}: read its files there by absolute path. read_diff shows the wave's whole change against ${input.wave.target}; it is the only diff you get.`,
+    `You judged each task on its own above (earlier tool results are stubs starting with ${STUB_PREFIX}). Judge now only what lies between the tasks: interfaces that do not match, the same thing built twice, one task undoing another, a piece of the request no task covered.`,
+    `Only blocker and major findings count; the factory turns them into one fix: task of the wave, so do not call start_fix in this pass. Finish with ${VERDICT_TOOL}.`,
+    "",
+    "## The wave's tasks",
+    "",
+    ...input.tasks.map((task) => `- ${task.key}: ${task.title}`),
+    "",
+    "## The wave's request",
+    "",
+    input.wave.request,
+  ];
+  if (input.contracts === "unchanged") lines.push("", "## The wave's contracts", "", "Unchanged since your last review: they are above.");
+  else if (input.contracts !== null) lines.push("", "## The wave's contracts (they win over the request)", "", input.contracts);
+  return lines.join("\n");
+}
+
+/** What the fit pass answers: the run with its verdict. */
+export type FitPass = ReviewerRun & { verdict: "approved" | "rejected" | "failed" };
+
+/**
+ * The end of a `reviewEach` wave: one pass of the wave's reviewer session on how its tasks fit together, the wave's
+ * whole change (`diff`, against the target) behind `read_diff`. Null when cut short.
+ */
+export async function reviewFit(fold: StartedWaveFold, input: { root: string; round: number; diff: { base: string; paths: string[]; patch: string } }, deps: ReviewEachDeps): Promise<FitPass | null> {
+  const dir = waveReviewsDir(fold.id);
+  await mkdir(dir, { recursive: true });
+  const diffFile = join(dir, `wave-round-${input.round}.diff.json`);
+  await writeFile(diffFile, JSON.stringify({ base: input.diff.base, paths: input.diff.paths, patch: input.diff.patch }));
+  const contracts = await contractsText(fold);
+  const reviews = fold.taskReviews ?? [];
+  const lastHash = reviews.at(-1)?.contracts ?? null;
+  const prompt = fitPassPrompt({
+    wave: fold,
+    round: input.round,
+    worktree: input.root,
+    tasks: fold.tasks.filter((task) => task.taskId !== null).map((task) => ({ key: task.key, title: task.title })),
+    contracts: contracts.text === null ? null : reviews.length > 0 && lastHash === contracts.hash ? "unchanged" : contracts.text,
+  });
+  deps.log(`fit pass, wave review round ${input.round}`);
+  const run = await runWaveReviewer(fold, prompt, diffFile, null, deps);
+  return run === null ? null : { ...run, verdict: verdictOf(run) };
+}
+
+/** The `fix:` task of a fit pass's blocker and major findings (`start_fix`'s input). */
+export function fitFix(round: number, findings: readonly { severity: string; file: string | null; line: number | null; text: string }[]): { title: string; request: string } {
+  const lines = findings
+    .filter((finding) => finding.severity === "blocker" || finding.severity === "major")
+    .map((finding) => `- ${finding.severity}${finding.file === null ? "" : ` ${finding.file}${finding.line === null ? "" : `:${finding.line}`}`}: ${finding.text}`);
+  return {
+    title: `fix: how the wave's tasks fit together (wave review round ${round})`,
+    request: [`The wave's reviewer, judging how the wave's tasks fit together, found:`, "", ...lines, "", "Fix them on the wave's branch; your change is reviewed like every task's."].join("\n"),
   };
 }
 

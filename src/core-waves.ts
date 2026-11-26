@@ -816,9 +816,24 @@ export const WAVE_HANDLERS = {
 export const REVIEWER_FIX_CAP = 3;
 
 /**
- * The reviewer's `start_fix`: adds a pending task `fix-<n>` titled `fix: ...` to the wave (a `tasks` event
- * `by: "reviewer"`) and pokes its runner. Refused past `REVIEWER_FIX_CAP` (checked under the log lock) and in the
- * stages `waves.add` refuses. Resolves with the task's key.
+ * The events of a reviewer's `fix:` task: a pending task `fix-<n>` titled `fix: ...` (a `tasks` event
+ * `by: "reviewer"`); null once the wave has its `REVIEWER_FIX_CAP` of them. `fold` is the wave under its log lock.
+ */
+export function reviewerFixEvents(fold: WaveFold, fix: { title: string; request: string }): { key: string; events: NewWaveEvent[] } | null {
+  const bare = fix.title.trim().replace(/^fix:\s*/i, "");
+  const started = fold.fixes ?? 0;
+  if (started >= REVIEWER_FIX_CAP) return null;
+  const keys = new Set(fold.tasks.map((task) => task.key));
+  let n = started + 1;
+  while (keys.has(`fix-${n}`)) n++;
+  const key = `fix-${n}`;
+  const tasks = withIds(validateTaskSpecs([{ key, title: `fix: ${bare}`, request: fix.request }], fold.tasks));
+  return { key, events: [{ kind: "tasks", tasks, by: "reviewer" }] };
+}
+
+/**
+ * The reviewer's `start_fix`: adds the task of `reviewerFixEvents` to the wave and pokes its runner. Refused past
+ * `REVIEWER_FIX_CAP` (checked under the log lock) and in the stages `waves.add` refuses. Resolves with the task's key.
  */
 export async function startReviewerFix(waveId: string, fix: { title: string; request: string }, env?: RunnerEnv): Promise<string> {
   const bare = fix.title.trim().replace(/^fix:\s*/i, "");
@@ -829,16 +844,10 @@ export async function startReviewerFix(waveId: string, fix: { title: string; req
     appendWaveEvents(waveId, (fold) => {
       const short = waveId.slice(0, SHORT_ID_CHARS);
       if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${short} is ${fold.stage}, it takes no more tasks`);
-      const started = fold.fixes ?? 0;
-      if (started >= REVIEWER_FIX_CAP) {
-        throw new FactoryError("refused", `wave ${short} has its ${REVIEWER_FIX_CAP} fix tasks already: tell the supervisor with notify_supervisor`);
-      }
-      const keys = new Set(fold.tasks.map((task) => task.key));
-      let n = started + 1;
-      while (keys.has(`fix-${n}`)) n++;
-      key = `fix-${n}`;
-      const tasks = withIds(validateTaskSpecs([{ key, title: `fix: ${bare}`, request: fix.request }], fold.tasks));
-      return [{ kind: "tasks", tasks, by: "reviewer" }];
+      const added = reviewerFixEvents(fold, fix);
+      if (added === null) throw new FactoryError("refused", `wave ${short} has its ${REVIEWER_FIX_CAP} fix tasks already: tell the supervisor with notify_supervisor`);
+      key = added.key;
+      return added.events;
     }),
   );
   await pokeWaveRunner(waveId, env);
