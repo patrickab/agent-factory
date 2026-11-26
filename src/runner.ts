@@ -27,6 +27,8 @@
  * - `FACTORY_TASK_LOCK`: the task lock (`tasks.ts`) handed to this runner, removed when it exits if it still names it
  * - `FACTORY_TASK_WAVE` (a wave's task): when the runner ends with the task at rest it pokes that wave (`pokeWave`),
  *   whose runner then looks at its tasks again. Pi does not get the variable
+ * - Contracts (`contracts.ts`): before a coder turn it starts (a plain message, an inbox line) and when a coder run
+ *   begins, `contractCheck`: the follow-ups of changed contracts go with that message, or to the run as a follow-up
  * - SIGTERM/SIGINT: closes Pi's stdin and kills Pi after `KILL_GRACE_MS`. Exit code = Pi's; 1 when Pi exited before it
  *   answered the prompt or refused it
  * - Imports nothing outside node built-ins and the plain plugin modules: the deployed plugin has no `node_modules`
@@ -34,6 +36,7 @@
 import { spawn } from "node:child_process";
 import { readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { contractCheck } from "./contracts.ts";
 import { RESTING_STATES, type StateData } from "./state.ts";
 import { handLockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
@@ -182,14 +185,27 @@ export function piArgs(sessionDir: string, sessionId: string, message: string): 
   return typeof coder === "string" && /^[^/\s]+\/\S+$/.test(coder) ? [...args, "--model", coder] : args;
 }
 
+/** The follow-ups of the task's changed contracts (`contractCheck`), null when none; a failed look is logged and says none. */
+async function contractNotes(sessionId: string): Promise<string | null> {
+  try {
+    return await contractCheck(sessionId);
+  } catch (error) {
+    console.error(`runner: looking at the task's contracts: ${errorText(error)}`);
+    return null;
+  }
+}
+
 /**
  * Runs the message to the task's rest, sending the lines of `inboxPath` meanwhile, and resolves with the runner's exit
  * code.
  */
-export async function runTaskCommand(worktree: string, sessionDir: string, sessionId: string, inboxPath: string, message: string): Promise<number> {
+export async function runTaskCommand(worktree: string, sessionDir: string, sessionId: string, inboxPath: string, command: string): Promise<number> {
   const startCount = (await readFactoryStates(sessionDir, sessionId)).count;
   /** Not a command: a message for the coder, which the factory plugin opens a run for (a `factory-state` entry). */
-  const plain = !message.trimStart().startsWith("/");
+  const plain = !command.trimStart().startsWith("/");
+  // Before a coder turn this runner starts: a changed contract goes with its message (an answer included).
+  const startNotes = plain ? await contractNotes(sessionId) : null;
+  const message = startNotes === null ? command : `${command}\n\n${startNotes}`;
   const mustLeave = plain || LEAVES_REST.test(message.trim());
   let inboxOffset = await readInboxOffset(inboxPath);
   const pi = Bun.spawn(["pi", ...piArgs(sessionDir, sessionId, message)], {
@@ -258,10 +274,20 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
     // The offset is stored before the lines go out: a line is never sent twice, by this runner or the next.
     await writeInboxOffset(inboxPath, next);
     inboxOffset = next;
+    if (texts.length > 0) {
+      const notes = await contractNotes(sessionId);
+      if (notes !== null) texts[texts.length - 1] = `${texts.at(-1)}\n\n${notes}`;
+    }
     for (const text of texts) sendPrompt(`inbox-${++inboxSent}`, text, true);
     return texts.length > 0;
   };
   const inboxUnread = async (): Promise<boolean> => (await unreadInboxLines(inboxPath, inboxOffset)).next > inboxOffset;
+  /** A coder run began (the plugin's next round, a retry): a changed contract goes to it as a follow-up. */
+  const contractFollowUp = async () => {
+    if ((await lastFactoryState(sessionDir, sessionId).catch(() => undefined))?.state !== "running" || stdinClosed) return;
+    const notes = await contractNotes(sessionId);
+    if (notes !== null) sendPrompt(`contract-${++inboxSent}`, notes, true);
+  };
   /** One look at the session state and the inbox: sends unread lines, refuses or ends when it is time. */
   const checkOnce = async () => {
     const { count, last } = await readFactoryStates(sessionDir, sessionId);
@@ -324,6 +350,7 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
       runActive = true;
       runsStarted += 1;
       runExpected = false;
+      void contractFollowUp();
     } else if (record.type === "agent_settled") {
       runActive = false;
     } else if (record.type === "extension_ui_request" && typeof record.method === "string" && DIALOG_METHODS.has(record.method)) {

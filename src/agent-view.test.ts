@@ -244,6 +244,17 @@ const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "scouts.list": { params: {}, result: { scouts: [SCOUT] } },
   "gates.prove": { params: { repo: "." }, result: { proof: proof({ state: "running", running: true, failing: null, steps: [], flaky: [], endedAt: null }) } },
   "gates.get": { params: { id: "9c1d" }, result: { proof: proof() } },
+  "contracts.apply": {
+    params: { store: "team/plan", name: "api", op: { op: "update", path: "answer", text: "t" } },
+    result: {
+      store: "team/plan",
+      name: "api",
+      changed: ["run/contract/api/answer"],
+      notified: [{ wave: WAVE_ID, tag: "factory/w1", key: "record", task: "4ae7325b-1111-4000-8000-000000000000" }],
+      kept: [],
+      done: [{ wave: WAVE_ID, tag: "factory/w1", key: "docs", task: "4ae7325b-2222-4000-8000-000000000000" }],
+    },
+  },
 };
 
 const FORBIDDEN = [/\/home/, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, new RegExp(SESSION.slice(0, 13)), /SECRET-REQUEST/, /secret patch/];
@@ -292,6 +303,9 @@ describe("agentView", () => {
     );
     expect(agentView("waves.add", FIXTURES["waves.add"].params, FIXTURES["waves.add"].result)).toBe("wave 3f2a91c0  building  1/3 done  factory/w1 · added: fix running");
     expect(agentView("waves.remove", {}, { removed: WAVE_ID })).toBe("removed wave 3f2a91c0");
+    expect(agentView("contracts.apply", {}, FIXTURES["contracts.apply"].result)).toBe(
+      "contract api: 1 fact changed · told: factory/w1:record · done, may need a follow-up task: factory/w1:docs",
+    );
   });
 
   test("tasks.diff: the file list with counts, never the patch", () => {

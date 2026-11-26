@@ -337,7 +337,8 @@ export function startTask(deps: OpsDeps, json: string): Promise<OpResult> {
       record(deps, "factory-round", { round: 1, trigger: "start" });
       record(deps, "factory-state", { state: "running", round: 1, reason: "start" });
       // Everything that can fail from here on runs after this prompt: entries reach the file only once a message exists.
-      deps.sendUserMessage(coderRequest(task.request));
+      // A wave task's contracts go before the request in this first message only; the task records the request without them.
+      deps.sendUserMessage(coderRequest(payload.prefix === undefined ? task.request : `${payload.prefix}\n\n${task.request}`));
       return { ok: true };
     } finally {
       session.starting = false;

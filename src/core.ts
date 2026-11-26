@@ -28,6 +28,7 @@
  *   `WaveView`, what the wave's runner asks)
  */
 import { FactoryError, oneLine, WAIT_TIMEOUT_MS, type Handler, type Params } from "./core-shared.ts";
+import { CONTRACT_HANDLERS } from "./core-contracts.ts";
 import { SETTINGS_HANDLERS } from "./core-settings.ts";
 import { TASK_HANDLERS } from "./core-tasks.ts";
 import { WAIT_HANDLERS } from "./core-wait.ts";
@@ -209,6 +210,12 @@ export const ACTIONS = {
         description:
           "Waves this one waits for, by tag (the newest not cancelled) or id, of the same repository and target: the wave is queued, gets its branch off the target's tip and starts once every one is merged",
       },
+      contracts: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Contracts (memory-store directories run/contract/<name>/ or documents run/contract/<name>.md in plan) the wave's coders work by; core is added when it exists. Needs plan and memory-store on PATH",
+      },
       overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, remote: REMOTE } },
     },
     ["repo", "tag", "title", "request", "tasks"],
@@ -276,6 +283,19 @@ export const ACTIONS = {
     true,
   ),
   "gates.get": spec("One gate proof: state (running, passed, flaky, failing), steps, flaky names, the failing step. Answers {proof}", { id: { type: "string", description: "The proof id or a unique prefix of it" } }, ["id"], false),
+  "contracts.apply": spec(
+    "Change one fact of a contract (one memory-store op) and tell the tasks of every wave listing it: running ones get a follow-up, others keep it for their next turn (waiting_answer: with its answer), pending ones nothing; done ones are answered and reported. Answers {store, name, changed, notified, kept, done}",
+    {
+      store: { type: "string", description: "The memory-store of the contract (the waves' plan)" },
+      name: { type: "string", description: "The contract's name (run/contract/<name>/ or run/contract/<name>.md)" },
+      op: {
+        type: "object",
+        description: "One memory-store op: {op: add|update|retire|write_doc, path: the fact's path inside the contract, ...} (a one-document contract: write_doc, path omitted)",
+      },
+    },
+    ["store", "name", "op"],
+    true,
+  ),
 } satisfies Record<string, ActionSpec>;
 
 export type ActionName = keyof typeof ACTIONS;
@@ -333,7 +353,7 @@ let handlers: Record<ActionName, Handler> | undefined;
  * module, so an area module loaded first may not have finished when this one runs.
  */
 function handlersByName(): Record<ActionName, Handler> {
-  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS, ...SCOUT_HANDLERS, ...PROOF_HANDLERS };
+  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS, ...SCOUT_HANDLERS, ...PROOF_HANDLERS, ...CONTRACT_HANDLERS };
   return handlers;
 }
 

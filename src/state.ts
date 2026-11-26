@@ -39,6 +39,8 @@ export interface StartPayload {
   request: string;
   title: string;
   settings: Settings;
+  /** Only in the payload, never recorded: goes before the request in the coder's first message (a wave task's contracts). */
+  prefix?: string;
 }
 
 export interface Task extends StartPayload {
@@ -458,7 +460,8 @@ export function parseStartPayload(text: string): StartPayload {
     throw new Error("payload is not JSON");
   }
   if (!isRecord(raw)) throw new Error("payload is not an object");
-  const { request, title, settings } = raw;
+  const { request, title, settings, prefix } = raw;
+  if (prefix !== undefined && typeof prefix !== "string") throw new Error("prefix must be a string");
   if (typeof request !== "string" || request.trim() === "") throw new Error("request must be a non-empty string");
   if (typeof title !== "string" || title.trim() === "") throw new Error("title must be a non-empty string");
   if (!isRecord(settings)) throw new Error("settings must be an object");
@@ -469,5 +472,5 @@ export function parseStartPayload(text: string): StartPayload {
   if (maxRounds === undefined) throw new Error(`settings.maxRounds must be an integer from 1 to ${MAX_ROUNDS_LIMIT}`);
   if (review === undefined) throw new Error("settings.review must be a boolean");
   if (models === undefined) throw new Error("settings.models must be an object");
-  return { request, title, settings: { branch, merge, maxRounds, review, models } };
+  return { request, title, settings: { branch, merge, maxRounds, review, models }, ...(typeof prefix === "string" && prefix.trim() !== "" ? { prefix } : {}) };
 }

@@ -22,6 +22,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
+import { contractsForLaunch } from "./contracts.ts";
 import { git, primaryCheckout } from "./git.ts";
 import { inboxReadPath, lastFactoryState, taskMainBranch } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
@@ -57,9 +58,9 @@ export async function defaultBranch(repo: string): Promise<string> {
   throw new Error(`${repo}: no default branch (origin/HEAD, main and master do not exist locally)`);
 }
 
-/** The prompt that starts a task in its session. */
-export function startCommand(title: string, request: string, settings: Settings): string {
-  const payload: StartPayload = { request, title, settings };
+/** The prompt that starts a task in its session; `prefix` (its contracts) goes before the request in the coder's first message only. */
+export function startCommand(title: string, request: string, settings: Settings, prefix?: string): string {
+  const payload: StartPayload = { request, title, settings, ...(prefix === undefined ? {} : { prefix }) };
   return `/factory start ${JSON.stringify(payload)}`;
 }
 
@@ -159,6 +160,8 @@ export interface LaunchInput {
   wave?: string;
   /** The Pi session that starts the task (`TaskRecord.origin`). */
   origin?: string | null;
+  /** The wave's contracts (in the memory-store `plan`): read now, named in the coder's first message, stamped on the record. */
+  contracts?: readonly string[];
   /**
    * Checked once the worktree on the target `branch` exists, right before the record is written; a throw undoes the
    * start. `tasks.start` checks there again that no open wave owns the branch (a `waves.start` racing it).
@@ -189,6 +192,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
   if (config.exitCode !== 0) {
     throw new LaunchRefusedError(`${repo}: branch ${settings.branch} has no factory.yaml (write one with /factory init or the config.write action, and commit it)`);
   }
+  const contracts = input.contracts !== undefined && input.contracts.length > 0 && input.plan ? await contractsForLaunch(input.plan, input.contracts) : undefined;
 
   const id = crypto.randomUUID();
   const name = `${slug(input.title)}-${id.slice(0, 8)}`;
@@ -219,11 +223,12 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
         plan: input.plan ?? null,
         wave: input.wave ?? null,
         origin: input.origin ?? null,
+        ...(contracts === undefined ? {} : { contracts: contracts.stamps }),
       };
       await writeTask(record);
       recorded = true;
       await lockTask(id);
-      await sendCommand(record, startCommand(input.title, input.request, settings), input.env);
+      await sendCommand(record, startCommand(input.title, input.request, settings, contracts?.prefix), input.env);
       return record;
     } catch (error) {
       if (recorded) await removeTask(id).catch(() => undefined);

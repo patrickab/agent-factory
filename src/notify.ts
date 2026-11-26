@@ -11,6 +11,8 @@
  *   never start, nothing else moving it), `never` (queued after a wave that was cancelled), `merged`. A queued wave
  *   that can still start says nothing
  * - Gate proof events (`gates-prove.ts`): `passed`, `flaky`, `failing`, `interrupted`; key `proof:<id>:<event>`
+ * - `contract` events (`contracts.apply` changed a contract the wave's done tasks worked by): one notice each, key
+ *   `wave:<id>:contract:<index of the event>`
  * - `key` = `<task|wave>:<id>:<event>:<n>`. A task's n is its round, with the state entry's time after `@`: a coder may
  *   ask twice in one round. A wave's n is the index of its last `stage` event in the log for a stage; for
  *   `interrupted`, which no stage event marks, the length of its log; for `unreachable` the keys of the tasks that can
@@ -82,6 +84,16 @@ function waveNotice({ view, stuck, events }: NoticeWave, origin: string): Notice
   return { key: `wave:${view.id}:${event}:${n}`, origin, text: `factory: wave ${view.tag} ${what}\n${waveBlock(view)}` };
 }
 
+/** One notice per `contract` event of the wave (`contracts.apply` changed a contract its done tasks worked by). */
+function contractNotices({ view, events }: NoticeWave, origin: string): Notice[] {
+  return events.flatMap((entry, index) => {
+    if (entry.kind !== "contract") return [];
+    const { name, paths, done } = entry as { kind: "contract"; name: string; paths: string[]; done: string[] };
+    const text = `factory: contract ${name} changed (${paths.join(", ")}): wave ${view.tag} has done tasks ${done.join(", ")}, which may need a follow-up task`;
+    return [{ key: `wave:${view.id}:contract:${index}`, origin, text }];
+  });
+}
+
 /** The one key of a scout's report, whoever delivers it. */
 export function scoutNoticeKey(id: string): string {
   return `scout:${id}:report`;
@@ -104,6 +116,7 @@ export function pendingNotices(tasks: readonly TaskView[], waves: readonly Notic
   for (const wave of waves) {
     const notice = wave.view.origin === null ? null : waveNotice(wave, wave.view.origin);
     if (notice !== null) notices.push(notice);
+    if (wave.view.origin !== null) notices.push(...contractNotices(wave, wave.view.origin));
   }
   for (const task of tasks) {
     if (task.origin === null) continue;

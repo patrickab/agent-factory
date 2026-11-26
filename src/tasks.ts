@@ -46,6 +46,27 @@ export interface TaskRecord {
    * it merged, which it never owned. Internal: no `TaskView` shows it.
    */
   kind?: "merge_request";
+  /**
+   * A wave's task with contracts (`contracts.ts`): each contract's stamp (its hash and its facts' hashes) as the task
+   * last saw it. Absent: no contracts.
+   */
+  contracts?: Record<string, ContractStamp>;
+  /** Contract follow-ups `contracts.apply` left for the task's next coder turn (it was not running). */
+  contractNotes?: string[];
+}
+
+/** A contract as a task saw it: the hash of the whole and of each fact (by its path in the store). */
+export type ContractStamp = { hash: string; facts: Record<string, string> };
+
+function parseStamps(raw: unknown): Record<string, ContractStamp> {
+  const bad = () => new Error("contracts must map names to {hash, facts}");
+  if (!isRecord(raw)) throw bad();
+  const stamps: Record<string, ContractStamp> = {};
+  for (const [name, stamp] of Object.entries(raw)) {
+    if (!isRecord(stamp) || typeof stamp.hash !== "string" || !isRecord(stamp.facts) || !Object.values(stamp.facts).every((hash) => typeof hash === "string")) throw bad();
+    stamps[name] = { hash: stamp.hash, facts: { ...(stamp.facts as Record<string, string>) } };
+  }
+  return stamps;
 }
 
 const RECORD_KEYS = ["id", "repo", "worktree", "branch", "title", "sessionId", "sessionDir", "createdAt"] as const;
@@ -106,7 +127,11 @@ export function parseTaskRecord(raw: unknown, id: string): TaskRecord {
   if (origin !== null && (typeof origin !== "string" || origin === "")) throw new Error("origin must be a non-empty string or null");
   const fields = {} as Record<(typeof RECORD_KEYS)[number], string>;
   for (const key of RECORD_KEYS) fields[key] = raw[key] as string;
-  return { ...fields, tag, plan, wave, origin, ...(raw.kind === "merge_request" ? { kind: "merge_request" as const } : {}) };
+  const contracts = raw.contracts == null ? {} : { contracts: parseStamps(raw.contracts) };
+  const notes = raw.contractNotes;
+  if (notes != null && (!Array.isArray(notes) || !notes.every((note) => typeof note === "string"))) throw new Error("contractNotes must be an array of strings");
+  const contractNotes = notes == null || notes.length === 0 ? {} : { contractNotes: [...(notes as string[])] };
+  return { ...fields, tag, plan, wave, origin, ...(raw.kind === "merge_request" ? { kind: "merge_request" as const } : {}), ...contracts, ...contractNotes };
 }
 
 /** Temp file in the same directory + rename: a reader sees the old record or the new one, never half of one. */
@@ -124,7 +149,7 @@ export async function writeTask(record: TaskRecord): Promise<void> {
 }
 
 /** The record in `<id>.json`. Throws an `Error` naming the file when `id` is no task id or the file is invalid. */
-async function readTask(id: string): Promise<TaskRecord> {
+export async function readTask(id: string): Promise<TaskRecord> {
   const path = taskPath(id);
   if (!TASK_ID.test(id)) throw new Error(`${path}: ${id} is not a task id`);
   try {

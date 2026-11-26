@@ -11,6 +11,7 @@
  */
 import { existsSync } from "node:fs";
 import type { ActionName } from "./core.ts";
+import { waveContracts } from "./core-contracts.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, requireFactoryModels, wantedModels } from "./core-settings.ts";
 import { cancelTask, cents, droppedWork, FINAL_STATES, rawScoutingCost, rawUsage, removable, requireRemovable, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
@@ -372,7 +373,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
     } else {
       try {
         // The task's size picks its coder's model of the wave's; the reviewer's stays the wave's.
-        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, size: task.model, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal });
+        record = await launchTask({ repo: declaration.repo, title: task.title, request: task.request, overrides, size: task.model, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
@@ -395,6 +396,7 @@ export const WAVE_HANDLERS = {
     if (request === undefined) throw new FactoryError("invalid", "waves.start needs a request (the reviewer's instructions) that is not empty");
     if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "waves.start: plan must not be empty");
     const specs = validateTaskSpecs(params.tasks);
+    const contracts = await waveContracts(params.plan as string | undefined, params.contracts);
     let target: string | undefined;
     let overrides: WaveOverrides;
     try {
@@ -442,6 +444,7 @@ export const WAVE_HANDLERS = {
       target,
       base,
       ...(queued ? { after } : {}),
+      ...(contracts === undefined ? {} : { contracts }),
       origin: origin ?? null,
       createdAt: new Date().toISOString(),
       overrides,

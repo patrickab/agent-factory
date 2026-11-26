@@ -146,6 +146,15 @@ describe("startTask", () => {
     expect(pi.deps.session.snapshot?.task.request).toBe("Add task.txt");
     expect(pi.deps.session.snapshot?.state).toBe("running");
   });
+
+  test("a wave task's contracts go before the request in the first message, the task records the request without them", async () => {
+    const pi = fake(addTaskWorktree());
+    const start = JSON.stringify({ ...JSON.parse(payload()), prefix: "Your contracts: core" });
+    expect(await startTask(pi.deps, start)).toEqual({ ok: true });
+    expect(pi.userMessages).toEqual([coderRequest("Your contracts: core\n\nAdd task.txt")]);
+    expect(pi.deps.session.snapshot?.task.request).toBe("Add task.txt");
+    expect(JSON.stringify(pi.entries)).not.toContain("Your contracts");
+  });
 });
 
 describe("approveTask", () => {

@@ -70,6 +70,8 @@ export interface WaveDeclaration {
   target: string;
   base: string | null;
   after?: string[];
+  /** The contracts (memory-store, the store is `plan`) its tasks work by (absent: none). */
+  contracts?: string[];
   origin: string | null;
   createdAt: string;
   /** Stored only: not part of a `WaveView`. A file without it reads as `{}`. */
@@ -104,7 +106,9 @@ export type WaveEvent =
   | ({ kind: "gate"; commit?: string } & WaveGate)
   | ({ kind: "review" } & WaveReview)
   | ({ kind: "merge" } & WaveMerge)
-  | ({ at: string; kind: "remote" } & Partial<WaveRemote>);
+  | ({ at: string; kind: "remote" } & Partial<WaveRemote>)
+  /** `contracts.apply` changed the contract `name` (its facts `paths`); `done`: the wave's done tasks, reported to the supervisor. */
+  | { at: string; kind: "contract"; name: string; paths: string[]; done: string[] };
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 /** An event to append; `at` defaults to now. */
@@ -266,6 +270,7 @@ function strings(raw: Record<string, unknown>, key: string): string[] | undefine
 export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration {
   if (!isRecord(raw)) throw new Error("the declaration is not an object");
   const after = strings(raw, "after");
+  const contracts = strings(raw, "contracts");
   const declaration: WaveDeclaration = {
     id: str(raw, "id"),
     repo: str(raw, "repo"),
@@ -278,6 +283,7 @@ export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration 
     target: str(raw, "target"),
     base: after === undefined ? str(raw, "base") : strOrNull(raw, "base"),
     ...(after === undefined ? {} : { after }),
+    ...(contracts === undefined ? {} : { contracts }),
     origin: strOrNull(raw, "origin"),
     createdAt: str(raw, "createdAt"),
     overrides: parseWaveOverrides(raw.overrides),
@@ -363,6 +369,8 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       for (const key of ["url", "pushed", "error"] as const) if (key in raw) event[key] = strOrNull(raw, key);
       return event;
     }
+    case "contract":
+      return { at, kind, name: str(raw, "name"), paths: strings(raw, "paths") ?? [], done: strings(raw, "done") ?? [] };
     default:
       throw new Error(`kind ${JSON.stringify(kind)} is no wave event`);
   }
@@ -579,6 +587,8 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         fold.remote = { ...(fold.remote ?? { number: null, url: null, pushed: null, error: null }), ...fields };
         break;
       }
+      case "contract":
+        break;
       default:
         throw new Error(`kind ${JSON.stringify((event as { kind: unknown }).kind)} is no wave event`);
     }

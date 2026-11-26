@@ -550,7 +550,19 @@ const RENDERERS: Record<string, Renderer> = {
   ...SCOUT_RENDERERS,
   "gates.prove": (_params, result: { proof: ProofView }) => `started ${proofHeader(result.proof)}`,
   "gates.get": (_params, result: { proof: ProofView }) => proofBlock(result.proof),
+  "contracts.apply": (_params, result: { name: string; changed: string[]; notified: ContractTask[]; kept: ContractTask[]; done: ContractTask[] }) => {
+    const keys = (tasks: ContractTask[]) => tasks.map((task) => `${task.tag}:${task.key}`).join(", ");
+    if (result.changed.length === 0) return `contract ${result.name}: nothing changed`;
+    return [
+      `contract ${result.name}: ${plural(result.changed.length, "fact")} changed`,
+      ...(result.notified.length > 0 ? [`told: ${keys(result.notified)}`] : []),
+      ...(result.kept.length > 0 ? [`next turn: ${keys(result.kept)}`] : []),
+      ...(result.done.length > 0 ? [`done, may need a follow-up task: ${keys(result.done)}`] : []),
+    ].join(" · ");
+  },
 };
+
+type ContractTask = { wave: string; tag: string; key: string; task: string };
 
 /** Whether `agentView` renders `action`. */
 export function hasAgentView(action: string): boolean {

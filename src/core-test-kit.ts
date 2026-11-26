@@ -73,6 +73,7 @@ const prompt = new Promise((done) => (gotPrompt = done));
 })();
 const message = JSON.parse(await prompt).message;
 appendFileSync(process.env.FAKE_PI_LOG, "prompt " + message.split(" ").slice(0, 2).join(" ") + "\\n");
+if (process.env.FAKE_PI_MESSAGE_LOG) appendFileSync(process.env.FAKE_PI_MESSAGE_LOG, JSON.stringify(message) + "\\n");
 if (process.env.FAKE_PI_ENV_LOG) appendFileSync(process.env.FAKE_PI_ENV_LOG, "secret " + (process.env.FACTORY_TEST_SECRET ?? "-") + "\\n");
 const answer = () => emit({ id: "1", type: "response", command: "prompt", success: true, data: { disposition: "handled" } });
 if (message.startsWith("/factory start ")) {
