@@ -14,6 +14,8 @@ hooks:
   #   - [bun, install, --frozen-lockfile]   # or [npm, ci], [uv, sync, --frozen]
   after_code: []
   after_merge: []
+# Every gate command takes one of the machine's test slots (FACTORY_SLOTS, default cores / 4) and gets
+# FACTORY_TEST_JOBS = cores / slots as its parallelism; hooks take none. Run tests by hand with `factory slot -- <cmd>`.
 # Fast checks (lint, types, format) after every coder turn.
 gates: []
 # Everything, tests included: run in the merge queue on the rebased branch,

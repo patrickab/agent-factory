@@ -94,7 +94,7 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   `scripts/changed-tests.ts` is a command for `task_gates` and `merge_gates`: it runs the test files the change reaches
   (a changed `*.test.ts`, the test next to a changed source, the tests importing it, transitively over relative
   imports). The change starts at `$FACTORY_BASE`, else at the merge base with the default branch; `--all` runs every
-  test file. One `bun test` process per file, the cores but two at once (`FACTORY_TEST_JOBS` overrides), at low
+  test file. One `bun test` process per file, the cores but two at once (`FACTORY_TEST_JOBS` overrides; the factory's test slots set it, below), at low
   priority; a file that fails beside the others runs once more alone: passing then, it passes and is printed as
   `gate-flaky: <file>`, else `gate-reran: <file>`. So the gate records it `flaky` and never runs the suite again
 - `protected`: globs the coder must not change. Default: `factory.yaml`, `.factory/**`
@@ -113,6 +113,11 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 
 ### Core (`src/core.ts`)
 
+- Features: one module per feature (`src/feature-<name>.ts`) exports `{name, actions, handlers, renderers, notices?, toolBlurb?}` (`src/feature.ts`);
+  `src/features.ts` lists them, one line each: the core ones first (settings, tasks, wait, waves), then the others sorted.
+  `core.ts` (`ACTIONS`, handlers), `agent-view.ts` (renderers), `notify.ts` (notices) and `factory-tool.ts` (the tool's
+  description) read that list, in that order; a duplicate action name throws on load. A new action goes in its feature's
+  module only; a new feature is a new module and one line in `features.ts`
 - `core.ts` is the one module clients import, the package's entry (`import { callAction } from "agent-factory"`): `ACTIONS` (name -> `{summary, params (JSON schema), mutates, hostOnly}`)
   and `callAction(name, params, {cwd?, signal?, env?, origin?})`, plain JSON in and out (`origin`: the calling Pi
   session's id, which `waves.start` records; the Pi tool passes it, the CLI and MCP do not). A failure throws
@@ -277,7 +282,13 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   the target); `merge` records the commit range and the queue wait
 - The reviewer has no time limit, a wave's and a task's alike: it runs until it answers or is cancelled
   (`waves.cancel`, `tasks.cancel`). `timeout`, a status of older review entries, still reads
-- A rebase conflict, failed gates (`gates`; exit 75: `infra`), a dirty worktree (`dirty`), a failed reviewer
+- A rebase conflict where both sides only added lines (lists, imports, docs) is resolved by the factory, ours then
+  theirs, per hunk, no model involved (`additions-merge.ts`; never git's `union` driver); the commit goes on to the
+  gates and the wave's view lists the files (`resolved`). Any other rebase conflict, at review or at merge, puts the wave
+  back to `building` with a task `fix: resolve the conflict of <tag> with <target>` (key `conflict-<n>`): its worktree is
+  the wave's whole change on the target's tip with the markers left, its request names the files and the subjects of both
+  sides' commits (`conflicts` in the view). At most two per wave, then `blocked` `conflict`
+- A failed rebase of another kind, failed gates (`gates`; exit 75: `infra`), a dirty worktree (`dirty`), a failed reviewer
   (`review_failed`) or anything else (`infra`) ends it `blocked` with that `reason`, and nothing is deleted
 - The gates and the reviewer see exactly the committed tree that reaches the target: before the rebase, after it (the
   target's .gitignore may stop ignoring a file) and before the merge, a changed tracked file or an untracked file that
@@ -292,6 +303,18 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   before it started) and `usage`, `counts` (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus
   reviews), `reviews`, `gates` (each with `flaky` when a step passed on its rerun), `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
   answers `{events, next}` (`since`/`next` count events)
+
+### Test slots (`src/test-slots.ts`)
+
+- Every gate command of every repository this factory serves (`gates`, `task_gates`, `merge_gates`, `gates.prove`, and
+  the rerun of a flaky one) runs holding one of K slots: lock files `<agent dir>/factory/slots/<n>.lock`, K =
+  `FACTORY_SLOTS`, default max(1, cores / 4 rounded down). A dead holder frees its slot (the lock dies with the process)
+- The command gets `FACTORY_TEST_JOBS` = cores / K rounded down (min 1) unless the env sets it, and `FACTORY_SLOT_HELD=1`;
+  a process with that set takes no slot. Hooks take none
+- Waiting for a slot ends on cancel and stop; the task's or wave's view says `waiting for a test slot`
+  (`waitingForSlot`)
+- `factory slot -- <command...>` runs a command holding one slot, its exit code passed through; with
+  `FACTORY_SLOT_HELD` set it runs it directly. For test runs outside the gates
 
 ### Files in step (`src/sync.ts`)
 
@@ -339,6 +362,7 @@ factory repos.add                                       # repo = the current dir
 factory tasks.start '{"title": "feat: add b", "request": "Add b.txt", "tag": "me/w1"}'
 echo '{"tag": "me/w1"}' | factory tasks.wait -           # params from stdin
 factory tasks.list --json                               # the full view, for scripts
+factory slot -- bun test                                    # holds a test slot while it runs
 factory --core-path                                     # absolute path of src/core.ts, for hosts that import it
 ```
 

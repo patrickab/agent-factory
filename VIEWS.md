@@ -241,6 +241,12 @@ gates.get {id: "9c1d"}
 | `config.get` | `{repo, branch?}` | `{exists: boolean, text: string \| null, draft: string \| null, source: string[]}` | `factory.yaml (committed on waves)` + the text; without one: `no factory.yaml` + the draft |
 | `config.write` | `{repo, text, overwrite?}` | `{path: string}` | `wrote factory.yaml (not committed)` |
 
+## Waves and tasks: throughput lines
+
+- `waiting for a test slot`: a task's or wave's runner waits for one of the machine's test slots (`waitingForSlot: true` in the full view)
+- `resolved` (full view, absent when none): the rebases onto the target whose conflicts only added lines on both sides, resolved by the factory `{at, phase: "review" | "merge", onto, files}`
+- `conflicts` (full view, absent when none): the conflict tasks added to the wave `{at, phase: "review" | "merge", key: "conflict-<n>", head, onto, files}`; the task is a `fix: resolve the conflict of ...` in the task list. Not in the agent view
+
 ## Errors
 
 The core throws `FactoryError(code, message)`. The CLI with `--json` prints `factory: <code>: <message>` to stderr

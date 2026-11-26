@@ -55,7 +55,8 @@ What the factory is and how it works: `README.md`. Its views: `VIEWS.md`. Open w
   development branch; merge into the default branch only while no wave of any repository is running
 - Every change is additive for declarations that do not use it: old logs and records still parse and fold to the
   same state
-- One registration in `src/core.ts` serves the CLI, the MCP server and the Pi tool. A new action or field updates
+- A new feature is one module (`src/feature-<name>.ts`) and one line in `src/features.ts`; its actions, renderers and
+  notices register from there. One registration serves the CLI, the MCP server and the Pi tool. A new action or field updates
   `VIEWS.md`, `README.md` and the tool's description
 - Tests fake `pi`, git remotes, `memory-store` and time through the kits; none reaches a model or the network. Each
   test uses its own ids: a timed-out test must not reach into the next
