@@ -6,11 +6,13 @@
 import { randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { caseDigits, caseSerial, caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
+import { archiveRoot, archiveWave, waveArchiveDir } from "./archive.ts";
+import { callerKey, scoutsDir } from "./scouts.ts";
 import { worktreePath } from "./launch.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath, waveReviewsDir } from "./wave-poke.ts";
@@ -947,5 +949,100 @@ describe("pathFree", () => {
     const declaration = { id: "20000000-aaaa-4000-8000-000000000003", repo: "/srv/repo" } as Parameters<typeof pathFree>[0];
     expect(pathFree(declaration, "cannot open /workspace")).toBe("cannot open <path>");
     expect(pathFree(declaration, "cannot open /workspace/x/y.ts")).toBe("cannot open <path>");
+  });
+});
+
+describe("the archive of a wave (contract archive-1)", () => {
+  const home = () => join(caseDir, "agent", "factory");
+  const session = (key: string) => join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseSerial()}-${key}.jsonl`);
+  /** Every file under `dir` with its mtime, by its path relative to `dir`. */
+  const mtimes = (dir: string): Record<string, number> =>
+    Object.fromEntries(
+      (readdirSync(dir, { recursive: true, withFileTypes: true }) as import("node:fs").Dirent[])
+        .filter((entry) => entry.isFile())
+        .map((entry) => {
+          const path = join(entry.parentPath, entry.name);
+          return [path.slice(dir.length + 1), statSync(path).mtimeMs];
+        }),
+    );
+
+  test("merge then remove: the archive in the factory home (no plan) holds the log, reviews, sessions and scouts; again is a no-op, a grown file is replaced", async () => {
+    const repo = await waveRepo();
+    const waveScout = join(scoutsDir(), callerKey({ kind: "wave", id: WAVE() }), "scout-w");
+    const taskScout = join(scoutsDir(), callerKey({ kind: "task", id: taskId(1) }), "scout-t");
+    for (const dir of [waveScout, taskScout]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "events.jsonl"), `${JSON.stringify({ kind: "usage", cost: 0.25 })}\n`);
+    }
+    expect(await runWave(WAVE())).toBe(0);
+    expect((await getWave()).stage).toBe("merged");
+    const fold = foldWave((await readWave(WAVE())).declaration, (await readWave(WAVE())).events);
+    const dir = join(home(), "archive", "factory", "w1", WAVE().slice(0, 8));
+    expect(waveArchiveDir(fold)).toBe(dir);
+    expect(readFileSync(join(dir, "wave.jsonl"), "utf8")).toContain('"stage":"merged"');
+    expect(readFileSync(join(dir, "reviews", "round-1.request.md"), "utf8")).toBe(readFileSync(join(waveReviewsDir(WAVE()), "round-1.request.md"), "utf8"));
+    for (const key of ["a", "b"]) {
+      expect(readFileSync(join(dir, "tasks", `${key}.jsonl`), "utf8")).toBe(readFileSync(session(key), "utf8"));
+      expect(Math.abs(statSync(join(dir, "tasks", `${key}.jsonl`)).mtimeMs - statSync(session(key)).mtimeMs)).toBeLessThan(1);
+    }
+    expect(existsSync(join(dir, "scouts", `wave-${WAVE()}`, "scout-w", "events.jsonl"))).toBe(true);
+    expect(existsSync(join(dir, "scouts", `task-${taskId(1)}`, "scout-t", "events.jsonl"))).toBe(true);
+    const index = JSON.parse(readFileSync(join(dir, "index.json"), "utf8"));
+    expect(index).toEqual({
+      id: WAVE(),
+      tag: "factory/w1",
+      repo,
+      plan: null,
+      origin: null,
+      archivedAt: expect.any(String),
+      tasks: { a: { id: taskId(1), sessionId: `session-${RUN}-${caseSerial()}-a` }, b: { id: taskId(2), sessionId: `session-${RUN}-${caseSerial()}-b` } },
+    });
+    // Again: nothing is written.
+    const before = mtimes(dir);
+    await Bun.sleep(20);
+    expect(await archiveWave(fold)).toBe(dir);
+    expect(mtimes(dir)).toEqual(before);
+    // A session that grew is replaced, the rest stays.
+    appendFileSync(session("a"), `${JSON.stringify({ type: "custom", customType: "more" })}\n`);
+    await archiveWave(fold);
+    expect(readFileSync(join(dir, "tasks", "a.jsonl"), "utf8")).toBe(readFileSync(session("a"), "utf8"));
+    const after = mtimes(dir);
+    expect(Object.keys(after).filter((path) => after[path] !== before[path])).toEqual([join("tasks", "a.jsonl")]);
+    // The removal archives again, then deletes the live files; the archive and the session files stay.
+    const log = readFileSync(join(home(), "waves", `${WAVE()}.jsonl`), "utf8");
+    expect(await callAction("waves.remove", { id: WAVE() })).toEqual({ removed: WAVE() });
+    expect(existsSync(join(home(), "waves", `${WAVE()}.jsonl`))).toBe(false);
+    expect(readFileSync(join(dir, "wave.jsonl"), "utf8")).toBe(log);
+    expect([existsSync(join(dir, "reviews", "round-1.request.md")), existsSync(join(dir, "tasks", "b.jsonl")), existsSync(session("a"))]).toEqual([true, true, true]);
+  });
+
+  test("a wave whose plan has a store is archived in the store's run/sessions; a plan without one in the factory home", async () => {
+    await waveRepo();
+    const store = join(caseDir, "store");
+    process.env.MEMORY_STORE_ROOT = store;
+    mkdirSync(join(store, "team", "plan"), { recursive: true });
+    const file = await readWave(WAVE());
+    const fold = foldWave(file.declaration, file.events);
+    expect(archiveRoot("team/plan")).toBe(join(store, "team", "plan", "run", "sessions"));
+    const dir = await archiveWave({ ...fold, plan: "team/plan" });
+    expect(dir).toBe(join(store, "team", "plan", "run", "sessions", "factory", "w1", WAVE().slice(0, 8)));
+    expect([existsSync(join(dir, "wave.jsonl")), existsSync(join(dir, "tasks", "a.jsonl")), JSON.parse(readFileSync(join(dir, "index.json"), "utf8")).plan]).toEqual([true, true, "team/plan"]);
+    expect(await archiveWave({ ...fold, plan: "team/none" })).toBe(join(home(), "archive", "factory", "w1", WAVE().slice(0, 8)));
+  });
+
+  test("an unwritable archive root never fails the merge; the removal is refused with nothing deleted, with force it goes on and says so", async () => {
+    await waveRepo();
+    mkdirSync(home(), { recursive: true });
+    writeFileSync(join(home(), "archive"), "not a directory\n");
+    expect(await runWave(WAVE())).toBe(0);
+    expect((await getWave()).stage).toBe("merged");
+    const refused = await callAction("waves.remove", { id: WAVE() }).then(
+      () => null,
+      (error: { code: string; message: string }) => error,
+    );
+    expect([refused?.code, refused?.message]).toEqual(["failed", expect.stringMatching(new RegExp(`^wave ${WAVE().slice(0, 8)}: the archive failed: .+; nothing was deleted$`))]);
+    expect([existsSync(join(home(), "waves", `${WAVE()}.jsonl`)), existsSync(join(home(), "tasks", `${taskId(1)}.json`))]).toEqual([true, true]);
+    expect(await callAction("waves.remove", { id: WAVE(), force: true })).toEqual({ removed: WAVE(), archive: expect.stringMatching(/^failed: /) });
+    expect(existsSync(join(home(), "waves", `${WAVE()}.jsonl`))).toBe(false);
   });
 });

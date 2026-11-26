@@ -15,6 +15,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { archiveTask } from "./archive.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { requireFactoryModels } from "./core-settings.ts";
 import { diffFileCounts, git, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
@@ -848,8 +849,11 @@ export const TASK_HANDLERS = {
       },
       async () => {
         const dropped = await droppedWork(record, params.force === true);
+        // A task outside a wave is archived before anything is deleted (a wave's tasks go with the wave's archive).
+        const archive = record.wave !== null ? null : await archiveTask(record).then(() => null, (error: unknown) => oneLine(errorText(error)));
+        if (archive !== null && params.force !== true) throw new FactoryError("failed", `task ${shortId(record)}: the archive failed: ${archive}; nothing was deleted`, { force: true });
         await deleteTask(record);
-        return { removed: record.id, dropped };
+        return archive === null ? { removed: record.id, dropped } : { removed: record.id, dropped, archive: `failed: ${archive}` };
       },
     );
   },

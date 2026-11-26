@@ -40,6 +40,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { basename } from "node:path";
 import { withoutPaths } from "./agent-view.ts";
+import { archiveWave } from "./archive.ts";
 import { loadTaskFiles, type FactoryConfig } from "./config.ts";
 import { FactoryError, oneLine, pokeQueuedAfter, startQueuedWave, startWaveTasks, waveReviewWorktree, waveTaskViews } from "./core.ts";
 import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, treeDiff, uncommittedFiles } from "./git.ts";
@@ -568,6 +569,7 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
     case "merged":
       // The push still to come is in the log before the resting stage: a runner that dies in between leaves it said.
       await leave("merged", null, null, [...gate, { kind: "merge", from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "", queueMs }, ...mergePending(fold)]);
+      await archiveWave(fold).catch((error: unknown) => log(id, `the archive failed: ${oneLine(errorText(error))}`));
       // Files in step (`sync.ts`): the other building waves on the target are rebased onto it, their running tasks marked.
       {
         const from = before as string | null;

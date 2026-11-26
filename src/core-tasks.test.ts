@@ -29,7 +29,9 @@ import {
   writeSession,
 } from "./core-test-kit.ts";
 import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
-import { lastFactoryState } from "./runner.ts";
+import { lastFactoryState, sessionFilePath } from "./runner.ts";
+import { taskArchiveDir } from "./archive.ts";
+import { callerKey, scoutsDir } from "./scouts.ts";
 import { listTasks, lockTask, taskLogPath, tasksDir, unlockTask, writeTask } from "./tasks.ts";
 import { appendWaveEvent, createWave } from "./waves.ts";
 
@@ -604,4 +606,39 @@ describe("tasks.start and queued waves", () => {
     await expectError(start(), "refused", "main-factory-w8 is the branch of wave 20000000, which is building");
     expect(await listTasks()).toEqual([]);
   });
+});
+
+describe("the archive of a task outside a wave (contract archive-1)", () => {
+  test("tasks.remove archives its session and scouts first; the session file stays", async () => {
+    process.env.FAKE_PI_HOLD = "1";
+    const repo = makeRepo();
+    const record = await startTask(repo);
+    await until(async () => (await stateOf(record)) === "running");
+    await stopRunners(record);
+    const scout = join(scoutsDir(), callerKey({ kind: "task", id: record.id }), "scout-1");
+    mkdirSync(scout, { recursive: true });
+    writeFileSync(join(scout, "events.jsonl"), "{}\n");
+    const session = (await sessionFilePath(record.sessionDir, record.sessionId)) as string;
+    expect(await callAction("tasks.remove", { id: record.id })).toEqual({ removed: record.id, dropped: null });
+    const dir = join(caseDir, "agent", "factory", "archive", "tasks", ...record.tag.split("/"), record.id.slice(0, 8));
+    expect(taskArchiveDir(record)).toBe(dir);
+    expect(readFileSync(join(dir, "session.jsonl"), "utf8")).toBe(readFileSync(session, "utf8"));
+    expect(existsSync(join(dir, "scouts", `task-${record.id}`, "scout-1", "events.jsonl"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(dir, "index.json"), "utf8"))).toEqual({ id: record.id, tag: record.tag, repo, plan: null, origin: null, archivedAt: expect.any(String), sessionId: record.sessionId });
+    expect(existsSync(record.worktree)).toBe(false);
+  }, 30_000);
+
+  test("an archive that fails refuses tasks.remove with nothing deleted; with force it goes on and says so", async () => {
+    process.env.FAKE_PI_HOLD = "1";
+    const repo = makeRepo();
+    const record = await startTask(repo);
+    await until(async () => (await stateOf(record)) === "running");
+    await stopRunners(record);
+    writeFileSync(join(caseDir, "agent", "factory", "archive"), "not a directory\n");
+    const refusal = await failure(callAction("tasks.remove", { id: record.id }));
+    expect([refusal.code, refusal.message]).toEqual(["failed", expect.stringMatching(new RegExp(`^task ${record.id.slice(0, 8)}: the archive failed: .+; nothing was deleted$`))]);
+    expect([existsSync(record.worktree), (await listTasks()).length]).toEqual([true, 1]);
+    expect(await callAction("tasks.remove", { id: record.id, force: true })).toEqual({ removed: record.id, dropped: null, archive: expect.stringMatching(/^failed: /) });
+    expect(existsSync(record.worktree)).toBe(false);
+  }, 30_000);
 });

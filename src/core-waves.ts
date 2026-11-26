@@ -10,6 +10,7 @@
  * - `noticeInputs`: the tasks and waves a Pi session started, for its notifications (`notify.ts`)
  */
 import { existsSync } from "node:fs";
+import { archiveWave } from "./archive.ts";
 import { waveContracts } from "./core-contracts.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
@@ -803,6 +804,12 @@ export const WAVE_HANDLERS = {
           force: true,
         });
       }
+      // Archived before anything is deleted: a failure refuses the removal, unless forced.
+      const archive = await archiveWave(foldWave(file.declaration, file.events)).then(
+        () => null,
+        (error: unknown) => oneLine(errorText(error)),
+      );
+      if (archive !== null && params.force !== true) throw new FactoryError("failed", `wave ${short}: the archive failed: ${archive}; nothing was deleted`, { force: true });
       for (const record of records) {
         await withTaskLock(
           record,
@@ -824,7 +831,7 @@ export const WAVE_HANDLERS = {
         if (deleted.exitCode !== 0) throw new FactoryError("failed", `wave ${short}: deleting its branch ${branch} failed: ${oneLine(deleted.output)}`);
       }
       await removeWave(id);
-      return { removed: id };
+      return archive === null ? { removed: id } : { removed: id, archive: `failed: ${archive}` };
     } finally {
       await unlockWave(id).catch(() => undefined);
     }

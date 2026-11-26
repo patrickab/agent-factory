@@ -117,7 +117,7 @@ export const WAVES = feature({
       ]),
     "waves.approve": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
     "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
-    "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
+    "waves.remove": (_params, result: { removed: string; archive?: string }) => `removed wave ${short(result.removed)}${result.archive ? `\narchive: ${result.archive}` : ""}`,
   },
   decides: {
     "waves.add": (params) => waveCause(params.id, ["rejected", "blocked"]),
@@ -144,7 +144,8 @@ export const WAVES = feature({
     },
     "waves.approve": (_params, result: { wave: WaveView }) => waveCard(result.wave, `approved wave ${result.wave.tag}`),
     "waves.cancel": (_params, result: { wave: WaveView }) => decision(waveCard(result.wave, ""), `cancelled wave ${result.wave.tag}`),
-    "waves.remove": (_params, result: { removed: string }) => card("action", "quiet", `removed wave ${shortId(result.removed)}`, { id: shortId(result.removed) }),
+    "waves.remove": (_params, result: { removed: string; archive?: string }) =>
+      card("action", "quiet", `removed wave ${shortId(result.removed)}`, { id: shortId(result.removed), ...(result.archive ? { rows: [{ label: "archive", text: result.archive }] } : {}) }),
   },
   toolBlurb:
     '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, reviewed as a whole and merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',

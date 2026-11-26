@@ -82,8 +82,8 @@ export const TASKS = feature({
     "tasks.approve": (_params, result: unknown) => taskHeader(asTask(result)),
     "tasks.retry": (_params, result: unknown) => taskHeader(asTask(result)),
     "tasks.cancel": (_params, result: unknown) => taskHeader(asTask(result)),
-    "tasks.remove": (_params, result: { removed: string; dropped: string | null }) =>
-      [`removed task ${short(result.removed)}`, ...(result.dropped ? [`dropped: ${result.dropped}`] : [])].join(" · "),
+    "tasks.remove": (_params, result: { removed: string; dropped: string | null; archive?: string }) =>
+      [`removed task ${short(result.removed)}`, ...(result.dropped ? [`dropped: ${result.dropped}`] : [])].join(" · ") + (result.archive ? `\narchive: ${result.archive}` : ""),
     "tasks.message": (_params, result: unknown) => {
       const task = asTask(result);
       return fields(`sent to task ${short(task.id)}`, taskState(task), task.round === null ? null : `round ${task.round}`);
@@ -112,8 +112,11 @@ export const TASKS = feature({
     "tasks.approve": (_params, result: unknown) => taskCard(asTask(result), `approved task ${shortId(asTask(result).id)}`),
     "tasks.retry": (_params, result: unknown) => decision(taskCard(asTask(result), ""), `retried task ${shortId(asTask(result).id)}`),
     "tasks.cancel": (_params, result: unknown) => decision(taskCard(asTask(result), ""), `cancelled task ${shortId(asTask(result).id)}`),
-    "tasks.remove": (_params, result: { removed: string; dropped: string | null }) =>
-      card("action", "quiet", `removed task ${shortId(result.removed)}`, { id: shortId(result.removed), rows: result.dropped ? [{ label: "dropped", text: result.dropped }] : [] }),
+    "tasks.remove": (_params, result: { removed: string; dropped: string | null; archive?: string }) =>
+      card("action", "quiet", `removed task ${shortId(result.removed)}`, {
+        id: shortId(result.removed),
+        rows: [...(result.dropped ? [{ label: "dropped", text: result.dropped }] : []), ...(result.archive ? [{ label: "archive", text: result.archive }] : [])],
+      }),
     // A decision only when it answers a question or a block: `actionCard` makes it one with the key it answers.
     "tasks.message": (params, result: unknown) => ({ ...decision(taskCard(asTask(result), ""), `sent to task ${shortId(asTask(result).id)}`, String(params.text ?? "")), kind: "action" }),
   },

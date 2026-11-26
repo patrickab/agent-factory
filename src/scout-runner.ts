@@ -10,7 +10,6 @@
  * - Imports only Bun, `node:` and plain plugin modules
  */
 import { writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "./run.ts";
 import { SCOUT_COMMIT_ENV, SCOUT_DIR_ENV, SCOUT_STORE_ENV } from "./scout-map.ts";
@@ -28,13 +27,9 @@ import {
 } from "./scouts.ts";
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText } from "./util.ts";
+import { memoryStoreRoot } from "./archive.ts";
 
 const POLL_MS = Number(process.env.FACTORY_SCOUT_POLL_MS) || 1_000;
-
-/** Where memory-store keeps its stores: `MEMORY_STORE_ROOT`, else `~/.pi/memory_store`. */
-function memoryStoreRoot(): string {
-  return process.env.MEMORY_STORE_ROOT || join(homedir(), ".pi", "memory_store");
-}
 
 /** The scout's brief: the concern, the map, the rules and the report's shape. */
 export function scoutPrompt(declaration: ScoutDeclaration, listing: string, mapDir: string): string {
