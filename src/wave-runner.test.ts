@@ -4,7 +4,7 @@
  * whose findings `$FAKE_VERDICT` chooses). `runWave` runs in this process; the poke tests start real detached runners.
  */
 import { randomBytes } from "node:crypto";
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +16,7 @@ import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath, waveReviewsDi
 import { pathFree, runWave } from "./wave-runner.ts";
 import { appendWaveEvent, createWave, foldWave, listWaves, lockWave, readWave, unlockWave, type WaveView } from "./waves.ts";
 import { MERGE_PUSH_PENDING } from "./remote.ts";
+import { pendingMarks } from "./sync.ts";
 
 const savedEnv = { ...process.env };
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-wave-runner-test-")));
@@ -197,6 +198,33 @@ describe("the wave runner", () => {
     expect(prompt).toContain(requestFile);
     expect(readFileSync(requestFile, "utf8")).toContain("## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n\n## Tasks of the wave\n");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
+  });
+
+  test("a merged wave calls waveLanded: the other building wave's branch is rebased onto the target, its running task marked, both in the log", async () => {
+    const repo = await waveRepo();
+    // A second wave on main, building, with a running task off its branch.
+    const other = `30000000-${RUN}-4000-8000-000000000002`;
+    const otherBranch = "main-factory-w2";
+    git(repo, "branch", otherBranch, "main");
+    const work = join(caseDir, "work2");
+    git(repo, "worktree", "add", "--quiet", work, otherBranch);
+    commit(work, "e.txt", "e\n", "feat: add e");
+    git(repo, "worktree", "remove", work);
+    await createWave({ id: other, repo, tag: "factory/w2", plan: null, title: "Wave two", request: "r", branch: otherBranch, target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
+    const running: TaskRecord = { id: taskId(7), repo, worktree: join(caseDir, "task-w2"), branch: "task-w2", title: "Two", sessionId: `session-${RUN}-w2`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:07.000Z", tag: "factory/w2", plan: null, wave: other, origin: null };
+    await writeTask(running);
+    writeFileSync(join(running.sessionDir, `2026-01-01T00-00-00-000Z_${running.sessionId}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "running", round: 1, reason: "r" } })}\n`);
+    const lines: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args.join(" ")));
+    try {
+      expect(await runWave(WAVE)).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await getWave()).stage).toBe("merged");
+    expect(git(repo, "rev-parse", `${otherBranch}^`)).toBe(git(repo, "rev-parse", "main"));
+    expect(lines.some((line) => line.includes(`wave ${other.slice(0, 8)}: ${otherBranch} rebased onto main, 1 task to sync`))).toBe(true);
+    expect((await pendingMarks(running.id)).map((mark) => mark.branch)).toEqual([otherBranch]);
   });
 
   test("the reviewer's request file holds each done task's title, request and coder's last message, no cancelled task", async () => {

@@ -5,16 +5,19 @@
  */
 import { randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_PROTECTED } from "./config.ts";
 import { LOCKFILES, snapshotTree, taskBase, taskDiff, taskGit } from "./git.ts";
+import { taskWave } from "./core-waves.ts";
+import { deleteTask } from "./launch.ts";
 import { mergeTask } from "./merge.ts";
 import { runCommand, type Exec } from "./run.ts";
+import { factoryHome } from "./settings.ts";
 import type { Settings, Task } from "./state.ts";
-import { pendingMarks, roundPassedGates, snapshotRef, SYNC_TYPE, syncAtTurnEnd, syncLeftOf, waveLanded, type SyncDraft } from "./sync.ts";
+import { pendingMarks, roundPassedGates, sessionTask, snapshotRef, SYNC_TYPE, syncAtTurnEnd, syncLeftOf, syncLogPath, syncRoundPassed, waveLanded, type SyncDraft } from "./sync.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { appendWaveEvent, createWave } from "./waves.ts";
 
@@ -151,10 +154,10 @@ describe("a sibling's merge reaches a running task", () => {
     expect(await syncAtTurnEnd(runCommand, a.worktree, a, branch, end.left)).toEqual({ drafts: [], follow: false, left: undefined });
   });
 
-  test("a task without the changed files is rebased without a message; a resting task is not marked", async () => {
+  test("a task without the changed files is rebased without a message; a blocked task is not marked", async () => {
     const { repo, branch, wave } = await waveRepo();
     const a = await runningTask(repo, wave, branch, ["mine.ts"]);
-    const resting = await runningTask(repo, wave, branch, ["shared.ts"], "waiting_approve");
+    const resting = await runningTask(repo, wave, branch, ["shared.ts"], "blocked");
     const b = await runningTask(repo, wave, branch, []);
     write(a.worktree, "mine.ts", "mine\n");
     write(b.worktree, "shared.ts", "changed\n");
@@ -184,6 +187,37 @@ describe("a sibling's merge reaches a running task", () => {
     expect(all[0]).toContain("- other.ts: feat: c");
     expect(all[0]).toContain("- shared.ts: feat: b");
     expect(end.drafts.filter((draft) => draft.type === "custom")).toHaveLength(1);
+    expect(await pendingMarks(a.id)).toHaveLength(0);
+  });
+
+  test("a task waiting for an answer, merging or waiting for approve is marked: its later follow-up names every changed file", async () => {
+    const { repo, branch, wave } = await waveRepo();
+    const waiting = await Promise.all(["waiting_answer", "merging", "waiting_approve"].map((state) => runningTask(repo, wave, branch, ["shared.ts", "other.ts"], state)));
+    const b = await runningTask(repo, wave, branch, []);
+    const c = await runningTask(repo, wave, branch, []);
+    write(b.worktree, "shared.ts", "by b\n");
+    await merge(b, branch, "feat: b");
+    write(c.worktree, "other.ts", "by c\n");
+    await merge(c, branch, "feat: c");
+    for (const task of waiting) {
+      expect(await pendingMarks(task.id)).toHaveLength(2);
+      // The answer (or a message after approve) runs a coder turn: its end syncs and names both changes.
+      const [message] = messages((await syncAtTurnEnd(runCommand, task.worktree, task, branch, undefined)).drafts);
+      expect(message).toContain("- shared.ts: feat: b");
+      expect(message).toContain("- other.ts: feat: c");
+    }
+  });
+
+  test("HEAD holding the tip already: synced without a message", async () => {
+    const { repo, branch, wave } = await waveRepo();
+    const a = await runningTask(repo, wave, branch, ["shared.ts"]);
+    const b = await runningTask(repo, wave, branch, []);
+    write(b.worktree, "shared.ts", "by b\n");
+    await merge(b, branch, "feat: b");
+    git(a.worktree, "merge", "--quiet", "--ff-only", branch);
+    const end = await syncAtTurnEnd(runCommand, a.worktree, a, branch, undefined);
+    expect(end.follow).toBe(false);
+    expect(end.drafts).toEqual([{ type: "custom", customType: SYNC_TYPE, data: expect.objectContaining({ kind: "synced", named: [], snapshot: null }) }]);
     expect(await pendingMarks(a.id)).toHaveLength(0);
   });
 });
@@ -284,7 +318,7 @@ test("a wave's merge rebases the other building wave's branch, then syncs its ta
   const oldTip = git(repo, "rev-parse", two.branch);
 
   const done = await waveLanded(runCommand, repo, one.wave, "main", before, after);
-  expect(done[0]).toContain("rebased onto main, 1 running task to sync");
+  expect(done[0]).toContain("rebased onto main, 1 task to sync");
   const newTip = git(repo, "rev-parse", two.branch);
   expect(newTip).not.toBe(oldTip);
   expect(git(repo, "rev-parse", `${two.branch}^`)).toBe(after);
@@ -319,8 +353,59 @@ test("a queued wave is left alone when another wave lands, and is synced once it
   const t = await runningTask(repo, queued, "main-factory-w2", []);
   const [b2, a2] = await land("landed2.ts");
   const done = await waveLanded(runCommand, repo, one.wave, "main", b2, a2);
-  expect(done[0]).toContain("rebased onto main, 1 running task to sync");
+  expect(done[0]).toContain("rebased onto main, 1 task to sync");
   expect(t.wave).toBe(queued);
+});
+
+describe("nothing piles up", () => {
+  /** A task of a wave synced once: its sync log and snapshot ref exist. */
+  async function synced(): Promise<{ repo: string; branch: string; wave: string; a: TaskRecord; b: TaskRecord }> {
+    const { repo, branch, wave } = await waveRepo();
+    const a = await runningTask(repo, wave, branch, ["shared.ts"]);
+    const b = await runningTask(repo, wave, branch, []);
+    write(a.worktree, "mine.ts", "mine\n");
+    write(b.worktree, "shared.ts", "by b\n");
+    await merge(b, branch, "feat: b");
+    await syncAtTurnEnd(runCommand, a.worktree, a, branch, undefined);
+    expect(existsSync(syncLogPath(a.id))).toBe(true);
+    expect(hasRef(repo, snapshotRef(a.id))).toBe(true);
+    return { repo, branch, wave, a, b };
+  }
+  const hasRef = (repo: string, ref: string) => spawnSync("git", ["show-ref", "--verify", "--quiet", ref], { cwd: repo }).status === 0;
+
+  test("a passed round drops the snapshot ref and the consumed lines; a mark still due stays", async () => {
+    const { repo, branch, wave, a } = await synced();
+    // A mark that came in during the round's gates: still due after it.
+    const c = await runningTask(repo, wave, branch, []);
+    write(c.worktree, "other.ts", "by c\n");
+    await merge(c, branch, "feat: c");
+    await syncRoundPassed(runCommand, a.worktree, a.id);
+    expect(hasRef(repo, snapshotRef(a.id))).toBe(false);
+    expect(readFileSync(syncLogPath(a.id), "utf8").trim().split("\n")).toHaveLength(1);
+    expect((await pendingMarks(a.id)).map((mark) => mark.commits.map((commit) => commit.subject))).toEqual([["feat: c"]]);
+    // Consumed by its sync, the next passed round leaves no log.
+    await syncAtTurnEnd(runCommand, a.worktree, a, branch, undefined);
+    await syncRoundPassed(runCommand, a.worktree, a.id);
+    expect(existsSync(syncLogPath(a.id))).toBe(false);
+  });
+
+  test("a removed task takes its sync log and snapshot ref with it", async () => {
+    const { repo, a } = await synced();
+    await deleteTask(a);
+    expect(existsSync(syncLogPath(a.id))).toBe(false);
+    expect(hasRef(repo, snapshotRef(a.id))).toBe(false);
+  });
+});
+
+test("sessionTask: the task of a session the factory keeps, none outside its home", async () => {
+  const { repo, branch, wave } = await waveRepo();
+  const a = await runningTask(repo, wave, branch, []);
+  expect(await sessionTask(a.sessionDir, a.sessionId)).toBeUndefined();
+  const kept: TaskRecord = { ...a, id: a.id.replace(/.$/, "f"), sessionId: `${a.sessionId}-kept`, sessionDir: join(factoryHome(), "sessions", "--repo--") };
+  await writeTask(kept);
+  expect((await sessionTask(kept.sessionDir, kept.sessionId))?.id).toBe(kept.id);
+  expect(await taskWave(kept.sessionDir, kept.sessionId)).toBe(wave);
+  expect(await taskWave(a.sessionDir, a.sessionId)).toBeNull();
 });
 
 test("a round passed its gates once a later step judged it", () => {

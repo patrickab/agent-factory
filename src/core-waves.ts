@@ -10,7 +10,6 @@
  * - `noticeInputs`: the tasks and waves a Pi session started, for its notifications (`notify.ts`)
  */
 import { existsSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
 import type { ActionName } from "./core.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, requireFactoryModels, wantedModels } from "./core-settings.ts";
@@ -19,8 +18,9 @@ import { git, uncommittedFiles } from "./git.ts";
 import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchExists, type RunnerEnv, worktreePath } from "./launch.ts";
 import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
-import { DEFAULT_SETTINGS, factoryHome, loadSettings, modelChoice, registeredRepos, resolveSettings, type StoredSettings } from "./settings.ts";
+import { DEFAULT_SETTINGS, loadSettings, modelChoice, registeredRepos, resolveSettings, type StoredSettings } from "./settings.ts";
 import { normalizeModels, parseSettingsFields } from "./state.ts";
+import { sessionTask } from "./sync.ts";
 import { listTasks, tagInGroup, TaskBusyError, type TaskRecord } from "./tasks.ts";
 import { errorText } from "./util.ts";
 import {
@@ -74,9 +74,7 @@ export function waveReviewWorktree(declaration: Pick<WaveDeclaration, "id" | "re
  * factory keeps (under its home) are looked up.
  */
 export async function taskWave(sessionDir: string, sessionId: string): Promise<string | null> {
-  const sessions = join(factoryHome(), "sessions") + sep;
-  if (!resolve(sessionDir).startsWith(sessions)) return null;
-  return (await listTasks()).find((task) => task.sessionId === sessionId)?.wave ?? null;
+  return (await sessionTask(sessionDir, sessionId))?.wave ?? null;
 }
 
 /**
@@ -87,9 +85,7 @@ export async function taskWave(sessionDir: string, sessionId: string): Promise<s
  * keeps (under its home) are looked up; a task outside a wave merges as before.
  */
 export async function waveMergeRefusal(sessionDir: string, sessionId: string): Promise<string | null> {
-  const sessions = join(factoryHome(), "sessions") + sep;
-  if (!resolve(sessionDir).startsWith(sessions)) return null;
-  const record = (await listTasks()).find((task) => task.sessionId === sessionId);
+  const record = await sessionTask(sessionDir, sessionId);
   if (record === undefined || record.wave === null) return null;
   const short = record.wave.slice(0, SHORT_ID_CHARS);
   let file: WaveFile;

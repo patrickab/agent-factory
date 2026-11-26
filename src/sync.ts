@@ -3,10 +3,11 @@
  * turn, instead of at their own merge.
  *
  * - Marks: when a task merges into its wave's branch (`taskLanded`, from `merge.ts`), and when a wave merges into its
- *   target (`waveLanded`, from `wave-runner.ts`), every task in `running` below that branch gets a due mark in its
- *   sync log `<factoryHome>/sync/<task id>.jsonl` (append-only: `due` lines, and `done` lines that consume them). For
- *   a wave's merge, the branch of every other `building` wave on the same target is rebased onto it first
- *   (`rebaseBranch`: plumbing, no worktree; a conflict or a checkout of it leaves it as it is), then its tasks marked
+ *   target (`waveLanded`, from `wave-runner.ts`), every task below that branch in `running`, `waiting_answer`,
+ *   `merging` or `waiting_approve` (`MARKED_STATES`: a coder turn may still come) gets a due mark in its sync log
+ *   `<factoryHome>/sync/<task id>.jsonl` (append-only: `due` lines, and `done` lines that consume them). For a wave's
+ *   merge, the branch of every other `building` wave on the same target is rebased onto it first (`rebaseBranch`:
+ *   plumbing, no worktree; a conflict or a checkout of it leaves it as it is), then its tasks marked
  * - The sync (`syncTask`, from the task's own Pi at the end of a coder turn): the worktree's snapshot (HEAD, its tree with
  *   untracked files, the index bytes, the ref `refs/factory/sync/<task id>`), a three-way merge of the task's whole
  *   change (base: where the task sat on the branch the first mark found) onto the branch's tip, written into the
@@ -14,9 +15,11 @@
  *   the tip: its base is the tip from then on. Any failure but a content conflict restores HEAD, worktree and index
  * - Marks, rewrites and syncs hold the merge lock (`<git common dir>/factory-merge.lock`), the one a merge moves its
  *   target under. A sync consumes its marks also when it fails
+ * - Nothing piles up: a round that passed its gates drops the snapshot ref and the consumed lines of the log
+ *   (`syncRoundPassed`); a removed task takes both with it (`removeSyncState`)
  */
 import { existsSync, realpathSync } from "node:fs";
-import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { assertCheckoutReady, git, nulList, primaryCheckout, snapshotTree, stageTree, withScratchIndex } from "./git.ts";
 import type { Exec } from "./run.ts";
@@ -100,9 +103,32 @@ async function consume(taskId: string, upTo: number): Promise<void> {
   await appendLog(taskId, { kind: "done", due: upTo, at: new Date().toISOString() });
 }
 
-/** Removes a task's sync log (with the task). */
-export async function removeSyncLog(taskId: string): Promise<void> {
-  await rm(syncLogPath(taskId), { force: true });
+/** Removes a task's sync log and its snapshot ref in `repo` (with the task). Never throws. */
+export async function removeSyncState(exec: Exec, repo: string, taskId: string): Promise<void> {
+  await rm(syncLogPath(taskId), { force: true }).catch(() => undefined);
+  await exec(["git", "update-ref", "-d", snapshotRef(taskId)], { cwd: repo }).catch(() => undefined);
+}
+
+/**
+ * A round of the task passed its gates (worktree `root`): its snapshot ref goes, and its sync log keeps only the `due`
+ * lines no `done` line consumed (none left: the log goes). Never throws.
+ */
+export async function syncRoundPassed(exec: Exec, root: string, taskId: string): Promise<void> {
+  await dropSnapshot(exec, root, taskId).catch(() => undefined);
+  try {
+    const path = syncLogPath(taskId);
+    if (!existsSync(path)) return;
+    const { gitDir } = await primaryCheckout(exec, root);
+    await withMergeLock(gitDir, async () => {
+      const { marks } = await readMarks(taskId);
+      if (marks.length === 0) return void (await rm(path, { force: true }));
+      const temp = `${path}.${process.pid}.tmp`;
+      await writeFile(temp, marks.map((mark) => `${JSON.stringify({ kind: "due", ...mark })}\n`).join(""), "utf8");
+      await rename(temp, path);
+    });
+  } catch {
+    // Kept as it is: the next passed round or the task's removal takes it.
+  }
 }
 
 /**
@@ -159,14 +185,18 @@ function samePath(a: string, b: string): boolean {
   return real(a) === real(b);
 }
 
-/** The tasks of the wave `waveId` whose last state is `running`, but the one on `exceptBranch`. */
-async function runningTasks(waveId: string, exceptBranch?: string): Promise<TaskRecord[]> {
-  const running: TaskRecord[] = [];
+/** The states whose task is marked when a change lands below it: a coder turn may still follow, and its sync names it. */
+export const MARKED_STATES: readonly string[] = ["running", "waiting_answer", "merging", "waiting_approve"];
+
+/** The tasks of the wave `waveId` whose last state is one of `MARKED_STATES`, but the one on `exceptBranch`. */
+async function markedTasks(waveId: string, exceptBranch?: string): Promise<TaskRecord[]> {
+  const marked: TaskRecord[] = [];
   for (const record of await listTasks()) {
     if (record.wave !== waveId || record.branch === exceptBranch) continue;
-    if ((await lastFactoryState(record.sessionDir, record.sessionId).catch(() => undefined))?.state === "running") running.push(record);
+    const state = (await lastFactoryState(record.sessionDir, record.sessionId).catch(() => undefined))?.state;
+    if (state !== undefined && MARKED_STATES.includes(state)) marked.push(record);
   }
-  return running;
+  return marked;
 }
 
 async function markTasks(tasks: TaskRecord[], mark: DueMark): Promise<void> {
@@ -193,7 +223,7 @@ export async function taskLanded(exec: Exec, root: string, taskBranch: string, t
   const { primary, gitDir } = await primaryCheckout(exec, root);
   const waves = (await openWaves(primary)).filter(({ branch }) => branch === target);
   if (waves.length === 0) return;
-  const tasks = (await Promise.all(waves.map(({ file }) => runningTasks(file.declaration.id, taskBranch)))).flat();
+  const tasks = (await Promise.all(waves.map(({ file }) => markedTasks(file.declaration.id, taskBranch)))).flat();
   if (tasks.length === 0) return;
   const commits = await landedCommits(exec, primary, before, after);
   await withMergeLock(gitDir, () => markTasks(tasks, { branch: target, from: before, to: after, commits }));
@@ -260,11 +290,11 @@ export async function waveLanded(exec: Exec, repo: string, waveId: string, targe
       // The new branch and the marks in one hold: a sync sees both or neither.
       const marked = await withMergeLock(gitDir, async () => {
         await git(exec, primary, ["update-ref", "-m", `factory: rebase ${branch} onto ${target}`, `refs/heads/${branch}`, rebased.new, rebased.old]);
-        const tasks = await runningTasks(id);
+        const tasks = await markedTasks(id);
         await markTasks(tasks, { branch, from: rebased.old, to: rebased.new, commits });
         return tasks.length;
       });
-      done.push(`wave ${id.slice(0, 8)}: ${branch} rebased onto ${target}, ${marked} running ${marked === 1 ? "task" : "tasks"} to sync`);
+      done.push(`wave ${id.slice(0, 8)}: ${branch} rebased onto ${target}, ${marked} ${marked === 1 ? "task" : "tasks"} to sync`);
     } catch (error) {
       done.push(`wave ${id.slice(0, 8)} stays: ${errorText(error)}`);
     }
@@ -461,7 +491,8 @@ export async function syncAtTurnEnd(exec: Exec, root: string, record: TaskRecord
     if (outcome.kind === "synced") {
       const sessionFile = await taskSessionFile(record);
       const files = sessionFile === undefined ? new Set<string>() : sessionFiles(sessionFile, root);
-      const followUp = syncFollowUp(outcome, target, files);
+      // HEAD holds the tip already (`snapshot` null): the coder has every change in front of it, no message.
+      const followUp = outcome.snapshot === null ? null : syncFollowUp(outcome, target, files);
       const data = { kind: "synced", branch: target, tip: outcome.tip, snapshot: outcome.snapshot, named: followUp?.named ?? [], conflicts: outcome.conflicts };
       const nowLeft = outcome.conflicts.length > 0 && outcome.snapshot !== null ? { files: outcome.conflicts, tip: outcome.tip, snapshot: outcome.snapshot, reminded: false } : undefined;
       if (followUp === null) return { drafts: [entryDraft(data)], follow: false, left: nowLeft };

@@ -29,6 +29,7 @@ import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from 
 import type { ModelSize, Settings, StartPayload } from "./state.ts";
 import { onPath, ownRunners, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { removeSyncState } from "./sync.ts";
 import { TASK_WAVE_ENV } from "./wave-poke.ts";
 import { outputTail } from "./util.ts";
 
@@ -378,7 +379,7 @@ export async function unmergedWork(record: TaskRecord, target: string | undefine
 
 /**
  * Removes the task's worktree, its own branch (through git; an old merge request's source branch stays), its record,
- * its runner log, its lock and its inbox. The session file stays.
+ * its runner log, its lock, its inbox and its sync state (`sync.ts`). The session file stays.
  */
 export async function deleteTask(record: TaskRecord): Promise<void> {
   const branch = ownBranch(record);
@@ -388,6 +389,7 @@ export async function deleteTask(record: TaskRecord): Promise<void> {
   await removeTask(record.id);
   await rm(taskInboxPath(record.id), { force: true });
   await rm(inboxReadPath(taskInboxPath(record.id)), { force: true });
+  await removeSyncState(runCommand, record.repo, record.id);
 }
 
 /** Pi's directory name of a path (`/a/b` -> `--a-b--`): one sessions folder per repository, as pi-host names it. */

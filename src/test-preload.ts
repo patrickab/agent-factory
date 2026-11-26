@@ -5,10 +5,15 @@
  *   out one that restores the environment it started with never lists, nor stops, the real factory's tasks and waves
  * - A random `FACTORY_MARKER` per test run (invariant 16): every runner this run spawns carries it, and this run sees
  *   and signals only those, never a runner of the real factory (no marker) or of another test run
+ * - A default test timeout of 30 s (a test's own timeout wins): beside other test runs on a loaded machine, a test that
+ *   takes 2 s alone passes 5 s, and a timed-out body runs on into the next test of its file
  */
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setDefaultTimeout } from "bun:test";
+
+setDefaultTimeout(30_000);
 
 const bin = mkdtempSync(join(tmpdir(), "factory-test-bin-"));
 const fake = join(bin, "systemd-run");

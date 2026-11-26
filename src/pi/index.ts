@@ -86,7 +86,7 @@ import { createScoutTracker, registerScoutTool, type ScoutCore } from "./scout-t
 import { isTaskSession, registerFactoryTool } from "./tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { errorText } from "../util.ts";
-import { dropSnapshot, roundPassedGates, sessionTask, SYNC_TYPE, syncAtTurnEnd, syncLeftOf, type SyncDraft, type SyncLeft } from "../sync.ts";
+import { roundPassedGates, sessionTask, SYNC_TYPE, syncAtTurnEnd, syncLeftOf, syncRoundPassed, type SyncDraft, type SyncLeft } from "../sync.ts";
 import type { TaskRecord } from "../tasks.ts";
 
 /** Tag of the system prompt section that carries `.factory/agents/coder.md`. */
@@ -393,9 +393,9 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
           } else {
             result = await runRound(current, pipelineSteps(ops, task, await taskFiles(ops, task), false));
             if (result.commitAsk) commitAsk = { passedInto: result.commitAsk, tree: await snapshotTree(runner.run, ctx.cwd) };
-            // The snapshot of the last sync is kept until a round passed its gates after it.
+            // The snapshot of the last sync and the consumed lines of its log are kept until a round passed its gates after it.
             if (record && roundPassedGates(result.entries, result.commitAsk !== undefined)) {
-              await dropSnapshot(runner.cleanup, ctx.cwd, record.id);
+              await syncRoundPassed(runner.cleanup, ctx.cwd, record.id);
               if (syncLeft) syncDrafts.push({ type: "custom", customType: SYNC_TYPE, data: { kind: "cleared" } });
               syncLeft = undefined;
             }
