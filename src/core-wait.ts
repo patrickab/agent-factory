@@ -3,7 +3,8 @@
  *
  * - Polls until they rest (no runner lives and the state is a resting one, or it is interrupted; a wave: `merged`,
  *   `cancelled`) or one needs attention (a task resting and not `done`; a wave `rejected`, `blocked`,
- *   `waiting_approve`, interrupted, or building stuck), or the timeout passes
+ *   `waiting_approve`, interrupted, building stuck or queued after a cancelled wave), or the timeout passes. A queued
+ *   wave that can still start neither rests nor needs attention: it starts once the waves it waits for merge
  * - A poll reads only what changed in the session files and looks for runners only where that decides; full views
  *   (`core-tasks.ts`, `core-waves.ts`) are built only for an answer
  */
@@ -11,7 +12,7 @@ import { stat } from "node:fs/promises";
 import type { ActionName } from "./core.ts";
 import { FactoryError, stringsParam, tagParam, WAIT_TIMEOUT_MS, type Handler } from "./core-shared.ts";
 import { findTask, needsAttention, rests, tasksIn, taskView, type TaskView } from "./core-tasks.ts";
-import { findWave, waveLook, type WaveLook } from "./core-waves.ts";
+import { findWave, queueLook, waveLook, type WaveLook } from "./core-waves.ts";
 import { liveRunners } from "./launch.ts";
 import { readFactoryStates, sessionFilePath } from "./runner.ts";
 import type { State } from "./state.ts";
@@ -56,16 +57,17 @@ async function waitMayEnd(records: TaskRecord[], states: (State | null)[], waves
 const WAVE_ATTENTION_STAGES: readonly WaveStage[] = ["rejected", "blocked", "waiting_approve"];
 
 /**
- * No runner lives and nothing moves the wave on by itself: its stage is a resting one, it is interrupted, or it builds
- * stuck (`stuckKeys`: tasks that can never start and nothing else running), where its runner rests too.
+ * No runner lives and nothing moves the wave on by itself: its stage is a resting one, it is interrupted, or it is
+ * stuck (`stuckKeys`: tasks that can never start and nothing else running, where its runner rests too; or queued after
+ * a cancelled wave). A queued wave that can still start does not rest: a merge of the waves it waits for starts it.
  */
 function waveRests({ view, stuck }: WaveLook): boolean {
-  return view.interrupted || (!view.running && (stuck || RESTING_WAVE_STAGES.includes(view.stage)));
+  return view.interrupted || (!view.running && (stuck || (view.stage !== "queued" && RESTING_WAVE_STAGES.includes(view.stage))));
 }
 
 /**
  * It waits for the supervisor (invariant 8): resting `rejected`, `blocked`, `waiting_approve` or interrupted, or stuck
- * while it builds (whether or not its runner has rested yet).
+ * (building, whether or not its runner has rested yet, or queued after a cancelled wave).
  */
 function waveNeedsAttention(look: WaveLook): boolean {
   return look.stuck || (waveRests(look) && (look.view.interrupted || WAVE_ATTENTION_STAGES.includes(look.view.stage)));
@@ -74,14 +76,24 @@ function waveNeedsAttention(look: WaveLook): boolean {
 /**
  * One cheap look at the watched waves (their logs, the polled states of a building wave's tasks, a runner lookup only
  * for a wave that does not rest): `attention` when one may need it (a resting stage that asks for it, a building wave
- * stuck, or no runner where one should live), `busy` when one still moves (a runner builds, reviews or merges it).
+ * stuck, a queued one that can never start, or no runner where one should live), `busy` when one still moves (a runner
+ * builds, reviews or merges it, or it is queued and can still start). `all`: every wave, read once per poll.
  * `stateOf` is a started task's state, `undefined` when its record is gone (it counts as cancelled).
  */
-async function pollWaves(files: WaveFile[], stateOf: (taskId: string) => Promise<State | null | undefined>): Promise<{ attention: boolean; busy: boolean }> {
+async function pollWaves(
+  files: WaveFile[],
+  stateOf: (taskId: string) => Promise<State | null | undefined>,
+  all: () => Promise<WaveFile[]>,
+): Promise<{ attention: boolean; busy: boolean }> {
   let attention = false;
   let busy = false;
   for (const file of files) {
     const fold = foldWave(file.declaration, file.events);
+    if (fold.stage === "queued") {
+      if ((await queueLook(fold, await all())).never !== null) attention = true;
+      else busy = true;
+      continue;
+    }
     if (RESTING_WAVE_STAGES.includes(fold.stage)) {
       attention ||= WAVE_ATTENTION_STAGES.includes(fold.stage);
       continue;
@@ -128,10 +140,15 @@ async function waitForTasks(watched: Watched, ignore: string[], timeoutMs: numbe
     const leftWave = (record: TaskRecord, state: State | null) => state === "cancelled" && record.wave !== null && waveIds.has(record.wave);
     const timedOut = Date.now() >= deadline;
     const byId = new Map(all.records.map((record) => [record.id, record]));
-    const waves = await pollWaves(files, async (taskId) => {
-      const record = byId.get(taskId);
-      return record === undefined ? undefined : polledState(record, cache);
-    });
+    let everyWave: Promise<WaveFile[]> | undefined;
+    const waves = await pollWaves(
+      files,
+      async (taskId) => {
+        const record = byId.get(taskId);
+        return record === undefined ? undefined : polledState(record, cache);
+      },
+      () => (everyWave ??= listWaves()),
+    );
     const states = (await Promise.all(records.map((record) => polledState(record, cache)))).map((state, index) => (leftWave(records[index], state) ? "done" : state));
     if (timedOut || waves.attention || (await waitMayEnd(records, states, waves.busy))) {
       const tasks = await Promise.all(records.map((record) => taskView(record)));

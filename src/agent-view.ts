@@ -162,6 +162,7 @@ function taskList(tasks: TaskView[]): string {
 // ---- waves ----
 
 const FINISHED_WAVE_STAGES = ["merged", "cancelled"];
+// `queued` is not here: it moves on by itself once the waves it waits for merge.
 const RESTING_WAVE_STAGES = ["rejected", "waiting_approve", "merged", "blocked", "cancelled"];
 /** Task states of a wave's task that wait for the supervisor: their id is shown. */
 const TASK_ATTENTION = ["waiting_answer", "waiting_approve", "blocked"];
@@ -171,7 +172,21 @@ type WaveTask = WaveView["tasks"][number];
 function waveState(view: WaveView): string {
   if (view.interrupted) return "interrupted";
   if (view.stage === "blocked") return `blocked: ${view.reason ?? "unknown"}`;
+  if (neverStarts(view)) return "queued: can never start";
   return view.stage;
+}
+
+/**
+ * A queued wave that can never start: a wave it waits for was cancelled. The core records why on the queued wave (a
+ * `stage` event, still `queued`, its `detail`), the only `detail` a queued wave ever has.
+ */
+export function neverStarts(view: WaveView): boolean {
+  return view.stage === "queued" && view.detail !== null && view.detail !== undefined;
+}
+
+/** `3f2a91c0, factory/w1`: the waves a queued wave waits for, by tag when `known` holds the wave, else by short id. */
+function afterNames(view: WaveView, known: readonly WaveView[] = []): string {
+  return view.after.map((id) => known.find((wave) => wave.id === id)?.tag ?? short(id)).join(", ");
 }
 
 function waveRests(view: WaveView): boolean {
@@ -254,7 +269,7 @@ function waveStageLines(view: WaveView): string[] {
   if (view.interrupted) return [`  interrupted: ${view.stage} when its runner ended, no runner lives`, waveTasksLine(view)];
   switch (view.stage) {
     case "queued":
-      return [waveTasksLine(view), ...detailLine(view)];
+      return [`  waits for: ${afterNames(view)}`, waveTasksLine(view), ...detailLine(view)];
     case "building": {
       const unreachable = unreachableTasks(view.tasks);
       return [waveTasksLine(view), ...(unreachable.length > 0 ? [`  cannot start: ${unreachable.join(", ")}`] : [])];
@@ -294,7 +309,7 @@ function waveList(waves: WaveView[]): string {
   if (waves.length === 0) return "no waves";
   const open = waves.filter((wave) => !FINISHED_WAVE_STAGES.includes(wave.stage));
   const rest = waves.length - open.length;
-  const lines = open.map((wave) => fields(waveHeader(wave), wave.title));
+  const lines = open.map((wave) => fields(waveHeader(wave), wave.stage === "queued" && `after ${afterNames(wave, waves)}`, wave.title));
   if (open.length === 0) lines.push(`no unfinished waves, ${rest} merged or cancelled`);
   else if (rest > 0) lines.push(`${rest} merged or cancelled, not shown`);
   return lines.join("\n");
@@ -466,6 +481,7 @@ const RENDERERS: Record<string, Renderer> = {
 
   "waves.start": (_params, result: { wave: WaveView }) => {
     const wave = result.wave;
+    if (wave.stage === "queued") return waveReceipt("declared ", wave, [`waits for: ${afterNames(wave)}`]);
     const started = wave.tasks.filter((task) => task.taskId !== null).map((task) => task.key);
     const waiting = wave.tasks.filter((task) => task.taskId === null && task.state === "pending").map((task) => `${task.key} (${task.after.join(", ")})`);
     return waveReceipt("started ", wave, [`started: ${started.join(", ") || "none"}`, ...(waiting.length > 0 ? [`waits: ${waiting.join(", ")}`] : [])]);

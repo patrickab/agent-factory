@@ -8,21 +8,26 @@
  * - Task events: `waiting_answer`, `blocked`, `interrupted`, `waiting_approve`; only for a task outside a wave, or a
  *   wave's task while its wave builds (past `building` the wave's own notice covers it)
  * - Wave events: `rejected`, `blocked`, `waiting_approve`, `interrupted`, `unreachable` (building with tasks that can
- *   never start, nothing else moving it), `merged`
+ *   never start, nothing else moving it), `never` (queued after a wave that was cancelled), `merged`. A queued wave
+ *   that can still start says nothing
  * - `key` = `<task|wave>:<id>:<event>:<n>`. A task's n is its round, with the state entry's time after `@`: a coder may
  *   ask twice in one round. A wave's n is the index of its last `stage` event in the log for a stage; for
  *   `interrupted`, which no stage event marks, the length of its log; for `unreachable` the keys of the tasks that can
  *   never start (`unreachableTasks`), not the log's length: the runner's `building` event naming them lands after the
- *   task state that made them so, and must not make the same event a second one (invariant 12)
+ *   task state that made them so, and must not make the same event a second one (invariant 12); for `never` the waves
+ *   it waits for: it can never start only once
  * - `text`: `factory: <what happened>`, then the agent view block of the task or wave (a rejection carries its findings)
  */
-import { taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
+import { neverStarts, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
 import type { TaskView } from "./core.ts";
 import type { WaveView } from "./waves.ts";
 
 export type Notice = { key: string; origin: string; text: string };
 
-/** A wave as notifications judge it: its view, whether it builds stuck (`stuckKeys`), the kinds of its log's events. */
+/**
+ * A wave as notifications judge it: its view, whether it is stuck (builds with tasks that can never start, or is queued
+ * after a cancelled wave: `WaveLook`), the kinds of its log's events.
+ */
 export type NoticeWave = { view: WaveView; stuck: boolean; events: readonly { kind: string }[] };
 
 const TASK_EVENTS: Record<string, string> = {
@@ -59,6 +64,9 @@ function waveNotice({ view, stuck, events }: NoticeWave, origin: string): Notice
     [event, n, what] = ["interrupted", events.length, "was interrupted"];
   } else if (view.stage === "building" && stuck) {
     [event, n, what] = ["unreachable", unreachableTasks(view.tasks).join(","), "has tasks that can never start"];
+  } else if (view.stage === "queued" && (stuck || neverStarts(view))) {
+    // Not the stage event's index: the core may judge it stuck before its `queued` event saying why lands.
+    [event, n, what] = ["never", view.after.join(","), "can never start"];
   } else {
     const said = WAVE_STAGE_EVENTS[view.stage];
     if (said === undefined) return null;

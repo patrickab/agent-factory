@@ -21,7 +21,6 @@ from factory_tui.client import Client, FactoryClient, FactoryCliError
 
 REFRESH_SECONDS = 10.0
 TIMELINE_ENTRIES = 15
-RESTING_STAGES = {"rejected", "waiting_approve", "merged", "blocked", "cancelled"}
 STAGE_STYLE = {
     "merged": "green",
     "done": "green",
@@ -32,6 +31,7 @@ STAGE_STYLE = {
     "waiting_answer": "yellow",
     "cancelled": "dim",
     "pending": "dim",
+    "queued": "dim",
 }
 
 
@@ -111,8 +111,9 @@ NUMBER = (int, float)
 USAGE_SHAPE = {"input": NUMBER, "output": NUMBER, "cost": NUMBER}
 COUNTS_SHAPE = {"done": int, "total": int}
 WAVE_SHAPE = {
-    "id": str, "repo": str, "tag": str, "title": str, "stage": str, "branch": str, "createdAt": str, "tasks": list
+    "id": str, "repo": str, "tag": str, "title": str, "stage": str, "createdAt": str, "tasks": list
 }  # fmt: skip
+# A queued wave has no branch yet (null): it is cut when the wave starts.
 TASK_SHAPE = {"id": str, "repo": str, "title": str, "state": str, "createdAt": str}
 
 
@@ -256,7 +257,7 @@ class FactoryView(App[None]):
             waves = [wave for wave in snapshot.waves if wave.get("repo") == repo]
             tasks = [task for task in snapshot.tasks if task.get("repo") == repo and not task.get("wave")]
             if query:
-                waves = [w for w in waves if matches(query, w["id"], w["tag"], w["title"], w["stage"], w["branch"])]
+                waves = [w for w in waves if matches(query, w["id"], w["tag"], w["title"], w["stage"], w.get("branch"))]
                 tasks = [
                     t for t in tasks if matches(query, t["id"], t.get("tag"), t["title"], t["state"], t.get("branch"))
                 ]
@@ -359,7 +360,7 @@ class FactoryView(App[None]):
             body.update(Text(errors or "no repositories, waves or tasks", style="red" if errors else "dim"))
         elif item.kind == "wave":
             detail.border_title, detail.border_subtitle = f"wave {item.data['tag']}", item.data["id"]
-            body.update(guarded("wave", lambda: self.wave_text(item.data)))
+            body.update(guarded("wave", lambda: self.wave_text(item.data, self.snapshot.waves)))
         elif item.kind == "task":
             detail.border_title, detail.border_subtitle = "task", item.data["id"]
             self.timeline = []
@@ -408,8 +409,11 @@ class FactoryView(App[None]):
         return text
 
     @staticmethod
-    def wave_text(wave: dict) -> Text:
+    def wave_text(wave: dict, waves: list[dict] | None = None) -> Text:
+        """`waves`: every wave known, to name the waves a queued one waits for by tag (else by short id)."""
         text = Text(wave["title"] + "\n", style="bold")
+        tags = {other["id"]: other["tag"] for other in waves or []}
+        after = ", ".join(tags.get(named, named[:8]) for named in wave.get("after") or [])
         stage = styled(wave["stage"])
         if wave.get("reason"):
             stage.append(f" ({wave['reason']})")
@@ -421,7 +425,9 @@ class FactoryView(App[None]):
         for name, value in (
             ("stage", stage),
             ("tasks", f"{counts['done']}/{counts['total']} done"),
-            ("branch", f"{wave['branch']} → {wave['target']}"),
+            ("after", after),
+            ("why", (wave.get("detail") or "") if wave["stage"] == "queued" else ""),
+            ("branch", f"{wave['branch'] or 'none yet'} → {wave['target']}"),
             ("repo", short(wave["repo"])),
             ("plan", wave.get("plan") or ""),
             ("usage", usage_text(wave.get("usage"))),

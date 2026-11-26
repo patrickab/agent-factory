@@ -5,6 +5,7 @@ import type { WaveView } from "./waves.ts";
 
 const TASK_ID = "4ae7325b-1111-4222-8333-944445555666";
 const WAVE_ID = "3f2a91c0-aaaa-4bbb-8ccc-dddddddddddd";
+const OTHER_WAVE = "77b0c2e1-0000-4000-8000-000000000000";
 const SESSION = "0197c0de-5555-7666-8777-888899990000";
 
 function task(over: Partial<TaskView> = {}): TaskView {
@@ -235,6 +236,9 @@ describe("agentView", () => {
     expect(agentView("waves.start", {}, { wave: wave() })).toBe(
       "started wave 3f2a91c0  building  1/3 done  factory/w1 · started: record, actions · waits: docs (actions)",
     );
+    expect(agentView("waves.start", {}, { wave: wave({ stage: "queued", after: [OTHER_WAVE, WAVE_ID], running: false, tasks: [waveTask("record", "pending")], counts: { total: 1, done: 0 } }) })).toBe(
+      "declared wave 3f2a91c0  queued  0/1 done  factory/w1 · waits for: 77b0c2e1, 3f2a91c0",
+    );
     expect(agentView("waves.add", FIXTURES["waves.add"].params, FIXTURES["waves.add"].result)).toBe("wave 3f2a91c0  building  1/3 done  factory/w1 · added: fix running");
     expect(agentView("waves.remove", {}, { removed: WAVE_ID })).toBe("removed wave 3f2a91c0");
   });
@@ -252,6 +256,24 @@ describe("agentView", () => {
     expect(agentView("tasks.list", {}, { tasks: [] })).toBe("no tasks");
     expect(agentView("waves.list", {}, FIXTURES["waves.list"].result)).toBe(
       "wave 3f2a91c0  building  1/3 done  factory/w1  $18.40  the wave mechanism\n1 merged or cancelled, not shown",
+    );
+  });
+
+  test("waves.list: a queued wave names the waves it waits for, by tag when listed", () => {
+    const first = wave({ id: OTHER_WAVE, tag: "factory/w0", stage: "blocked", reason: "gates", running: false, usage: null });
+    const queued = wave({ stage: "queued", after: [OTHER_WAVE, "9c4d1e2f-0000-4000-8000-000000000000"], running: false, usage: null });
+    expect(agentView("waves.list", {}, { waves: [first, queued] })).toBe(
+      [
+        "wave 77b0c2e1  blocked: gates  1/3 done  factory/w0  the wave mechanism",
+        "wave 3f2a91c0  queued  1/3 done  factory/w1  after factory/w0, 9c4d1e2f  the wave mechanism",
+      ].join("\n"),
+    );
+  });
+
+  test("tasks.wait: a queued wave still works", () => {
+    const queued = wave({ stage: "queued", after: [OTHER_WAVE], running: false, counts: { total: 3, done: 0 } });
+    expect(agentView("tasks.wait", { wave: "3f2a" }, { tasks: [], waves: [queued], attention: [], timedOut: true })).toBe(
+      "timed out after 10 min\nstill working: wave 3f2a91c0 queued 0/3",
     );
   });
 
@@ -523,6 +545,31 @@ describe("waveBlock per stage", () => {
         "  interrupted: reviewing when its runner ended, no runner lives",
         "  tasks: record done",
         "  next: waves.retry, waves.cancel",
+      ],
+    ],
+    [
+      "queued",
+      { stage: "queued", after: [OTHER_WAVE], running: false, tasks: [waveTask("record", "pending")], counts: { total: 1, done: 0 }, usage: null },
+      ["wave 3f2a91c0  queued  0/1 done  factory/w1", head, "  waits for: 77b0c2e1", "  tasks: record pending", "  next: waves.add, waves.cancel"],
+    ],
+    [
+      "queued after a cancelled wave",
+      {
+        stage: "queued",
+        after: [OTHER_WAVE],
+        detail: "it waits for wave factory/w0 (77b0c2e1), which was cancelled: it can never start; waves.cancel or waves.remove it",
+        running: false,
+        tasks: [waveTask("record", "pending")],
+        counts: { total: 1, done: 0 },
+        usage: null,
+      },
+      [
+        "wave 3f2a91c0  queued: can never start  0/1 done  factory/w1",
+        head,
+        "  waits for: 77b0c2e1",
+        "  tasks: record pending",
+        "  why: it waits for wave factory/w0 (77b0c2e1), which was cancelled: it can never start; waves.cancel or waves.remove it",
+        "  next: waves.add, waves.cancel",
       ],
     ],
     [

@@ -139,6 +139,17 @@ describe("sessionWidget", () => {
     expect(lines[1]).toContain(" stuck");
   });
 
+  test("queued: its stage while it can start, stuck and needing the supervisor once it never can", () => {
+    const waiting = wave({ tag: "next", stage: "queued", after: ["wave-0"], running: false });
+    const never = wave({ tag: "never", stage: "queued", after: ["wave-0"], running: false, detail: "it waits for wave t/w0 (wave-0), which was cancelled: it can never start" });
+    const lines = sessionWidget([waiting, never], { showFinished: false, width: 80 });
+    expect(lines[0]).toBe("Factory · 2 active · 1 needs you");
+    expect(lines[1]).toStartWith(" ! never");
+    expect(lines[1]).toContain(" stuck");
+    expect(lines[2]).toStartWith(" ◐ next");
+    expect(lines[2]).toContain(" queued");
+  });
+
   test("tag and title scrubbed as in the agent view", () => {
     const lines = sessionWidget([wave({ tag: "t/w1", title: "fix /home/me/git/app/src/x.ts for 3f2a91c0-1111-4222-8333-444455556666" })], { showFinished: false, width: 120 });
     expect(lines[1]).not.toContain("/home/me");

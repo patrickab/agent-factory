@@ -306,3 +306,24 @@ async def test_wave_without_tasks():
         assert labels(app) == ["/repo", "  a  0/0", "    w1  0/0  building  title w1"]
         assert selected(app).key == ("wave", "w1")
         assert "tasks\n  none" in body(app)
+
+
+async def test_a_queued_wave_shows_what_it_waits_for():
+    first = wave("w1", "q/w1", 0, 1, stage="rejected")
+    queued = wave("w22", "q/w2", 0, 1, stage="queued", branch=None, base=None, after=["w1", "gone4567-rest"])
+    never = wave(
+        "w333", "q/w3", 0, 1, stage="queued", branch=None, base=None, after=["w1"], detail="it can never start"
+    )
+    app = FactoryView(FakeClient(waves=[first, queued, never], tasks=[]), refresh_seconds=0)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await started(app, pilot)
+        assert app.snapshot.errors == []
+        assert labels(app)[3].startswith("    w2  0/1  queued")
+        await pilot.press("j")
+        await pilot.pause()
+        assert selected(app).key == ("wave", "w22")
+        text = body(app)
+        assert "after  q/w1, gone4567" in text and "branch none yet → central" in text and "why" not in text
+        await pilot.press("j")
+        await pilot.pause()
+        assert "why    it can never start" in body(app)

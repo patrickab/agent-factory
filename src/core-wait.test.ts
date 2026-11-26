@@ -8,7 +8,7 @@ import type { TaskView } from "./core-tasks.ts";
 import { caseDir, exitingRunner, expectError, fakeRecord, ID_1, ID_2, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { liveRunners, taskInboxPath } from "./launch.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
-import type { WaveView } from "./waves.ts";
+import { appendWaveEvent, createWave, type WaveView } from "./waves.ts";
 
 useCoreFixture();
 
@@ -122,5 +122,33 @@ describe("tasks.wait", () => {
     await expectError(wait({ ids: [ID_1], timeoutMs: 3_600_001 }), "invalid", "timeoutMs must be at most 3600000");
     expect(ACTIONS["tasks.wait"].mutates).toBe(false);
   });
-});
 
+  describe("a queued wave", () => {
+    const FIRST = "60000000-0000-4000-8000-000000000001";
+    const QUEUED = "60000000-0000-4000-8000-000000000002";
+    /** `FIRST` resting `rejected` on the branch `main-q-first`, `QUEUED` declared after it (no branch yet). */
+    async function waves(): Promise<void> {
+      const common = { repo: "/r", plan: null, request: "r", target: "main", origin: null, overrides: {} };
+      await createWave({ ...common, id: FIRST, tag: "q/first", title: "first", branch: "main-q-first", base: "abc", createdAt: "2026-01-01T00:00:00.000Z" });
+      await appendWaveEvent(FIRST, { kind: "stage", stage: "rejected", reason: null });
+      await createWave({ ...common, id: QUEUED, tag: "q/next", title: "next", branch: null, base: null, after: [FIRST], createdAt: "2026-01-02T00:00:00.000Z" });
+    }
+
+    test("neither rests nor needs attention while it can start: the wait goes on; the rejected wave it waits for answers", async () => {
+      await waves();
+      const queued = await wait({ wave: QUEUED, timeoutMs: 1_000 });
+      expect([queued.waves.map((view) => view.stage), queued.attention, queued.timedOut]).toEqual([["queued"], [], true]);
+      const both = await wait({ tag: "q", timeoutMs: 5_000 });
+      expect([both.attention, both.timedOut]).toEqual([[FIRST], false]);
+    });
+
+    test("one that can never start (the wave it waits for was cancelled) needs attention at once", async () => {
+      await waves();
+      await appendWaveEvent(FIRST, { kind: "stage", stage: "cancelled", reason: null });
+      const started = Date.now();
+      const never = await wait({ wave: QUEUED, timeoutMs: 5_000 });
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect([never.attention, never.timedOut]).toEqual([[QUEUED], false]);
+    });
+  });
+});

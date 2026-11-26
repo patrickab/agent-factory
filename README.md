@@ -137,9 +137,10 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   or wave ids out; `timeoutMs` 1000..3600000, default 600000. A task rests when no runner lives and its state is
   `waiting_approve`, `waiting_answer`, `blocked`, `done` or `cancelled`, or it is interrupted; it needs attention when
   it rests and is not `done` (a `cancelled` task of a watched wave needs none: it left the wave, which goes on). A wave
-  rests `merged` or `cancelled`; it needs attention `rejected`, `blocked`, `waiting_approve`, interrupted, or
+  rests `merged` or `cancelled`; it needs attention `rejected`, `blocked`, `waiting_approve`, interrupted,
   `building` with tasks that can never start (a task they wait for was cancelled or removed) while none of its started
-  tasks is active (its runner rests then; the wave is not interrupted). Answers
+  tasks is active (its runner rests then; the wave is not interrupted), or `queued` after a wave that was cancelled. A
+  `queued` wave that can still start neither rests nor needs attention: the wait goes on. Answers
   `{tasks, waves, attention: task and wave ids, timedOut}` once everything watched rests, one needs attention, the
   timeout passes or nothing is watched; an abort fails it. A wave's tasks all resting while the wave builds, reviews
   or merges is not the end. A poll re-reads a session file only when it changed and looks for runners only where that
@@ -179,12 +180,20 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 
 ### Waves (`src/waves.ts`, actions in `src/core.ts`)
 
-- A wave is a declared set of tasks on one branch: `waves.start {repo, tag, title, request, tasks, plan?, overrides?}`
+- A wave is a declared set of tasks on one branch: `waves.start {repo, tag, title, request, tasks, after?, plan?, overrides?}`
   (`mutates: true`) checks the specs (`tasks: [{key, title, request, after?, model?}]`, `key` unique of
   `[A-Za-z0-9._-]`, `after` keys of the wave, no cycle, `model` `"small"` or `"big"`, else `invalid`), refuses an unregistered repo, a target (`overrides.branch`, else the repo's
   branch) without a committed `factory.yaml` and an existing wave branch `<target>-<tag with "/" as "-">`, creates that
   branch off the target's tip (`base`), writes the record and pokes the wave's runner, which starts every task whose
   `after` are all `done`. `origin` is the declaring Pi session. Answers `{wave}`
+- `waves.start` with `after: [<tag or wave id>, ...]` (waves of the same repository and target, whoever declared them; a
+  tag carried by several: the newest not cancelled; an unknown name or the wave itself: `invalid`): the wave is
+  declared `queued`, stored with `after` as ids, without `branch` and `base` (null; its branch name is reserved, taken
+  already: refused). It starts (a `start` event sets both, the branch is cut off the target's tip, its tasks start) when
+  every wave it names is `merged`: their runner pokes it, nothing polls. Its branch taken by then: `blocked`
+  (`waves.retry` queues it again). A named wave `rejected` or `blocked` keeps it queued; `waves.cancel` of one makes it a wave that can never start (a `stage`
+  event, still `queued`, its `detail` says why; reported once, attention in `tasks.wait`). `waves.remove` of a wave a
+  queued one names is refused. `waves.add` cannot change `after`; it adds tasks to a queued wave, which stays queued
 - `overrides` are stored with the wave: its tasks start with their `models`, `maxRounds`, `review`, target = the wave
   branch and `merge: auto` (a task merges into the wave branch by itself); `merge` is the wave's own
 - A task's `model` (`"small"` | `"big"`, default `big`) picks which of the wave's two models its coder runs with,
@@ -202,7 +211,8 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   one resumes the stage its log holds; it pokes the runner. `waves.approve {id}`: only from `waiting_approve` (the
   wave's `merge: review`), on to `merging`. Both answer `{wave}`
 - `waves.cancel {id}`: refused when `merged` or `cancelled`; records `cancelled`, stops the wave's runner and cancels
-  its tasks that are not `done` or `cancelled` (as `tasks.cancel`). The wave's branch stays. Answers `{wave}`
+  its tasks that are not `done` or `cancelled` (as `tasks.cancel`). The wave's branch stays (a queued wave has none).
+  Answers `{wave}`
 - `waves.remove {id, force?}`: refused while the wave's runner lives or one of its tasks runs or waits for an answer;
   removes its tasks as `tasks.remove` does (refused, before anything is deleted, for unmerged work without `force`),
   then its record, lock, log and reviews. The wave's branch is deleted only when the wave is `merged`. Answers
@@ -219,17 +229,20 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 
 #### The supervisor's loop
 
-1. Declare: `waves.start` with every task of the wave and which waits for which (`after`), the reviewer's
-   instructions as `request`
+1. Declare: `waves.start` with every task of the wave and which waits for which (tasks' `after`), the reviewer's
+   instructions as `request`; the next wave may be declared at once with `after` naming this one: it stays `queued`
+   (`waves.get` shows `waits for:`) and starts by itself once this one is merged
 2. Wait: `tasks.wait {wave}` answers when the wave is `merged` or `cancelled` or something needs the supervisor: a
    task's question (`tasks.message` answers it), a blocked task (`tasks.retry`, `tasks.message` or `tasks.cancel`), a
-   `rejected`, `blocked`, `waiting_approve` or interrupted wave, a building wave whose pending tasks can never start.
-   Then wait again
+   `rejected`, `blocked`, `waiting_approve` or interrupted wave, a building wave whose pending tasks can never start, a
+   queued wave that can never start (a wave it waits for was cancelled). A queued wave that can still start keeps the
+   wait going. Then wait again
 3. Decide after a rejection: read the findings (`waves.get` shows them), then `waves.add` fix tasks (the wave builds
    again, then is reviewed again) or `waves.cancel`. Nothing moves until then: the factory never creates fix tasks.
    After `blocked`: read why (`waves.get`: the last `stage` event's `detail` as `why:`), fix the cause, then
    `waves.retry` (or `waves.add`); `waiting_approve`: `waves.approve`; tasks that can never start: `waves.add`
-   replacements or `waves.cancel`
+   replacements or `waves.cancel`; a queued wave that can never start: `waves.cancel` (or `waves.remove`) it and
+   declare it again
 
 ### The wave runner (`src/wave-runner.ts`, `src/wave-poke.ts`)
 
@@ -237,9 +250,11 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   wave's lock `waves/<id>.lock` for its life, logs to `waves/<id>.log` and lives while the wave does not rest
   (`running`; a wave not resting without one is `interrupted`). No Pi session: it calls the pure steps (`git.ts`,
   `rebaseWorktree`, `mergeTask`, `runReview`, the merge queue) with its own commands
-- Poked by `waves.start`, `waves.add`, `waves.retry`, `waves.approve` and by a wave's task whose runner ends with the task at rest (`FACTORY_TASK_WAVE`
+- Poked by `waves.start`, `waves.add`, `waves.retry`, `waves.approve`, by the runner of a wave that merged (every queued wave naming it) and by a wave's task whose runner ends with the task at rest (`FACTORY_TASK_WAVE`
   is set on the runners of a wave's tasks). A poke writes `waves/<id>.poke` and starts a runner unless a live one holds
   the lock: that one sees the marker and looks again before it ends, a second runner never starts
+- `queued`: no runner drives it. Poked (by the merge of a wave it names, `waves.add`), its runner starts it when every
+  wave it names is `merged`, else rests; one of them cancelled: it records why once (`stage` event, still `queued`)
 - `building`: starts the tasks whose `after` are all `done` (target = the wave branch); a blocked task holds the wave
   here. Once every task is `done` or `cancelled`: `reviewing` (all cancelled: `cancelled`). A task that fails to
   launch blocks the wave (`infra`, the error in the `stage` event). Tasks that can never start while no started task

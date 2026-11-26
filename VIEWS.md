@@ -66,10 +66,12 @@ type TaskView = {
 
 type WaveView = {                     // as in the contract
   id: string; repo: string; tag: string; plan: string | null; title: string; request: string
-  branch: string; target: string; base: string; origin: string | null; createdAt: string
-  stage: "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled"
+  branch: string | null; target: string; base: string | null   // null while queued: set when it starts
+  after: string[]                     // ids of the waves it waits for, [] when none
+  origin: string | null; createdAt: string
+  stage: "queued" | "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled"
   reason: "conflict" | "gates" | "dirty" | "infra" | "review_failed" | null
-  detail: string | null               // added in factory/w2: the last stage event's why
+  detail: string | null               // added in factory/w2: the last stage event's why (queued: why it can never start)
   running: boolean; interrupted: boolean
   tasks: { key: string; title: string; after: string[]; taskId: string | null; sessionId: string | null
            state: string; usage: Usage | null }[]
@@ -114,7 +116,8 @@ failed gate and the last lines of its output, or the merge's error) and, blocked
 `interrupted:` · `waits for tasks.approve` (waiting_approve) · `done: merged · merged <commit>` and `last message:`
 (done). Of a wave: `blocked: <reason>` with `why: <detail>`, the failed gate's last lines or the failed review ·
 the findings (rejected, waiting_approve) · `cannot start: <keys>` (unreachable tasks) · `merged <from>..<to>` ·
-`remote: <url>`.
+`remote: <url>` · `waits for: <ids>` (queued), with `queued: can never start` in the header and `why: <detail>` when a
+wave it waits for was cancelled.
 
 ## Tasks
 
@@ -154,14 +157,17 @@ tasks.wait ...                       (limit reached)
   timed out after 10 min · still working: 3 tasks
 ```
 
+- A queued wave is still working (`still working: wave 9c4d1e2f queued 0/2`): no attention, the wait goes on. One that
+  can never start (a wave it waits for was cancelled) needs attention
+
 ## Waves
 
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
-| `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], plan?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5 done  factory/w1 · started: record · waits: actions (record), runner (actions)` |
+| `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], after?, plan?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5 done  factory/w1 · started: record · waits: actions (record), runner (actions)`; with `after`: `declared wave 9c4d1e2f  queued  0/2 done  factory/w3 · waits for: 3f2a91c0` |
 | `waves.add` | `{id, tasks}` | `{wave: WaveView}` | `wave 3f2a91c0  building  4/6 done  factory/w1 · added: fix running` |
 | `waves.get` | `{id}` | `{wave: WaveView}` | the wave block above |
-| `waves.list` | `{repo?, tag?}` | `{waves: WaveView[]}` | one line per unfinished wave, then a count |
+| `waves.list` | `{repo?, tag?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count |
 | `waves.timeline` | `{id, since?}` | `{events: WaveEvent[], next: number}` | none: not offered to agents; the CLI prints JSON |
 | `waves.retry` · `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  reviewing  5/5 done  factory/w1` · `... merging ...` · `... cancelled ...` |
 | `waves.remove` | `{id, force?}` | `{removed: string}` | `removed wave 3f2a91c0` |
@@ -170,6 +176,7 @@ tasks.wait ...                       (limit reached)
 waves.list {repo}
   wave 3f2a91c0  reviewing  5/5 done  factory/w1  $19.20  the wave mechanism
   wave 77b0c2e1  building  1/2 done  factory/w2  $1.10  views and notifications
+  wave 9c4d1e2f  queued  0/2 done  factory/w3  after factory/w1, factory/w2  the board
   2 merged or cancelled, not shown
 ```
 
@@ -200,7 +207,8 @@ not_found: no task has an id starting with "4ae7" · next: tasks.list
 
 ## Notifications (pushed into the origin session)
 
-The same blocks, with one line on top saying why it arrived:
+The same blocks, with one line on top saying why it arrived. A queued wave says nothing until it can never start:
+`factory: wave factory/w3 can never start`, once.
 
 ```
 factory: wave factory/w1 was rejected

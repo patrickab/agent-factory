@@ -179,6 +179,21 @@ describe("pendingNotices: waves", () => {
     expect(pendingNotices([], [after], delivered)).toEqual([]);
   });
 
+  test("a queued wave says nothing; one that can never start is one event, before and after its stage event lands", () => {
+    const named = "77b0c2e1-0000-4000-8000-000000000000";
+    const queued = { stage: "queued" as const, after: [named], running: false, tasks: [] };
+    expect(pendingNotices([], [wave(queued)], none)).toEqual([]);
+    const why = "it waits for wave factory/w0 (77b0c2e1), which was cancelled: it can never start; waves.cancel or waves.remove it";
+    const judged = wave(queued, true);
+    const recorded = wave({ ...queued, detail: why }, true, [{ kind: "tasks" }, { kind: "stage" }]);
+    const notices = pendingNotices([], [judged], none);
+    expect(notices.map((notice) => notice.key)).toEqual([`wave:${WAVE_ID}:never:${named}`]);
+    expect(notices[0].text.split("\n")[0]).toBe("factory: wave factory/w1 can never start");
+    expect(notices[0].text.split("\n")[1]).toStartWith("wave 3f2a91c0  queued");
+    expect(pendingNotices([], [recorded], new Set(notices.map((notice) => notice.key)))).toEqual([]);
+    expect(pendingNotices([], [recorded], none).map((notice) => notice.key)).toEqual([`wave:${WAVE_ID}:never:${named}`]);
+  });
+
   test("a second rejection after a new stage event is a new event", () => {
     const first = pendingNotices([], [wave({ stage: "rejected" })], none);
     const later = wave({ stage: "rejected" }, false, [{ kind: "tasks" }, { kind: "stage" }, { kind: "tasks" }, { kind: "stage" }, { kind: "review" }, { kind: "stage" }]);
