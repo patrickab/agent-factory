@@ -1,8 +1,10 @@
 /**
  * The waves a Pi session declared, as the lines of the widget above its editor (`pi/index.ts`). Pure: no I/O.
  *
- * - Header: `Factory · <n> active[ · <m> needs you]` and the active waves' cost; with no active wave
- *   `Factory · <n> finished`. No waves: no lines (the widget goes)
+ * - Header: `Factory · <n> active[ · <m> needs you][ · <k> cards to rule on]` and the active waves' cost; with no
+ *   active wave `Factory · <n> finished`. No waves and no card to rule on: no lines (the widget goes)
+ * - Cards to rule on (`cardsToRule`): the session's attention notices that no later notice of the same task, wave,
+ *   scout or proof replaced and no later decision answered
  * - Active (not `merged`, not `cancelled`): those that need the supervisor first (`rejected`, `blocked`,
  *   `waiting_approve`, interrupted, building with tasks that can never start, whether a runner lives or not, queued
  *   after a cancelled wave), then newest first. A queued wave that can still start shows `queued`
@@ -18,6 +20,40 @@ export interface SessionWidgetOptions {
   showFinished: boolean;
   /** Columns available: no line is longer. */
   width: number;
+  /** The count of cards waiting for a ruling (`cardsToRule`). */
+  rulings?: number;
+}
+
+/** The subject of a notice key: `task:<id>`, `wave:<id>`, `scout:<id>`, `proof:<id>`. */
+function subject(key: string): string {
+  return key.split(":").slice(0, 2).join(":");
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+/**
+ * The count of a session branch's cards waiting for a ruling: per subject the latest `factory-notice`, when its card's
+ * tone is `attention` and no `factory` tool result after it carries a decision card that answers that subject.
+ */
+export function cardsToRule(branch: Iterable<unknown>): number {
+  const open = new Map<string, boolean>();
+  for (const entry of branch) {
+    const item = record(entry);
+    if (item?.type === "custom_message" && item.customType === "factory-notice") {
+      const details = record(item.details);
+      const card = record(details?.card);
+      if (typeof details?.key !== "string" || card === undefined) continue;
+      open.set(subject(details.key), card.tone === "attention");
+      continue;
+    }
+    const message = record(item?.message);
+    if (item?.type !== "message" || message?.role !== "toolResult" || message.toolName !== "factory") continue;
+    const answers = record(record(message.details)?.card)?.answers;
+    if (typeof answers === "string") open.delete(subject(answers));
+  }
+  return [...open.values()].filter(Boolean).length;
 }
 
 const FINISHED_STAGES: readonly string[] = ["merged", "cancelled"];
@@ -110,17 +146,18 @@ function rows(views: readonly WaveView[], width: number): string[] {
   });
 }
 
-export function sessionWidget(waves: readonly WaveView[], { showFinished, width }: SessionWidgetOptions): string[] {
-  if (waves.length === 0) return [];
+export function sessionWidget(waves: readonly WaveView[], { showFinished, width, rulings = 0 }: SessionWidgetOptions): string[] {
+  const toRule = rulings > 0 ? ` · ${rulings} ${rulings === 1 ? "card" : "cards"} to rule on` : "";
+  if (waves.length === 0) return toRule === "" ? [] : [truncate(`Factory${toRule}`, width)];
   const active = waves.filter((view) => !FINISHED_STAGES.includes(view.stage));
   const finished = waves.filter((view) => FINISHED_STAGES.includes(view.stage)).sort(newestFirst);
   active.sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)) || newestFirst(a, b));
   const finishedCost = showFinished ? money(totalCost(finished)) : "";
   if (active.length === 0) {
-    return [spread(`Factory · ${finished.length} finished`, finishedCost, width), ...(showFinished ? rows(finished, width) : [])];
+    return [spread(`Factory · ${finished.length} finished${toRule}`, finishedCost, width), ...(showFinished ? rows(finished, width) : [])];
   }
   const waiting = active.filter(needsYou).length;
-  const header = `Factory · ${active.length} active${waiting > 0 ? ` · ${waiting} needs you` : ""}`;
+  const header = `Factory · ${active.length} active${waiting > 0 ? ` · ${waiting} needs you` : ""}${toRule}`;
   const lines = [spread(header, money(totalCost(active)), width), ...rows(active, width)];
   if (finished.length === 0) return lines;
   lines.push(spread(` ${finished.length} finished`, finishedCost, width));

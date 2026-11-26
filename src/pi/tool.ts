@@ -10,11 +10,13 @@
  *   through `factory_new_task` (`followup.ts`)
  * - `scouts.start` takes the `scout` tool's path (`scout-tool.ts`): its report reaches the session once
  * - A call passes the session's id as `origin`: `tasks.start` and `waves.start` record it, notifications go there
+ * - Drawn in the TUI as its card (`cards-tui.ts`), the agent's text with the session's switch
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { callFactoryTool, factoryCard, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolError, factoryToolParameters } from "../factory-tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import type { ScoutTracker } from "./scout-tool.ts";
+import { factoryToolRenderers, type CardSwitch } from "./cards-tui.ts";
 
 /** Whether the tool runs in a factory task's session: Pi started by the runner, or a session branch holding a `factory-task` entry. */
 export function isTaskSession(branch: Iterable<{ type: string }>): boolean {
@@ -23,7 +25,8 @@ export function isTaskSession(branch: Iterable<{ type: string }>): boolean {
   return false;
 }
 
-export function registerFactoryTool(pi: ExtensionAPI, scouts?: ScoutTracker): void {
+/** `view`: the session's card switch (`registerCardRenderers`), shared with the notices. */
+export function registerFactoryTool(pi: ExtensionAPI, scouts?: ScoutTracker, view: CardSwitch = { agentText: false }): void {
   pi.registerTool({
     name: FACTORY_TOOL_NAME,
     label: "Factory",
@@ -32,6 +35,7 @@ export function registerFactoryTool(pi: ExtensionAPI, scouts?: ScoutTracker): vo
     // The runner's environment is known at load; a session that gets its task later is checked per call.
     parameters: factoryToolParameters(process.env[TASK_SESSION_ENV] === "1"),
     executionMode: "sequential",
+    ...factoryToolRenderers(view),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
         const { action, ...rest } = params as Record<string, unknown>;

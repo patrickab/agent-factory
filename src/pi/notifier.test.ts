@@ -69,6 +69,8 @@ function piSession(sessionId: string, branch: { type: string; customType?: strin
   const sent: { message: { customType: string; content: string; details?: unknown }; options: unknown }[] = [];
   const pi = {
     registerCommand: () => undefined,
+    registerMessageRenderer: () => undefined,
+    registerShortcut: () => undefined,
     registerTool: () => undefined,
     on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
     appendEntry: () => undefined,

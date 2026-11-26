@@ -40,8 +40,10 @@
  *   waves it declared arrive as a message that starts a turn (`factory-notice`)
  * - `scout` (`scout-tool.ts`) in every session: a coder's turn does not end (`agent_before_settle`) before its scouts
  *   reported, their reports arrive as `factory-scout` messages and the coder goes on; a supervisor's arrive as notices
- * - The waves a session declared show above its editor (`session-widget.ts`), refreshed by the notifier's looks; only
- *   in the interactive terminal UI (`ctx.mode === "tui"`), never in a task's own session
+ * - The waves a session declared show above its editor (`session-widget.ts`), refreshed by the notifier's looks and
+ *   at every turn's end, with the count of cards to rule on; only in the interactive terminal UI
+ *   (`ctx.mode === "tui"`), never in a task's own session
+ * - Notices and `factory` tool results are drawn as their cards (`cards-tui.ts`); Alt+V shows the agent's text
  * - A task of a wave merges into the wave's branch only until the wave's review began (`waveMergeRefusal`, invariant
  *   2): a merge after that ends the task `blocked`, `merge_failed`, its work stays in its worktree. Its merge gates
  *   are `gates` and `task_gates` (`taskWave`), not `merge_gates`: the wave runs those
@@ -51,7 +53,8 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { sessionWidget } from "../session-widget.ts";
+import { cardsToRule, sessionWidget } from "../session-widget.ts";
+import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
@@ -115,7 +118,8 @@ function isMergedTask(snapshot: Snapshot): boolean {
 export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; scoutPollMs?: number } = {}) {
   const session = newTaskSession();
   const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, holds: () => session.snapshot?.state === "running", core: testing.scoutCore, pollMs: testing.scoutPollMs });
-  registerFactoryTool(pi, scouts);
+  const cards = registerCardRenderers(pi);
+  registerFactoryTool(pi, scouts, cards);
   registerScoutTool(pi, scouts);
   /** The state the last `agent_before_settle` pipeline ended in, until `agent_settled` has acted on it. */
   let roundEnd: State | undefined;
@@ -248,14 +252,17 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
   const showWidget = () => {
     const { ctx, waves, showFinished } = widget;
     if (ctx === undefined) return;
-    if (sessionWidget(waves, { showFinished, width: 80 }).length === 0) {
+    const rulings = cardsToRule(ctx.sessionManager.getBranch());
+    if (sessionWidget(waves, { showFinished, width: 80, rulings }).length === 0) {
       ctx.ui.setWidget(WAVES_WIDGET, undefined);
       return;
     }
     // sessionWidget counts code points; a wide character takes two columns, so pi-tui cuts every line to the width.
-    const render = (width: number) => sessionWidget(waves, { showFinished, width }).map((line) => truncateToWidth(line, width));
+    const render = (width: number) => sessionWidget(waves, { showFinished, width, rulings }).map((line) => truncateToWidth(line, width));
     ctx.ui.setWidget(WAVES_WIDGET, () => ({ render, invalidate: () => undefined }));
   };
+  // A decision taken in a turn settles a card: the count follows without waiting for the notifier's next look.
+  pi.on("turn_end", () => showWidget());
 
   let notifier: Notifier | undefined;
   pi.on("session_start", async (_event, ctx) => {

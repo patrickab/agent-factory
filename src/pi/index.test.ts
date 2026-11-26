@@ -72,6 +72,8 @@ function session(cwd: string, branch: Entry[] = [], testing: Parameters<typeof f
   const tools: string[] = [];
   const toolDefs = new Map<string, { execute: (...args: unknown[]) => Promise<any> }>();
   const pi = {
+    registerMessageRenderer: () => undefined,
+    registerShortcut: () => undefined,
     registerCommand: (_name: string, options: { handler: typeof commandHandler }) => {
       commandHandler = options.handler;
     },

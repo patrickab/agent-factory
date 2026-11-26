@@ -74,6 +74,8 @@ function session(cwd: string, branch: { customType: string; data: unknown }[]) {
   const flags = { pending: false };
   const pi = {
     registerCommand: () => undefined,
+    registerMessageRenderer: () => undefined,
+    registerShortcut: () => undefined,
     registerTool: (tool: Tool) => tools.set(tool.name, tool),
     on: (name: string, handler: (event: any, ctx: any) => unknown) => handlers.set(name, handler),
     appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
