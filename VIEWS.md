@@ -355,7 +355,11 @@ rejected or blocked wave), `tasks.retry`, `waves.retry`, `tasks.cancel`, `waves.
 reads the cause from state at call time (the task's open question, block or rejection; for `contracts.apply` the latest
 rejection or block of a wave listing the contract) and the agent passes nothing. With nothing open the card is a
 decision without `answers`. Each is appended to `decisions/<origin>.jsonl` under the factory home;
-`decisions.list {origin?}` answers `{decisions: {at, key?, answers?, card}[]}` in order.
+`decisions.list` answers in order.
+
+| Action | Params | Full view | Agent view |
+|---|---|---|---|
+| `decisions.list` | `{origin?}` | `{decisions: {at, key?, answers?, card}[]}` | one line per decision: time, title |
 
 Pi: notices (`factory-notice`) and the `factory` tool's call and result are drawn as cards: icon `◆`, title, tag, state,
 cost, progress, rows, findings grouped by severity (collapsed to counts, expanded shows all), text. Readable is the

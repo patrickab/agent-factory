@@ -35,7 +35,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 
 /**
  * The count of a session branch's cards waiting for a ruling: per subject the latest `factory-notice`, when its card's
- * tone is `attention` and no `factory` tool result after it carries a decision card that answers that subject.
+ * tone is `attention` (a quiet contract notice replaces none) and no `factory` tool result after it carries a decision card that answers that subject.
  */
 export function cardsToRule(branch: Iterable<unknown>): number {
   const open = new Map<string, boolean>();
@@ -45,6 +45,8 @@ export function cardsToRule(branch: Iterable<unknown>): number {
       const details = record(item.details);
       const card = record(details?.card);
       if (typeof details?.key !== "string" || card === undefined) continue;
+      // a quiet contract notice (`wave:<id>:contract:<n>`) says nothing of the wave's stage: it keeps an open entry
+      if (card.tone !== "attention" && details.key.split(":")[2] === "contract") continue;
       open.set(subject(details.key), card.tone === "attention");
       continue;
     }

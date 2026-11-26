@@ -175,6 +175,12 @@ describe("cardsToRule and the widget", () => {
     expect(cardsToRule([{ type: "custom_message", customType: "factory-notice", content: "old" }])).toBe(0);
   });
 
+  test("a quiet contract notice keeps an open rejection of its wave", () => {
+    const rejected = noticeEntry("wave:bbbb2222:rejected:3", "attention");
+    expect(cardsToRule([rejected, noticeEntry("wave:bbbb2222:contract:4", "quiet")])).toBe(1);
+    expect(cardsToRule([rejected, noticeEntry("wave:bbbb2222:merged:5", "quiet")])).toBe(0);
+  });
+
   test("the widget header adds the count; with no wave the count alone", () => {
     expect(sessionWidget([], { showFinished: false, width: 80, rulings: 2 })).toEqual(["Factory · 2 cards to rule on"]);
     expect(sessionWidget([], { showFinished: false, width: 80, rulings: 0 })).toEqual([]);
