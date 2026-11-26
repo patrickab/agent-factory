@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyEntry, approvedFrom, followUpMessages, gateData, mergeFailedPrompt, parseStartPayload, rebuild, RESTING_STATES, RETRY_PROMPT, roundsUsed, wasInterrupted, type Finding, type Settings, type Task } from "./state.ts";
+import { applyEntry, approvedFrom, followUpMessages, gateData, mergeFailedPrompt, minorFindings, parseStartPayload, rebuild, RESTING_STATES, RETRY_PROMPT, reviewFeedback, roundsUsed, wasInterrupted, type Finding, type Settings, type Task } from "./state.ts";
 
 const task: Task = {
   title: "Add notes",
@@ -118,6 +118,22 @@ describe("derived values", () => {
     expect(approvedFrom("ok", [finding("blocker")])).toBe(false);
     expect(approvedFrom("malformed", [])).toBe(false);
     expect(approvedFrom("no_diff", [])).toBe(false);
+  });
+
+  test("a verdict with only minor findings approves and keeps them; the next round gets blocker and major ones only", () => {
+    const minor = { file: "a.ts", line: 2, severity: "minor" as const, text: "rename x" };
+    const major = { file: "b.ts", line: null, severity: "major" as const, text: "bug" };
+    expect(approvedFrom("ok", [minor])).toBe(true);
+    expect(minorFindings(1, [minor])).toEqual([{ round: 1, file: "a.ts", line: 2, text: "rename x" }]);
+    const feedback = reviewFeedback(2, [minor, major]);
+    expect(feedback).toContain("[major] b.ts: bug");
+    expect(feedback).not.toContain("rename x");
+  });
+
+  test("minor findings of old or malformed review records: none, never an error", () => {
+    expect(minorFindings(1, undefined)).toEqual([]);
+    expect(minorFindings(1, "x")).toEqual([]);
+    expect(minorFindings(1, [null, { severity: "minor" }, { severity: "minor", file: "a", text: "t", line: "3" }])).toEqual([{ round: 1, file: "a", line: null, text: "t" }]);
   });
 
   test("a killed gate keeps a null exit code and only the tail of its output", () => {

@@ -20,7 +20,7 @@ import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchE
 import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
 import { DEFAULT_SETTINGS, loadSettings, modelChoice, registeredRepos, resolveSettings, type StoredSettings } from "./settings.ts";
-import { normalizeModels, parseSettingsFields } from "./state.ts";
+import { minorFindings, normalizeModels, parseSettingsFields, type MinorFinding } from "./state.ts";
 import { mergeTrees, sessionTask } from "./sync.ts";
 import { listTasks, tagInGroup, TaskBusyError, type TaskRecord } from "./tasks.ts";
 import { errorText } from "./util.ts";
@@ -303,6 +303,10 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[], read: Listing
     return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: taskUsage, ...(id === undefined ? {} : { id }) };
   });
   for (const review of fold.reviews) usage = addUsage(usage, review.usage);
+  const minors: MinorFinding[] = [
+    ...fold.tasks.flatMap((task) => (views.get(task.key)?.minors ?? []).map((minor) => ({ ...minor, task: task.key }))),
+    ...fold.reviews.flatMap((review) => minorFindings(review.round, review.findings)),
+  ];
   // The wave's own scouts (its reviewer's), then its tasks' (in their usage already).
   const waveScouting = await scoutUsage({ kind: "wave", id: fold.id });
   usage = addUsage(usage, waveScouting);
@@ -320,7 +324,7 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[], read: Listing
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
   const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
   const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
-  return { view: { ...fold, reviews, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, scoutingCost, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, stuck };
+  return { view: { ...fold, reviews, minors, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, scoutingCost, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, stuck };
 }
 
 /**

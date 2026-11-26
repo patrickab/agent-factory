@@ -85,6 +85,7 @@ describe("task reads", () => {
       failure: null,
       review: { round: 1, status: "unknown", approved: false, findings: [] },
       merged: null,
+      minors: [],
       flaky: [],
       actions: ["tasks.retry", "tasks.cancel", "tasks.remove", "tasks.message"],
     });
@@ -124,6 +125,27 @@ describe("task reads", () => {
     expect(((await callAction("tasks.get", { id: ID_1 })) as TaskView).flaky).toEqual([]);
     writeSession(record, [...head, gate(["a > b"]), custom("factory-round", { round: 2, trigger: "gates" }), gate(["a > b", "c"]), custom("factory-state", { state: "merging", round: 2, reason: "passed" })]);
     expect(((await callAction("tasks.get", { id: ID_1 })) as TaskView).flaky).toEqual(["a > b", "c"]);
+  });
+
+  test("tasks.get: the minor findings of every review, an approving one too; old review records without findings parse", async () => {
+    const record = fakeRecord(ID_1, "/r");
+    await writeTask(record);
+    const custom = (customType: string, data: object) => ({ type: "custom", customType, timestamp: "t", data });
+    const finding = (severity: string, file: string, text: string, line: number | null = null) => ({ severity, file, line, text });
+    writeSession(record, [
+      sessionEntries[0],
+      sessionEntries[1],
+      custom("factory-review", { round: 1 }),
+      custom("factory-review", { round: 2, status: "ok", approved: false, findings: [finding("major", "a.ts", "bug", 3), finding("minor", "a.ts", "rename x", 4)] }),
+      custom("factory-review", { round: 3, status: "ok", approved: true, findings: [finding("minor", "b.ts", "doc it"), { severity: "minor" }] }),
+      custom("factory-state", { state: "merging", round: 3, reason: "passed" }),
+    ]);
+    const view = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
+    expect(view.minors).toEqual([
+      { round: 2, file: "a.ts", line: 4, text: "rename x" },
+      { round: 3, file: "b.ts", line: null, text: "doc it" },
+    ]);
+    expect(view.review).toMatchObject({ round: 3, approved: true });
   });
 
   test("tasks.get before the session file exists: nulls", async () => {

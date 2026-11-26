@@ -17,7 +17,7 @@
  */
 import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { FactoryError } from "./core-shared.ts";
-import { MODEL_SIZES, normalizeModels, parseSettingsFields, RESTING_STATES, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
+import { MODEL_SIZES, normalizeModels, parseSettingsFields, RESTING_STATES, type MinorFinding, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
@@ -210,6 +210,11 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null; id?: string }[];
   counts: { total: number; done: number };
   reviews: WaveReview[];
+  /**
+   * The minor findings of its tasks' reviews (`task`: the task's key), then of its own reviews, oldest first: stored,
+   * they never reject. Always set by the core.
+   */
+  minors?: MinorFinding[];
   gates: WaveGate[];
   merge: WaveMerge | null;
   remote: WaveRemote | null;

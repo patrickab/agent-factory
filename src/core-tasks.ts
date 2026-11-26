@@ -36,7 +36,7 @@ import {
 import { inboxReadPath, readFactoryStates, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { runCommand } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
-import { COMMIT_ASK_TYPE, isFactoryPrompt, messageText, normalizeModels, parseSettingsFields, RESTING_STATES, type Finding, type Settings, type State } from "./state.ts";
+import { COMMIT_ASK_TYPE, isFactoryPrompt, messageText, minorFindings, normalizeModels, parseSettingsFields, RESTING_STATES, type Finding, type MinorFinding, type Settings, type State } from "./state.ts";
 import { listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { cents, errorText, isRecord } from "./util.ts";
 import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
@@ -87,6 +87,8 @@ export interface TaskView {
   failure: string | null;
   /** The task's last review (`factory-review`), null before one. Added in factory/w2. */
   review: { round: number; status: string; approved: boolean; findings: Finding[] } | null;
+  /** The minor findings of every review (`factory-review`), oldest first: stored, they never start a round. Always set by the core. */
+  minors?: MinorFinding[];
   /** The commit the last successful merge landed, null before one. Added in factory/w2. */
   merged: string | null;
   /** The `flaky` names of the task's gate records (steps that failed and then passed on their rerun), in order. */
@@ -203,13 +205,14 @@ function reviewOf(data: Record<string, unknown>): TaskView["review"] {
  * message (not its answer to the commit message ask), the failure of the round it stopped in when `blocked`, its last
  * review, the commit its last merge landed.
  */
-function taskOutcome(entries: Record<string, unknown>[], blocked: boolean): Pick<TaskView, "lastMessage" | "failure" | "review" | "merged"> {
+function taskOutcome(entries: Record<string, unknown>[], blocked: boolean): Pick<TaskView, "lastMessage" | "failure" | "review" | "merged" | "minors"> {
   let lastMessage: string | null = null;
   let answeringCommitAsk = false;
   let failedGate: string | null = null;
   let mergeError: string | null = null;
   let review: TaskView["review"] = null;
   let merged: string | null = null;
+  const minors: MinorFinding[] = [];
   for (const entry of entries) {
     if (customData(entry, "factory-round")) {
       // A new round: what failed before it was fed back to the coder.
@@ -223,12 +226,13 @@ function taskOutcome(entries: Record<string, unknown>[], blocked: boolean): Pick
     if (merge) mergeError = merge.ok !== true && typeof merge.error === "string" ? merge.error : null;
     const reviewed = customData(entry, "factory-review");
     if (reviewed) review = reviewOf(reviewed) ?? review;
+    if (reviewed && typeof reviewed.round === "number") minors.push(...minorFindings(reviewed.round, reviewed.findings));
     if (entry.type !== "message" || !isRecord(entry.message)) continue;
     const text = messageText(entry.message).trim();
     if (entry.message.role === "user" && !isFactoryPrompt(text)) answeringCommitAsk = false;
     if (entry.message.role === "assistant" && text !== "" && !answeringCommitAsk) lastMessage = text;
   }
-  return { lastMessage, failure: blocked ? (failedGate ?? mergeError) : null, review, merged };
+  return { lastMessage, failure: blocked ? (failedGate ?? mergeError) : null, review, merged, minors };
 }
 
 /** The `flaky` names of every `factory-gate` entry, without repeats. */

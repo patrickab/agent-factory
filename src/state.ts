@@ -87,6 +87,30 @@ export interface Finding {
   text: string;
 }
 
+/** A minor finding as stored (`TaskView.minors`, `WaveView.minors`): never starts a round, kept with its review's round. */
+export interface MinorFinding {
+  round: number;
+  file: string;
+  line: number | null;
+  text: string;
+  /** The key of the wave's task whose review found it; absent for a task's own view and the wave's own reviews. */
+  task?: string;
+}
+
+/** The minor findings of a review's `findings` as stored; malformed entries of old records are skipped. */
+export function minorFindings(round: number, findings: unknown): MinorFinding[] {
+  if (!Array.isArray(findings)) return [];
+  const minors: MinorFinding[] = [];
+  for (const raw of findings) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const finding = raw as Record<string, unknown>;
+    if (finding.severity !== "minor" || typeof finding.file !== "string" || typeof finding.text !== "string") continue;
+    const line = typeof finding.line === "number" ? finding.line : null;
+    minors.push({ round, file: finding.file, line, text: finding.text });
+  }
+  return minors;
+}
+
 export interface ReviewUsage {
   input: number;
   output: number;
@@ -351,7 +375,7 @@ export function gateData(round: number, phase: GatePhase, argv: string[], result
   return data;
 }
 
-/** `approved` is never the reviewer's own claim: it follows from the severities. */
+/** `approved` is never the reviewer's own claim: it follows from the severities. Only a blocker or major finding rejects. */
 export function approvedFrom(status: ReviewStatus, findings: Finding[]): boolean {
   return status === "ok" && findings.every((finding) => finding.severity === "minor");
 }
@@ -378,8 +402,11 @@ export function conflictFeedback(round: number, branch: string, files: string[],
   return `Round ${round}: the task branch conflicts with ${branch}. Conflicting files:\n${list || "- (none listed)"}\n${steps}`;
 }
 
+/** The next round's feedback: the blocker and major findings only, minor ones never reach the coder as a round. */
 export function reviewFeedback(round: number, findings: Finding[]): string {
-  const lines = findings.map((finding) => `- [${finding.severity}] ${finding.file}${finding.line === null ? "" : `:${finding.line}`}: ${finding.text}`);
+  const lines = findings
+    .filter((finding) => finding.severity !== "minor")
+    .map((finding) => `- [${finding.severity}] ${finding.file}${finding.line === null ? "" : `:${finding.line}`}: ${finding.text}`);
   return `Round ${round}: the review found problems. Fix every blocker and major finding, then stop.\n\n${lines.join("\n")}`;
 }
 

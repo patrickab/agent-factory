@@ -139,7 +139,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   (the coder's open question while `waiting_answer`, else null), `running` = a live runner holds it,
   `interrupted`, the task's settings, token (`input` uncached, `output`, `cacheRead`, `cacheWrite`) and cost usage of coder, reviews and scouts (`scoutingCost`: the scouts alone), `lastMessage` (the coder's last
   message, not its commit message), `failure` (while `blocked`: the failed gate with its output tail, or the merge's
-  error), `review` (the last one: round, status, approved, findings), `merged` (the commit the last merge landed), `flaky` (gate steps that passed on their rerun),
+  error), `review` (the last one: round, status, approved, findings), `minors` (the minor findings of every review: kept, they never reject or start a round), `merged` (the commit the last merge landed), `flaky` (gate steps that passed on their rerun),
   `actions` = the task actions the core accepts now), `tasks.timeline` (session entries as `{at, kind, data}`,
   `since`/`next` = a byte cursor, read from `since` on), `tasks.diff` (base, patch, per-file added/removed lines),
   `tasks.start|approve|retry|cancel|remove|message`, `tasks.wait`,
@@ -305,7 +305,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   session's id; `open: true`: not merged or cancelled; filters combine) answer `WaveView`s: the declaration
   (without `overrides`), `stage`, `detail` (the last `stage` event's why, else null), each task's `state` (`pending`
   before it started) and `usage`, `counts` (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus
-  reviews), `reviews`, `gates` (each with `flaky` when a step passed on its rerun), `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
+  reviews), `reviews`, `minors` (its tasks' minor findings with the task's key, then its own reviews'), `gates` (each with `flaky` when a step passed on its rerun), `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
   answers `{events, next}` (`since`/`next` count events)
 
 ### Test slots (`src/test-slots.ts`)

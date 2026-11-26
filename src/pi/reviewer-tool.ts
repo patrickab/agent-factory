@@ -27,7 +27,7 @@ const parameters = {
           severity: {
             type: "string",
             enum: ["blocker", "major", "minor"],
-            description: "blocker: breaks the task or the build. major: a real bug or a missed requirement. minor: everything else",
+            description: "blocker: breaks the task or the build. major: a real bug or a missed requirement. Only these reject. minor: everything else; stored, it never rejects",
           },
           text: { type: "string", description: "What breaks and why, one or two sentences" },
         },

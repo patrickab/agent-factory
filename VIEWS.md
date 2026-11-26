@@ -61,6 +61,7 @@ type TaskView = {
   lastMessage: string | null          // the coder's last message (not its answer to the commit message ask)
   failure: string | null              // only in blocked: "<gate argv> (exit N)" + output tail, or the merge's error
   review: { round: number; status: string; approved: boolean; findings: Finding[] } | null   // the last review
+  minors: { round: number; file: string; line: number | null; text: string }[]   // minor findings of every review: kept, never a round
   merged: string | null               // the commit the last merge landed
   flaky: string[]                     // gate steps that failed, then passed on their rerun: failing test names, else commands
   actions: string[]                   // tasks.* valid now
@@ -83,6 +84,7 @@ type WaveView = {                     // as in the contract
              verdict: "approved" | "rejected" | "failed"; status: string
              findings: { severity: "blocker" | "major" | "minor"; file: string; line: number | null; text: string }[]
              usage: Usage | null; wallMs: number }[]
+  minors: { round: number; task?: string; file: string; line: number | null; text: string }[]   // its tasks' (task: key), then its own
   gates: { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null; flaky?: string[] }[]
   merge: { at: string; from: string; to: string; queueMs: number } | null
   remote: { number: number | null; url: string | null; pushed: string | null; error: string | null } | null
@@ -116,7 +118,8 @@ wave 3f2a91c0  rejected  4/5 done  factory/w1  $18.40
   review 2: rejected · 2 major, 1 minor
     major  src/wave-runner.ts:309  A wave whose remaining tasks can never start stays building forever. Fix: ...
     major  src/core.ts:1060  A task that fails to launch is retried every 10 s, silently. Fix: ...
-    minor  src/tasks.ts:94  tasks.import can put a task into a wave. Fix: ...
+  minor findings: 1
+    minor  src/tasks.ts:94  tasks.import can put a task into a wave. Fix: ...  (review 2)
   updated: docs (request), wave (title)
   feedback: 1
     context (coder, task a113f7bb): read 40 files, needed 3 · cost: 2 avoidable rounds · suggestion: ...
@@ -129,7 +132,8 @@ failed gate and the last lines of its output, or the merge's error) and, blocked
 (done). Of a wave: `blocked: <reason>` with `why: <detail>`, the failed gate's last lines or the failed review ·
 the findings (rejected, waiting_approve) · `cannot start: <keys>` (unreachable tasks) · `merged <from>..<to>` ·
 `remote: <url>` · `waits for: <ids>` (queued), with `queued: can never start` in the header and `why: <detail>` when a
-wave it waits for was cancelled. Of both: `flaky: <names>` when a gate step passed only on its rerun.
+wave it waits for was cancelled. Of both: `flaky: <names>` when a gate step passed only on its rerun; `minor findings: N` with one line each (a review's
+lines list only blocker and major findings: only they reject).
 
 ## Tasks
 

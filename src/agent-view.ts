@@ -13,7 +13,7 @@
  */
 import type { TaskView } from "./core.ts";
 import type { ActionSpec } from "./feature.ts";
-import type { Finding } from "./state.ts";
+import { minorFindings, type Finding, type MinorFinding } from "./state.ts";
 import type { WaveView } from "./waves.ts";
 import { FEATURES } from "./features.ts";
 import type { Renderer } from "./feature.ts";
@@ -99,14 +99,30 @@ function taskNext(view: TaskView): string {
   return `next: ${named.join(", ")}`;
 }
 
-/** `review 2: rejected · 2 major, 5 minor` and, with `findings`, one line per finding. Tasks and waves alike. */
+/**
+ * `review 2: rejected · 2 major, 5 minor` and, with `findings`, one line per blocker and major finding (the minor ones
+ * are listed by `minorLines`). Tasks and waves alike.
+ */
 function reviewSummary(round: number, verdict: string, findings: readonly Finding[], withFindings: boolean): string[] {
   const counts = (["blocker", "major", "minor"] as const)
     .map((severity) => [severity, findings.filter((finding) => finding.severity === severity).length] as const)
     .filter(([, count]) => count > 0)
     .map(([severity, count]) => `${count} ${severity}`);
   const head = `  review ${round}: ${verdict}${counts.length > 0 ? ` · ${counts.join(", ")}` : ""}`;
-  return withFindings ? [head, ...findings.map(findingLine)] : [head];
+  return withFindings ? [head, ...findings.filter((finding) => finding.severity !== "minor").map(findingLine)] : [head];
+}
+
+/** `minor findings: 2` and one line each, with the review (and the wave's task) that found it. Tasks and waves alike. */
+function minorLines(minors: readonly MinorFinding[]): string[] {
+  if (minors.length === 0) return [];
+  return [
+    `  minor findings: ${minors.length}`,
+    ...minors.map((minor) => {
+      const where = minor.line === null ? minor.file : `${minor.file}:${minor.line}`;
+      const source = minor.task === undefined ? `review ${minor.round}` : `task ${minor.task}, review ${minor.round}`;
+      return `    ${fields("minor", where, minor.text.replace(/\s*\n\s*/g, " "), `(${source})`)}`;
+    }),
+  ];
 }
 
 /** The lines of a task's state, under its header and title. */
@@ -145,7 +161,7 @@ function slotLine(view: { waitingForSlot?: true }): string[] {
 
 /** One task: header, title, the lines of its state, `next:`. Exported for notifications. */
 export function taskBlock(view: TaskView): string {
-  return scrub([taskHeader(view), `  ${view.title}`, ...taskStateLines(view), ...slotLine(view), ...flakyLine(view.flaky), `  ${taskNext(view)}`].join("\n"));
+  return scrub([taskHeader(view), `  ${view.title}`, ...taskStateLines(view), ...minorLines(view.minors ?? []), ...slotLine(view), ...flakyLine(view.flaky), `  ${taskNext(view)}`].join("\n"));
 }
 
 /** One line of a list: the header and the title. */
@@ -344,7 +360,8 @@ function updateLines(view: WaveView): string[] {
 export function waveBlock(view: WaveView): string {
   const next = view.actions.length === 0 ? "next: none, it runs" : `next: ${view.actions.join(", ")}`;
   const flaky = [...new Set(view.gates.flatMap((gate) => gate.flaky ?? []))];
-  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...slotLine(view), ...flakyLine(flaky), ...updateLines(view), ...feedbackLines(view), `  ${next}`].join("\n"));
+  const minors = view.minors ?? view.reviews.flatMap((review) => minorFindings(review.round, review.findings));
+  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...minorLines(minors), ...slotLine(view), ...flakyLine(flaky), ...updateLines(view), ...feedbackLines(view), `  ${next}`].join("\n"));
 }
 
 export function waveList(waves: WaveView[]): string {
