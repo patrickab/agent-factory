@@ -325,6 +325,9 @@ export function feedbackDraft(round: number, trigger: Trigger, content: string):
   return { type: "custom_message", customType: FEEDBACK_TYPE, content, display: true, details: { round, trigger } };
 }
 
+/** Exit code of a hook or gate whose environment is broken (missing packages, tools, services): not the coder's to fix. */
+export const INFRA_EXIT = 75;
+
 export function passed(result: CommandResult): boolean {
   return result.exitCode === 0 && !result.killed;
 }

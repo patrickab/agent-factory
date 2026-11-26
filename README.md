@@ -81,7 +81,9 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 - `hooks.after_merge`: run in the main checkout after a merge that changed a lockfile
 - Gates, three argv lists. Exit 0 passes, 75 = broken environment (the task blocks), else fails. A failed step runs
   once more (not after exit 75, a kill or a timeout): passing then, it counts as passed and is recorded `flaky` (the
-  failing test names from its output, else its command) on the task or wave:
+  failing test names from its output, else its command) on the task or wave. A step that reruns its own failures
+  prints `gate-flaky: <name>` per name that passed only on its rerun (passed: recorded `flaky`) and `gate-reran:
+  <name>` per name that failed again; a step that printed either is not run once more:
 
   | List | What | When |
   |---|---|---|
@@ -93,7 +95,8 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   (a changed `*.test.ts`, the test next to a changed source, the tests importing it, transitively over relative
   imports). The change starts at `$FACTORY_BASE`, else at the merge base with the default branch; `--all` runs every
   test file. One `bun test` process per file, the cores but two at once (`FACTORY_TEST_JOBS` overrides), at low
-  priority; a file that fails beside the others and passes alone passes as flaky
+  priority; a file that fails beside the others runs once more alone: passing then, it passes and is printed as
+  `gate-flaky: <file>`, else `gate-reran: <file>`. So the gate records it `flaky` and never runs the suite again
 - `protected`: globs the coder must not change. Default: `factory.yaml`, `.factory/**`
 - `lockfiles`: file names that trigger `after_merge` and go last in the review patch. Default:
   `uv.lock`, `package-lock.json`, `bun.lock`, `bun.lockb`
@@ -132,8 +135,8 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `actions` = the task actions the core accepts now), `tasks.timeline` (session entries as `{at, kind, data}`,
   `since`/`next` = a byte cursor, read from `since` on), `tasks.diff` (base, patch, per-file added/removed lines),
   `tasks.start|approve|retry|cancel|remove|message`, `tasks.wait`,
-  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below), `scouts.start|get|list` (below)
-  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below), `gates.prove|get` (below)
+  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below), `scouts.start|get|list` (below),
+  `gates.prove|get` (below)
 - `tasks.list {repo?, tag?}`: `tag` keeps the tasks whose tag is it or starts with `tag + "/"` (`a` holds `a/b`, not
   `ab`)
 - `tasks.wait {ids? | tag? | wave?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique
@@ -319,8 +322,9 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   declaring Pi session. Answers `{proof}` at once
 - States: `running`, `passed`, `flaky` (a step passed on its rerun; `flaky` holds the failing test names, else the
   command), `failing` (`failing`: the step, `hooks.after_create` for a hook, its output's tail and `log`, the path of
-  its full output). `interrupted`: `running` and its runner no longer lives. The worktree is removed (forced) before
-  the end is recorded
+  its full output, a hook's included). `interrupted`: `running` and its runner no longer lives, or noted no pid 10
+  seconds after the declaration. The worktree is removed (forced) before the end is recorded; one an interrupted
+  proof left by the next `gates.get` of it or `gates.prove` in its repo
 - `gates.get {id}`: `{proof: ProofView}` (declaration, `state`, `steps` with `flaky`, `flaky`, `failing`, `endedAt`,
   `running`, `interrupted`). `tasks.wait {ids}` watches a proof; it needs attention `failing` or interrupted
 - The declaring Pi session gets one notice when it ends: `passed`, `flaky`, `failing` or `interrupted`
@@ -477,7 +481,7 @@ Commands (inside a task's own Pi session):
   its last sync: the ref `refs/factory/sync/<task id>` in the repo
 - `scouts/<caller kind>-<caller id>/<id>/`: a scout (`scout.json`, `events.jsonl`, `report.md`, `written.jsonl`)
 - `proofs/<id>.jsonl`: a gate proof, append-only, written by its runner: line 1 its declaration, then one `step` per
-  gate step and one `end`; `.pid` its runner (pid and start time), `.log` the runner's output, `.failing.log` the
+  gate step and one `end`; `.pid` its runner (pid and start time, written by `gates.prove` and by the runner itself), `.log` the runner's output, `.failing.log` the
   output of the step that failed
 - Reviews: `<agent dir>/factory-reviews/<session id>/`. Merge lock and queue: in the repo's git common dir
 

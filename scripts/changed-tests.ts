@@ -9,9 +9,12 @@
  *   imports a changed file, transitively over relative imports (`./`, `../`)
  * - Runs them one `bun test` process per file, the cores but two at once (`FACTORY_TEST_JOBS` overrides), at low priority.
  *   A failed file runs once more alone and passes as flaky when it passes then. Nothing reached: exit 0
+ * - Every file it reran is named in the gate helper's marks (`gateMarks`): a flaky one is recorded `flaky`, and the
+ *   helper does not run the whole step again
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
+import { FLAKY_MARK, RERAN_MARK } from "../src/flaky-rerun.ts";
 
 const SOURCE = /\.(ts|tsx|mts|js|mjs)$/;
 const TEST = /\.test\.(ts|tsx|mts|js|mjs)$/;
@@ -135,6 +138,11 @@ export async function runFiles(root: string, files: string[], jobs: number, env:
   return { results: results.sort((a, b) => a.file.localeCompare(b.file)), flaky };
 }
 
+/** The gate helper's marks (`innerReruns`): a `FLAKY_MARK` line per file that passed only alone, a `RERAN_MARK` line per file that failed alone too. */
+export function gateMarks(results: readonly FileResult[], flaky: readonly string[]): string[] {
+  return [...flaky.map((file) => `${FLAKY_MARK}${file}`), ...results.filter((result) => !result.passed).map((result) => `${RERAN_MARK}${result.file}`)];
+}
+
 if (import.meta.main) {
   const root = git(process.cwd(), ["rev-parse", "--show-toplevel"])[0].trim();
   const everything = process.argv.includes("--all");
@@ -154,6 +162,7 @@ if (import.meta.main) {
   const failed = results.filter((result) => !result.passed);
   for (const result of failed) console.log(`\n== ${result.file}: failed\n${result.output.trimEnd()}`);
   for (const result of results.filter((entry) => entry.passed)) console.log(`ok ${result.file} ${result.seconds.toFixed(1)}s${flaky.includes(result.file) ? " (flaky: failed beside the others, passed alone)" : ""}`);
+  for (const line of gateMarks(results, flaky)) console.log(line);
   console.log(`changed-tests: ${results.length - failed.length} passed, ${failed.length} failed in ${((Date.now() - started) / 1000).toFixed(0)}s${failed.length > 0 ? `: ${failed.map((result) => result.file).join(" ")}` : ""}`);
   process.exit(failed.length === 0 ? 0 : 1);
 }

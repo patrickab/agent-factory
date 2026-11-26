@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import { caseDir, expectError, git, makeRepo, useCoreFixture } from "./core-test-kit.ts";
-import type { ProofView } from "./gates-prove.ts";
+import { PROOF_RUNNER_PATH, type ProofView } from "./gates-prove.ts";
 import { worktreePath } from "./launch.ts";
 import { pendingNotices } from "./notify.ts";
 
@@ -109,6 +109,15 @@ describe("gates.prove", () => {
     expectWorktreeGone(repo, proof);
   });
 
+  test("a failing after_create hook's whole output is in the failing log, not its tail", async () => {
+    const repo = repoWith(["hooks:", "  after_create:", '    - [sh, -c, "echo first line; seq 1 500; echo last line; exit 3"]', "merge_gates:", "  - [touch, never-run]", ""].join("\n"));
+    const { proof } = await prove(repo);
+    expect(proof.failing?.tail).not.toContain("first line");
+    const log = readFileSync(proof.failing?.log ?? "", "utf8");
+    expect(log).toContain("first line\n1\n2\n");
+    expect(log).toContain("500\nlast line");
+  });
+
   test("refused without a committed factory.yaml; gates.get of an unknown id is not_found", async () => {
     const repo = makeRepo(false);
     await expectError(callAction("gates.prove", {}, { cwd: repo }), "refused", "has no factory.yaml");
@@ -127,5 +136,48 @@ describe("gates.prove", () => {
     expect(answer.attention).toEqual([id]);
     expect(answer.proofs[0]).toMatchObject({ state: "running", running: false, interrupted: true });
     expect(pendingNotices([], [], new Set(), [], answer.proofs).map((notice) => notice.key)).toEqual([`proof:${id}:interrupted`]);
+  });
+});
+
+describe("a proof whose runner is gone", () => {
+  /** A proof of `repo` declared at `createdAt`, its runner noted as `pid` (none: no note). */
+  function proofRecord(repo: string, createdAt: string, pid?: string): string {
+    const id = crypto.randomUUID();
+    const dir = join(caseDir, "agent", "factory", "proofs");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${id}.jsonl`), `${JSON.stringify({ id, repo, branch: "main", commit: git(repo, "rev-parse", "main"), origin: ORIGIN, createdAt })}\n`);
+    if (pid !== undefined) writeFileSync(join(dir, `${id}.pid`), pid);
+    return id;
+  }
+
+  const get = async (id: string) => ((await callAction("gates.get", { id })) as { proof: ProofView }).proof;
+
+  test("no runner note: running while it may still be spawned, interrupted a few seconds after its declaration", async () => {
+    const repo = repoWith("merge_gates: []\n");
+    expect(await get(proofRecord(repo, new Date().toISOString()))).toMatchObject({ running: true, interrupted: false });
+    expect(await get(proofRecord(repo, new Date(Date.now() - 60_000).toISOString()))).toMatchObject({ running: false, interrupted: true });
+  });
+
+  test("the runner notes itself: started without gates.prove, it reads as running, not interrupted", async () => {
+    const repo = repoWith('merge_gates:\n  - [sh, -c, "sleep 2"]\n');
+    const id = proofRecord(repo, "2026-01-01T00:00:00.000Z");
+    const runner = Bun.spawn(["bun", PROOF_RUNNER_PATH, id], { env: process.env, stdout: "ignore", stderr: "ignore" });
+    await Bun.sleep(1_000);
+    expect(await get(id)).toMatchObject({ state: "running", running: true, interrupted: false });
+    await runner.exited;
+    expect(await get(id)).toMatchObject({ state: "passed", interrupted: false });
+  });
+
+  test("its leftover worktree is removed by the next gates.get of it and by the next gates.prove in its repo", async () => {
+    const repo = repoWith("merge_gates: []\n");
+    for (const act of [(id: string) => get(id), () => callAction("gates.prove", {}, { cwd: repo, origin: ORIGIN })]) {
+      const id = proofRecord(repo, "2026-01-01T00:00:00.000Z", "999999999 1\n");
+      const path = worktreePath(repo, `proof-${id.slice(0, 8)}`);
+      git(repo, "worktree", "add", "--quiet", "--detach", path, "main");
+      writeFileSync(join(path, "scratch.txt"), "left by the killed runner");
+      await act(id);
+      expect(existsSync(path)).toBe(false);
+      expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(path);
+    }
   });
 });

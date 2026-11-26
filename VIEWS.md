@@ -195,6 +195,8 @@ concern: how pi-host restarts a session child
 
 MISSING
 1. ...
+```
+
 ## Gate proofs
 
 | Action | Params | Full view | Agent view |
@@ -271,6 +273,10 @@ concern: how pi-host restarts a session child
 MISSING
 ...
 report: ~/.pi/agent/factory/scouts/session-.../5c0a7d21-.../report.md
+```
+
+A gate proof, when it ends:
+
 ```
 factory: the gates of master pass, flaky
 proof 9c1d2e3f  flaky  master 0ab12cd

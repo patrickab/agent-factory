@@ -42,11 +42,10 @@ import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, tr
 import { runGateStep } from "./flaky-rerun.ts";
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
-import { INFRA_EXIT } from "./pipeline.ts";
 import { commentReview, mergePending, publishMerge, publishWave } from "./remote.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
-import { passed, type GateData, type Task } from "./state.ts";
+import { INFRA_EXIT, passed, type GateData, type Task } from "./state.ts";
 import { lockFile, TaskBusyError } from "./tasks.ts";
 import { errorText, outputTail } from "./util.ts";
 import { clearPoke, WAVE_LOCK_ENV, waveLockPath, wavePokePath, waveReviewsDir } from "./wave-poke.ts";

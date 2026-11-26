@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { allTests, changedTests, defaultBase, jobCount, reachedTests, runFiles } from "./changed-tests.ts";
+import { innerReruns } from "../src/flaky-rerun.ts";
+import { allTests, changedTests, defaultBase, gateMarks, jobCount, reachedTests, runFiles } from "./changed-tests.ts";
 
 /** A fixture tree: a chain a <- b <- c (c imports b imports a), each with its test, and an unrelated d. */
 const TREE: Record<string, string> = {
@@ -120,4 +121,13 @@ describe("running the reached files", () => {
     expect(results[0].output).toContain("bad");
     expect(flaky).toEqual(["once.test.ts"]);
   });
+});
+
+test("gateMarks: the files that passed only alone are the gate helper's flaky names, a file that failed alone too stops its rerun", () => {
+  const results = [
+    { file: "src/a.test.ts", passed: true, output: "", seconds: 1 },
+    { file: "src/b.test.ts", passed: false, output: "", seconds: 1 },
+  ];
+  expect(innerReruns(gateMarks(results, ["src/a.test.ts"]).join("\n"))).toEqual({ flaky: ["src/a.test.ts"], reran: true });
+  expect(innerReruns(gateMarks(results.slice(0, 1), []).join("\n"))).toEqual({ flaky: [], reran: false });
 });

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { failingTests, runGateStep } from "./flaky-rerun.ts";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { FLAKY_MARK, RERAN_MARK, failingTests, runGateStep } from "./flaky-rerun.ts";
 import type { CommandResult } from "./run.ts";
 
 function result(exitCode: number | null, output = "", over: Partial<CommandResult> = {}): CommandResult {
@@ -63,4 +65,29 @@ describe("runGateStep", () => {
     expect((await runGateStep(["t"], step.run, () => true)).result.exitCode).toBe(1);
     expect(step.runs()).toBe(1);
   });
+});
+
+describe("a step that reruns inside (scripts/changed-tests.ts)", () => {
+  test("passes with flaky marks: passed once, flaky with the marked names", async () => {
+    const step = stepOf(result(0, `ok src/a.test.ts\n${FLAKY_MARK}src/a.test.ts\nchanged-tests: 1 passed`));
+    expect(await runGateStep(["bun", "scripts/changed-tests.ts"], step.run)).toMatchObject({ flaky: ["src/a.test.ts"] });
+    expect(step.runs()).toBe(1);
+  });
+
+  test("fails after its own rerun: not run again", async () => {
+    const step = stepOf(result(1, `(fail) x\n${RERAN_MARK}src/b.test.ts\n`), result(0));
+    expect(await runGateStep(["bun", "scripts/changed-tests.ts"], step.run)).toMatchObject({ result: { exitCode: 1 }, flaky: null });
+    expect(step.runs()).toBe(1);
+  });
+});
+
+test("flaky-rerun.ts reaches pipeline.ts through no import: no cycle", () => {
+  const seen = new Set<string>();
+  const visit = (path: string) => {
+    if (seen.has(path)) return;
+    seen.add(path);
+    for (const match of readFileSync(path, "utf8").matchAll(/^import (?!type )[^;]*?from "(\.{1,2}\/[^"]+)"/gm)) visit(join(dirname(path), match[1]));
+  };
+  visit(join(import.meta.dirname, "flaky-rerun.ts"));
+  expect([...seen].some((path) => path.endsWith("/pipeline.ts"))).toBe(false);
 });

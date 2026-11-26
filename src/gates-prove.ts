@@ -9,11 +9,13 @@
  * - The record `proofs/<id>.jsonl`, append-only and written by its runner alone: line 1 the declaration, then a `step`
  *   event per gate step, then one `end` event (`passed`, `flaky` or `failing`; failing names the step and the path of
  *   its output, `proofs/<id>.failing.log`). Without an `end` it is `running`, or `interrupted` once its runner (noted in
- *   `proofs/<id>.pid` by `gates.prove`: pid and start time) no longer lives. `<id>.log` is the runner's output
+ *   `proofs/<id>.pid` by `gates.prove` and by the runner as it starts: pid and start time) no longer lives, or no note
+ *   is there `NOTE_GRACE_MS` after its declaration. `<id>.log` is the runner's output. The worktree an interrupted
+ *   proof left is removed by the next `gates.get` of it and the next `gates.prove` in its repo
  * - The runner: a detached worktree of the tip, `hooks.after_create` of the tip, then every `merge_gates` step through
  *   `runGateStep` (one rerun: passing then, the proof is `flaky`). `FACTORY_BASE` is the empty tree: the whole tree is
  *   the change. The worktree is removed (forced: gate output is scratch) before the `end` event is written
- * - `proofsOf(origin)`: the views a Pi session's notifier judges (`notify.ts`)
+ * - `proofsOf(origin)`: the views a Pi session's notifier judges (`notify.ts`), other origins' proofs read once
  */
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -26,7 +28,7 @@ import { runGateStep } from "./flaky-rerun.ts";
 import { git } from "./git.ts";
 import { defaultBranch, localBranchExists, runAfterCreate, worktreePath } from "./launch.ts";
 import { procStart } from "./queue.ts";
-import { CommandRunner, runCommand } from "./run.ts";
+import { CommandRunner, runCommand, type CommandResult, type Exec } from "./run.ts";
 import { factoryHome, loadSettings } from "./settings.ts";
 import { onPath, spawnDetached } from "./spawn.ts";
 import { passed } from "./state.ts";
@@ -132,13 +134,23 @@ async function proofIds(): Promise<string[]> {
 /** Where `gates.prove` notes its runner: `<pid> <start time>` (`/proc/<pid>/stat`). */
 const proofPidPath = (id: string) => join(proofsDir(), `${id}.pid`);
 
+/** How long after its declaration a proof without a runner note still counts as starting. */
+export const NOTE_GRACE_MS = 10_000;
+
+/** Notes the runner `pid` of proof `id`, atomically. */
+async function notePid(id: string, pid: number): Promise<void> {
+  const temp = `${proofPidPath(id)}.${process.pid}.tmp`;
+  await writeFile(temp, `${pid} ${(await procStart(pid)) ?? "0"}\n`, "utf8");
+  await rename(temp, proofPidPath(id));
+}
+
 /**
- * Whether the proof's runner lives: the noted pid runs (not a zombie) with the noted start time. Before the note is
- * written (`gates.prove` is spawning it) it counts as living.
+ * Whether the proof's runner lives: the noted pid runs (not a zombie) with the noted start time. Without a note it
+ * counts as living (`gates.prove` is spawning it) until `NOTE_GRACE_MS` after the declaration.
  */
-async function runnerLives(id: string): Promise<boolean> {
-  const note = await readFile(proofPidPath(id), "utf8").catch(() => null);
-  if (note === null) return true;
+async function runnerLives(declaration: ProofDeclaration, now = Date.now()): Promise<boolean> {
+  const note = await readFile(proofPidPath(declaration.id), "utf8").catch(() => null);
+  if (note === null) return now - Date.parse(declaration.createdAt) < NOTE_GRACE_MS;
   const [pid, start] = note.trim().split(" ");
   const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
   const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
@@ -149,7 +161,7 @@ async function runnerLives(id: string): Promise<boolean> {
 export async function proofView(id: string): Promise<ProofView> {
   let { declaration, events } = await readProof(id);
   let end = events.find((event) => event.kind === "end");
-  const running = end === undefined && (await runnerLives(id));
+  const running = end === undefined && (await runnerLives(declaration));
   // A runner that ended between the read and the look wrote its end first.
   if (end === undefined && !running) ({ declaration, events } = await readProof(id));
   end = events.find((event) => event.kind === "end");
@@ -188,15 +200,40 @@ export function proofNeedsAttention(view: ProofView): boolean {
   return view.state === "failing" || view.interrupted;
 }
 
-/** The views of the proofs Pi session `origin` declared, those in `skip` left out. */
-export async function proofsOf(origin: string, skip: ReadonlySet<string> = new Set()): Promise<ProofView[]> {
+/**
+ * The views of the proofs Pi session `origin` declared, those in `skip` or `others` left out. The ids of proofs of
+ * other origins found are added to `others`: a declaration never changes, so a caller keeping it reads them once.
+ */
+export async function proofsOf(origin: string, skip: ReadonlySet<string> = new Set(), others: Set<string> = new Set()): Promise<ProofView[]> {
   const views: ProofView[] = [];
   for (const id of await proofIds()) {
-    if (skip.has(id)) continue;
+    if (skip.has(id) || others.has(id)) continue;
+    const declaration = await readProof(id).then((proof) => proof.declaration, () => undefined);
+    if (declaration === undefined) continue;
+    if (declaration.origin !== origin) {
+      others.add(id);
+      continue;
+    }
     const view = await proofView(id).catch(() => undefined);
-    if (view?.origin === origin) views.push(view);
+    if (view !== undefined) views.push(view);
   }
   return views;
+}
+
+const proofWorktree = (declaration: ProofDeclaration) => worktreePath(declaration.repo, `proof-${declaration.id.slice(0, 8)}`);
+
+/** Removes the worktree an interrupted proof's runner left, if any. */
+async function removeLeftover(view: ProofView): Promise<void> {
+  if (!view.interrupted || !existsSync(proofWorktree(view))) return;
+  await removeProofWorktree(runCommand, view.repo, proofWorktree(view)).catch((error: unknown) => log(view.id, `the leftover worktree stays: ${errorText(error)}`));
+}
+
+/** Removes the worktrees the interrupted proofs of `repo` left. */
+async function removeLeftovers(repo: string): Promise<void> {
+  for (const id of await proofIds()) {
+    const view = await proofView(id).catch(() => undefined);
+    if (view?.repo === repo) await removeLeftover(view);
+  }
 }
 
 export const PROOF_HANDLERS = {
@@ -208,6 +245,7 @@ export const PROOF_HANDLERS = {
     if (branch === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
     if (!(await localBranchExists(repo, branch))) throw new FactoryError("not_found", `${repo} has no local branch ${branch}`);
     if (!(await branchHasConfig(repo, branch))) throw new FactoryError("refused", `${repo}: branch ${branch} has no factory.yaml (write one with /factory init or the config.write action, and commit it)`);
+    await removeLeftovers(repo);
     const bun = onPath("bun");
     if (bun === null) throw new FactoryError("failed", "bun is not on PATH: the proof's runner needs it");
     const declaration: ProofDeclaration = {
@@ -228,12 +266,15 @@ export const PROOF_HANDLERS = {
       await appendEvent(declaration.id, { kind: "end", state: "failing", at: new Date().toISOString(), step: "the proof's runner", tail: "it did not start" });
       throw new FactoryError("failed", `the runner of proof ${declaration.id.slice(0, 8)} did not start`);
     }
-    const temp = `${proofPidPath(declaration.id)}.tmp`;
-    await writeFile(temp, `${pid} ${(await procStart(pid)) ?? "0"}\n`, "utf8");
-    await rename(temp, proofPidPath(declaration.id));
+    await notePid(declaration.id, pid);
     return { proof: await proofView(declaration.id) };
   },
-  "gates.get": async (params) => ({ proof: await proofView(await findProof(params.id)) }),
+  "gates.get": async (params) => {
+    const id = await findProof(params.id);
+    const proof = await proofView(id);
+    await removeLeftover(proof);
+    return { proof };
+  },
 } satisfies Partial<Record<ActionName, Handler>>;
 
 // ---- the runner ----
@@ -243,10 +284,10 @@ function log(id: string, text: string): void {
 }
 
 /** Removes the proof's worktree whatever it holds, and git's note of it. */
-async function removeProofWorktree(runner: CommandRunner, repo: string, path: string): Promise<void> {
-  await runner.cleanup(["git", "worktree", "remove", "--force", "--force", path], { cwd: repo });
+async function removeProofWorktree(exec: Exec, repo: string, path: string): Promise<void> {
+  await exec(["git", "worktree", "remove", "--force", "--force", path], { cwd: repo });
   if (existsSync(path)) await rm(path, { recursive: true, force: true });
-  await runner.cleanup(["git", "worktree", "prune"], { cwd: repo });
+  await exec(["git", "worktree", "prune"], { cwd: repo });
 }
 
 /**
@@ -255,6 +296,8 @@ async function removeProofWorktree(runner: CommandRunner, repo: string, path: st
  */
 export async function runProof(id: string): Promise<void> {
   const { declaration } = await readProof(id);
+  // Noted here too: a `gates.prove` that dies after the spawn leaves no note, and the proof would read as interrupted.
+  await notePid(id, process.pid);
   const runner = new CommandRunner();
   let stopping = false;
   for (const signal of ["SIGTERM", "SIGINT"] as const) {
@@ -263,7 +306,7 @@ export async function runProof(id: string): Promise<void> {
       runner.cancel();
     });
   }
-  const path = worktreePath(declaration.repo, `proof-${id.slice(0, 8)}`);
+  const path = proofWorktree(declaration);
   const flaky: string[] = [];
   let end: Omit<EndEvent, "at" | "kind"> = { state: "passed" };
   const fail = async (step: string, output: string) => {
@@ -275,11 +318,17 @@ export async function runProof(id: string): Promise<void> {
     await git(runner.cleanup, declaration.repo, ["worktree", "add", "--quiet", "--detach", path, declaration.commit]);
     const { config } = await loadTaskFiles(runner.cleanup, path, declaration.commit);
     let hooked = true;
+    let hook: CommandResult | undefined;
     try {
-      await runAfterCreate(runner.run, path, config.hooks.after_create);
+      const exec: Exec = async (argv, options) => {
+        hook = await runner.run(argv, options);
+        return hook;
+      };
+      await runAfterCreate(exec, path, config.hooks.after_create);
     } catch (error) {
       hooked = false;
-      await fail("hooks.after_create", errorText(error));
+      // The log gets the hook's whole output, the error only its tail.
+      await fail("hooks.after_create", hook === undefined ? errorText(error) : `${errorText(error)}\n\n${hook.output}`);
     }
     const emptyTree = await git(runner.cleanup, path, ["hash-object", "-t", "tree", "/dev/null"]);
     for (const argv of hooked ? config.merge_gates : []) {
@@ -297,7 +346,7 @@ export async function runProof(id: string): Promise<void> {
   } catch (error) {
     await fail("the proof's worktree", errorText(error));
   } finally {
-    await removeProofWorktree(runner, declaration.repo, path).catch((error: unknown) => log(id, `the worktree stays: ${errorText(error)}`));
+    await removeProofWorktree(runner.cleanup, declaration.repo, path).catch((error: unknown) => log(id, `the worktree stays: ${errorText(error)}`));
   }
   if (stopping) return log(id, "stopped: no end is recorded");
   await appendEvent(id, { kind: "end", at: new Date().toISOString(), ...end });

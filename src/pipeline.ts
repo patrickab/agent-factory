@@ -26,6 +26,7 @@ import {
   customDraft,
   feedbackDraft,
   gateData,
+  INFRA_EXIT,
   passed,
   protectedFeedback,
   reviewFeedback,
@@ -79,9 +80,6 @@ export function commitAnswerDrafts(snapshot: Snapshot, answer: string, passedInt
   const entries: Draft[] = [customDraft("factory-commit-message", message), stateDraft(passedInto, snapshot.round, "passed")];
   return pendingMessages ? { entries: [...entries, ...messageRoundDrafts(snapshot.round)], continue: true } : { entries, continue: false };
 }
-
-/** Exit code of a hook or gate whose environment is broken (missing packages, tools, services): not the coder's to fix. */
-export const INFRA_EXIT = 75;
 
 function lastLine(output: string): string {
   const lines = output.trim().split("\n");
