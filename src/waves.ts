@@ -16,7 +16,7 @@
  * - `listWaves` skips files that are no valid wave, as `listTasks` does; `validateTaskSpecs` checks specs a wave adds
  */
 import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { FactoryError } from "./core.ts";
+import { FactoryError } from "./core-shared.ts";
 import { MODEL_SIZES, normalizeModels, parseSettingsFields, RESTING_STATES, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";

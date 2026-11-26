@@ -3,14 +3,15 @@
  * being asked, when it needs the supervisor or a wave merged. Pure: no I/O. Delivery is `notified.ts` and the Pi
  * extension (`pi/notifier.ts`).
  *
- * - `pendingNotices(tasks, waves, delivered)`: one `Notice` per event not in `delivered`, only for an `origin` (a task or
+ * - `pendingNotices(tasks, waves, delivered, looked)`: one `Notice` per event not in `delivered`, only for an `origin` (a task or
  *   wave declared without a Pi session gets none: `tasks.wait` is the way there)
  * - Task events: `waiting_answer`, `blocked`, `interrupted`, `waiting_approve`; only for a task outside a wave, or a
  *   wave's task while its wave builds (past `building` the wave's own notice covers it)
  * - Wave events: `rejected`, `blocked`, `waiting_approve`, `interrupted`, `unreachable` (building with tasks that can
  *   never start, nothing else moving it), `never` (queued after a wave that was cancelled), `merged`. A queued wave
  *   that can still start says nothing
- * - Gate proof events (`gates-prove.ts`): `passed`, `flaky`, `failing`, `interrupted`; key `proof:<id>:<event>`
+ * - A feature's notices (`feature.ts`) come from its module, from the items `looked` holds under its name
+ * - Gate proof events (`feature-gates.ts`): `passed`, `flaky`, `failing`, `interrupted`; key `proof:<id>:<event>`
  * - `contract` events (`contracts.apply` changed a contract the wave's done tasks worked by): one notice each, key
  *   `wave:<id>:contract:<index of the event>`
  * - `key` = `<task|wave>:<id>:<event>:<n>`. A task's n is its round, with the state entry's time after `@`: a coder may
@@ -20,15 +21,13 @@
  *   task state that made them so, and must not make the same event a second one (invariant 12); for `never` the waves
  *   it waits for: it can never start only once
  * - `text`: `factory: <what happened>`, then the agent view block of the task or wave (a rejection carries its findings)
- * - Scouts a session started (caller `session`): one notice when the scout ended (`done`, `failed`, `cancelled`,
+ * - Scouts a session started (`feature-scouts.ts`, caller `session`): one notice when the scout ended (`done`, `failed`, `cancelled`,
  *   interrupted), key `scout:<id>:report` (`scoutNoticeKey`), text the scout's block with its report and the report's
  *   path. A call that waited for the report claims the same key
  */
-import { neverStarts, proofBlock, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
-import type { ProofView } from "./gates-prove.ts";
+import { neverStarts, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
 import type { TaskView } from "./core.ts";
-import { scoutBlock } from "./scout-view.ts";
-import type { ScoutView } from "./scouts.ts";
+import { FEATURES } from "./features.ts";
 import type { WaveView } from "./waves.ts";
 
 export type Notice = { key: string; origin: string; text: string };
@@ -99,18 +98,12 @@ export function scoutNoticeKey(id: string): string {
   return `scout:${id}:report`;
 }
 
-function scoutNotice(scout: ScoutView): Notice | null {
-  if (scout.caller.kind !== "session" || scout.caller.id === null) return null;
-  const ended = scout.state === "done" || scout.state === "failed" || scout.state === "cancelled";
-  if (!ended && !scout.interrupted) return null;
-  let what: string = scout.state === "done" ? "reported" : scout.state;
-  if (scout.interrupted) what = "was interrupted";
-  const path = scout.reportPath === null ? "" : `\nreport: ${scout.reportPath}`;
-  return { key: scoutNoticeKey(scout.id), origin: scout.caller.id, text: `factory: scout ${scout.id.slice(0, 8)} ${what}\n${scoutBlock(scout)}${path}` };
-}
-
-/** The notices of the events in `tasks`, `waves`, `scouts` and gate `proofs` whose key is not in `delivered`, waves first, scouts and proofs last. */
-export function pendingNotices(tasks: readonly TaskView[], waves: readonly NoticeWave[], delivered: ReadonlySet<string>, scouts: readonly ScoutView[] = [], proofs: readonly ProofView[] = []): Notice[] {
+/**
+ * The notices of the events in `tasks`, `waves` and the items of the features (`looked`, by feature name: `scouts`,
+ * `gates` the gate proofs) whose key is not in `delivered`: waves first, then tasks, then each feature's in the
+ * features' order (`features.ts`).
+ */
+export function pendingNotices(tasks: readonly TaskView[], waves: readonly NoticeWave[], delivered: ReadonlySet<string>, looked: Readonly<Record<string, readonly unknown[]>> = {}): Notice[] {
   const notices: Notice[] = [];
   const stages = new Map(waves.map((wave) => [wave.view.id, wave.view.stage]));
   for (const wave of waves) {
@@ -125,15 +118,6 @@ export function pendingNotices(tasks: readonly TaskView[], waves: readonly Notic
     const notice = taskNotice(task, task.origin);
     if (notice !== null) notices.push(notice);
   }
-  for (const scout of scouts) {
-    const notice = scoutNotice(scout);
-    if (notice !== null) notices.push(notice);
-  }
-  for (const proof of proofs) {
-    if (proof.origin === null || (proof.state === "running" && !proof.interrupted)) continue;
-    const event = proof.interrupted ? "interrupted" : proof.state;
-    const what = event === "passed" ? "pass" : event === "flaky" ? "pass, flaky" : event === "failing" ? "fail" : "were interrupted";
-    notices.push({ key: `proof:${proof.id}:${event}`, origin: proof.origin, text: `factory: the gates of ${proof.branch} ${what}\n${proofBlock(proof)}` });
-  }
+  for (const feature of FEATURES) if (feature.notices !== undefined) notices.push(...feature.notices(looked[feature.name] ?? []));
   return notices.filter((notice) => !delivered.has(notice.key));
 }

@@ -10,7 +10,6 @@
  *   (`core-tasks.ts`, `core-waves.ts`) are built only for an answer
  */
 import { stat } from "node:fs/promises";
-import type { ActionName } from "./core.ts";
 import { FactoryError, stringsParam, tagParam, WAIT_TIMEOUT_MS, type Handler } from "./core-shared.ts";
 import { findTask, needsAttention, rests, tasksIn, taskView, type TaskView } from "./core-tasks.ts";
 import { findProof, proofNeedsAttention, proofRests, proofView, type ProofView } from "./gates-prove.ts";
@@ -225,4 +224,4 @@ export const WAIT_HANDLERS = {
       signal,
     );
   },
-} satisfies Partial<Record<ActionName, Handler>>;
+} satisfies Record<string, Handler>;

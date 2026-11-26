@@ -75,8 +75,10 @@ export function startNotifier(options: NotifierOptions): Notifier {
   const watchers = new Map<string, FSWatcher>();
   /** The session ids of this origin's tasks, whose files in their session dirs are watched. */
   let sessionIds = new Set<string>();
-  /** This origin's finished tasks whose notices are delivered, by id: their session file as last read. */
+  /** This origin's finished tasks whose notices are delivered, by id: their session file as it was before the read that found them final. */
   const finishedTasks = new Map<string, { sessionId: string; path: string; stamp: string | null }>();
+  /** The session file of every task of this origin read so far, by id: stamped before the next read. */
+  const sessionPaths = new Map<string, string>();
   /** This origin's waves that are final and delivered, by id: never read again, their view as last read. */
   const finishedWaves = new Map<string, WaveView>();
   /** This origin's scouts whose report is delivered: never read again. */
@@ -112,8 +114,9 @@ export function startNotifier(options: NotifierOptions): Notifier {
   /** Gate proofs of other origins: never read again. */
   const otherProofs = new Set<string>();
 
-  const watchDir = (dir: string, filter: (name: string | Buffer | null) => boolean) => {
-    if (stopped || watchers.has(dir)) return;
+  /** Watches `dir` unless it is watched already; true when it was not. */
+  const watchDir = (dir: string, filter: (name: string | Buffer | null) => boolean): boolean => {
+    if (stopped || watchers.has(dir)) return false;
     try {
       mkdirSync(dir, { recursive: true });
       const watcher = watch(dir, (_event, name) => {
@@ -122,8 +125,10 @@ export function startNotifier(options: NotifierOptions): Notifier {
       watcher.on("error", () => undefined);
       watcher.unref?.();
       watchers.set(dir, watcher);
+      return true;
     } catch (error) {
       options.onError?.(error);
+      return false;
     }
   };
 
@@ -135,23 +140,30 @@ export function startNotifier(options: NotifierOptions): Notifier {
       else finishedTasks.delete(id);
     }
     for (const id of finishedWaves.keys()) if (fileStamp(join(wavesDir(), `${id}.jsonl`)) === null) finishedWaves.delete(id);
+    // Stamped before the read: a write between the read and a stamp taken after it would never be read.
+    const before = new Map([...sessionPaths].filter(([id]) => !skip.has(id)).map(([id, path]) => [id, { path, stamp: fileStamp(path) }]));
     const { tasks, waves } = await noticeInputs(origin, { tasks: skip, waves: new Set(finishedWaves.keys()) });
     sessionIds = new Set([...tasks.map((task) => task.sessionId), ...[...finishedTasks.values()].map((seen) => seen.sessionId)]);
     for (const task of tasks) {
-      if (task.sessionPath !== null) watchDir(dirname(task.sessionPath), (name) => name === null || [...sessionIds].some((id) => basename(String(name)).includes(id)));
+      if (task.sessionPath === null) continue;
+      sessionPaths.set(task.id, task.sessionPath);
+      // A session dir watched from now on: what was written to it during this read is read by the next look.
+      if (watchDir(dirname(task.sessionPath), (name) => name === null || [...sessionIds].some((id) => basename(String(name)).includes(id)))) again = true;
     }
     const proofs = await proofsOf(origin, finishedProofs, otherProofs);
     const delivered = await readDelivered();
     const scouts = await openScouts(delivered);
-    const pending = pendingNotices(tasks, waves, delivered, scouts, proofs).filter((notice) => !scouts.some((scout) => notice.key === scoutNoticeKey(scout.id) && options.skipScout?.(scout.id)));
+    const pending = pendingNotices(tasks, waves, delivered, { scouts, gates: proofs }).filter((notice) => !scouts.some((scout) => notice.key === scoutNoticeKey(scout.id) && options.skipScout?.(scout.id)));
     if (stopped) return;
     if (pending.length > 0) for (const notice of await claimNotices(pending)) send(notice.text);
     // Claimed here or by a racing session: delivered either way.
     for (const scout of scouts) if (pending.some((notice) => notice.key === scoutNoticeKey(scout.id))) reported(scout.id);
     // Every notice of this look is delivered now (by this session or a racing one): the final ones need no look again.
     for (const task of tasks) {
-      if (task.sessionPath !== null && FINAL_TASK_STATES.includes(task.state)) {
-        finishedTasks.set(task.id, { sessionId: task.sessionId, path: task.sessionPath, stamp: fileStamp(task.sessionPath) });
+      const seen = before.get(task.id);
+      // Final when read, the file stamped before that read: a task first read here is read once more first.
+      if (seen !== undefined && seen.path === task.sessionPath && FINAL_TASK_STATES.includes(task.state)) {
+        finishedTasks.set(task.id, { sessionId: task.sessionId, path: seen.path, stamp: seen.stamp });
       }
     }
     for (const wave of waves) if (FINAL_WAVE_STAGES.includes(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);

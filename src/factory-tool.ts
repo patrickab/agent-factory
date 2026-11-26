@@ -3,6 +3,7 @@
  * description and JSON schema, built from `ACTIONS`, and its answer, the agent view (`agent-view.ts`), so the harnesses
  * cannot drift apart.
  *
+ * - The description: an opening sentence, the features' `toolBlurb`s (`features.ts`), how answers work
  * - `agentActions`: every `ACTIONS` name but the `hostOnly` ones and the timelines (`NOT_FOR_AGENTS`: they dump a
  *   log, programs replay it through the core or the CLI); in a task session only those with `mutates: false`
  * - `factoryToolParameters`: `action` (one of them) plus the union of their params
@@ -13,6 +14,7 @@
  */
 import { agentError, agentView } from "./agent-view.ts";
 import { ACTIONS, callAction, FactoryError, type ActionName, type CallOptions } from "./core.ts";
+import { FEATURES } from "./features.ts";
 import { errorText, isRecord } from "./util.ts";
 
 type Schema = Record<string, unknown>;
@@ -22,15 +24,13 @@ export const FACTORY_TOOL_NAME = "factory";
 /** Actions the agent's tool never offers: they dump a log instead of deciding or answering something. */
 const NOT_FOR_AGENTS: readonly string[] = ["tasks.timeline", "waves.timeline"];
 
+/** The opening sentence, then each feature's (`toolBlurb`, in the features' order), then how answers work. */
 export const FACTORY_TOOL_DESCRIPTION = [
   "Run coding work in the background: a task codes in its own git worktree of a repository with a committed factory.yaml, passes its gates and merges into its target.",
-  '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, reviewed as a whole and merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',
-  '"gates.prove" runs a branch\'s merge_gates in the background before a wave is declared on it: passed, flaky or failing.',
-  '"contracts.apply" changes one fact of a contract the waves list and tells their tasks; "tasks.update" and "waves.update" adjust a declared plan (a pending task fully, a started one its title and request); coders report what cost runtime or context with their feedback tool, "waves.get" lists it.',
+  ...FEATURES.flatMap((feature) => feature.toolBlurb ?? []),
   'Answers are short text: an id (8 chars are enough), the state, what matters in it, and "next:" with the actions valid now.',
   'Tasks and waves started from a Pi session report back to it when they need you; elsewhere block on "tasks.wait" (ids, tag or wave) instead of polling.',
   "A tag (path segments like plugin/m1/w1) groups related work for tasks.list, waves.list and tasks.wait.",
-  '"scouts.start" sends a read-only scout that answers a concern from the map of a memory store (wait: true for its report, else it reports back).',
 ].join(" ");
 
 /** The actions an agent may call: every one but the `hostOnly` ones and the timelines; in a task session only those with `mutates: false`. */

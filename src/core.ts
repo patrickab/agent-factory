@@ -22,302 +22,36 @@
  * - Reads a task's session file for its state, settings, usage (assistant messages plus recorded reviews) and
  *   timeline (by byte offset, so a client polls with `next`)
  * - Imports only Bun, `node:` modules and plugin modules that do the same: the deployed plugin has no `node_modules`
+ * - The actions come from the features (`features.ts`): each registers its specs, handlers and views (`feature.ts`)
  * - Cut by area, this module keeps `ACTIONS`, the params check and `callAction`, and re-exports what clients import:
  *   `core-shared.ts` (`FactoryError`, the params' helpers), `core-settings.ts` (models, repos, branches, settings,
  *   config), `core-tasks.ts` (`tasks.*`, `TaskView`), `core-wait.ts` (`tasks.wait`), `core-waves.ts` (`waves.*`,
  *   `WaveView`, what the wave's runner asks)
  */
-import { FactoryError, oneLine, WAIT_TIMEOUT_MS, type Handler, type Params } from "./core-shared.ts";
-import { CONTRACT_HANDLERS } from "./core-contracts.ts";
-import { PLAN_HANDLERS } from "./core-plan.ts";
-import { SETTINGS_HANDLERS } from "./core-settings.ts";
-import { TASK_HANDLERS } from "./core-tasks.ts";
-import { WAIT_HANDLERS } from "./core-wait.ts";
-import { WAVE_HANDLERS } from "./core-waves.ts";
-import { SCOUT_HANDLERS } from "./core-scouts.ts";
-import { PROOF_HANDLERS } from "./gates-prove.ts";
+import { FactoryError, oneLine, type Handler, type Params } from "./core-shared.ts";
+import type { ActionSpec, Feature } from "./feature.ts";
+import { FEATURES } from "./features.ts";
 import { TaskBusyError } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 
 export { FactoryError, oneLine, type FactoryErrorCode, type FactoryErrorDetail } from "./core-shared.ts";
+export type { ActionSpec } from "./feature.ts";
 export type { TaskActionName, TaskView, TimelineEntry, TimelineKind } from "./core-tasks.ts";
 export { noticeInputs, pokeQueuedAfter, queueLook, startQueuedWave, startWaveTasks, taskWave, waveBranchName, waveMergeRefusal, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
 
-type Schema = Record<string, unknown>;
+/** Every feature's actions (`features.ts`), in the features' order. Two features naming one action fail on load. */
+export const ACTIONS = Object.freeze(
+  FEATURES.reduce<Record<string, ActionSpec>>((actions, feature) => {
+    for (const [name, spec] of Object.entries(feature.actions)) {
+      if (Object.hasOwn(actions, name)) throw new Error(`two features register the action ${name}`);
+      actions[name] = spec;
+    }
+    return actions;
+  }, {}),
+) as Readonly<Record<ActionName, ActionSpec>>;
 
-export interface ActionSpec {
-  summary: string;
-  params: { type: "object"; required: string[]; properties: Record<string, Schema> };
-  mutates: boolean;
-  /** For the host only: never offered to an agent. */
-  hostOnly: boolean;
-}
-
-const REPO: Schema = { type: "string", description: "A path inside the git repository. Default: the current directory" };
-const ID: Schema = { type: "string", description: "The task id or a unique prefix of it" };
-const WAVE_ID: Schema = { type: "string", description: "The wave id or a unique prefix of it" };
-/** One task of `waves.start` / `waves.add`. */
-const WAVE_TASK_ITEM: Schema = {
-  type: "object",
-  required: ["key", "title", "request"],
-  properties: {
-    key: { type: "string" },
-    title: { type: "string" },
-    request: { type: "string" },
-    after: { type: "array", items: { type: "string" } },
-    model: { type: "string", enum: ["small", "big"], description: "Which of the wave's two models this task's coder runs with: small for easy tasks; default big" },
-  },
-};
-const TAG: Schema = { type: "string", description: "A task tag: segments of A-Z a-z 0-9 . _ @ + - joined by /" };
-const TAG_FILTER: Schema = { type: "string", description: "Only the tasks whose tag is this one or lies under it (a holds a/b, not ab)" };
-const SETTINGS_PROPERTIES: Record<string, Schema> = {
-  merge: { type: "string", enum: ["auto", "review"], description: "auto: merge a passed round. review: wait for approve" },
-  maxRounds: { type: "integer", minimum: 1, maximum: 20 },
-  review: { type: "boolean", description: "Run the reviewer on every round" },
-  branch: { type: "string", description: "The branch the task starts from and merges into" },
-  models: {
-    type: "object",
-    properties: {
-      coder: { type: "string", description: "provider/model; absent: Pi's session model" },
-      big: { type: "string", description: "provider/model; the same as coder (either name sets both)" },
-      small: { type: "string", description: "provider/model for a wave's easy tasks (model small)" },
-      reviewer: { type: "string", description: "provider/model; absent: Pi's session model" },
-    },
-  },
-};
-
-const REMOTE: Schema = { type: "boolean", description: "Push a wave's branch, open its pull/merge request on the origin's forge (gh, glab), comment the reviews, push the target after the merge" };
-
-function spec(summary: string, properties: Record<string, Schema>, required: string[], mutates: boolean, hostOnly = false): ActionSpec {
-  return { summary, params: { type: "object", required, properties }, mutates, hostOnly };
-}
-
-export const ACTIONS = {
-  "models.get": spec("The factory models: the provider/model ids tasks and repository settings may use", {}, [], false),
-  "models.set": spec(
-    "Replace the factory models",
-    { models: { type: "array", items: { type: "string" }, description: "provider/model ids" } },
-    ["models"],
-    true,
-  ),
-  "repos.list": spec("The registered repositories (those with a settings file)", {}, [], false),
-  "repos.add": spec("Register a repository: give it a settings file", { repo: REPO }, ["repo"], true),
-  "repos.remove": spec("Unregister a repository: remove its settings file", { repo: REPO }, ["repo"], true),
-  "branches.list": spec("The repository's local branches, its default one and which hold a committed factory.yaml", { repo: REPO }, ["repo"], false),
-  "settings.get": spec("The repository's stored settings, them resolved over the defaults, and the defaults", { repo: REPO }, ["repo"], false),
-  "settings.set": spec(
-    "Replace the repository's stored settings",
-    { repo: REPO, settings: { type: "object", description: "The stored settings", properties: { ...SETTINGS_PROPERTIES, preview: { type: "boolean" }, remote: REMOTE } } },
-    ["repo", "settings"],
-    true,
-  ),
-  "config.get": spec(
-    "The repository's factory.yaml (the working copy, or committed on branch) and a draft when it has none",
-    { repo: REPO, branch: { type: "string", description: "Read factory.yaml as committed on this branch" } },
-    ["repo"],
-    false,
-  ),
-  "config.write": spec(
-    "Check factory.yaml text and write it into a registered repository's checkout (not committed)",
-    {
-      repo: REPO,
-      text: { type: "string", description: "The factory.yaml text" },
-      overwrite: { type: "boolean", description: "Replace an existing factory.yaml" },
-    },
-    ["repo", "text"],
-    true,
-  ),
-  "tasks.list": spec("Every task, or the repository's", { repo: { type: "string", description: "Only the tasks of this repository" }, tag: TAG_FILTER }, [], false),
-  "tasks.get": spec("One task", { id: ID }, ["id"], false),
-  "tasks.import": spec(
-    "Register a task another store kept: its record as the core writes them; an existing id stays unchanged. The worktree must be a linked worktree of repo (its primary checkout) on branch",
-    {
-      record: {
-        type: "object",
-        description: "id, repo, worktree, branch, title, sessionId, sessionDir, createdAt: non-empty strings; optional tag (default the system user), plan (string or null). A wave field is dropped: an imported task belongs to no wave",
-      },
-    },
-    ["record"],
-    true,
-    true,
-  ),
-  "tasks.timeline": spec(
-    "A task's session as entries; poll with since = the last answer's next",
-    { id: ID, since: { type: "integer", minimum: 0, description: "The cursor an earlier answer returned as next" } },
-    ["id"],
-    false,
-  ),
-  "tasks.diff": spec("A task's worktree against where it branched off its target", { id: ID }, ["id"], false),
-  "tasks.start": spec(
-    "Start a task in its own worktree; answers once its runner is spawned",
-    {
-      repo: REPO,
-      title: { type: "string", description: "A short title of the task" },
-      request: { type: "string", description: "The full, self-contained task for the coder" },
-      overrides: { type: "object", description: "Settings over the repository's stored ones", properties: SETTINGS_PROPERTIES },
-      tag: { ...TAG, description: `${String(TAG.description)}. Default: the system user` },
-      plan: { type: "string", description: "The memory_store path of the plan the task works from (only stored)" },
-    },
-    ["repo", "title", "request"],
-    true,
-  ),
-  "tasks.wait": spec(
-    "Wait until the watched tasks and waves rest or one needs attention, or the timeout passes. A task rests with no runner in waiting_approve, waiting_answer, blocked, done or cancelled, or interrupted; it needs attention resting and not done (a cancelled task of a watched wave left the wave and needs none). A wave rests merged or cancelled; it needs attention rejected, blocked, waiting_approve, interrupted, or building with tasks that can never start (a task they wait for was cancelled or removed) while none of its tasks runs, or queued after a wave that was cancelled; a queued wave that can still start keeps the wait going; its tasks resting while it builds, reviews or merges is not the end. Answers {tasks, waves, attention: task and wave ids, timedOut}",
-    {
-      ids: { type: "array", items: { type: "string" }, description: "Watch these tasks (ids or unique prefixes); give exactly one of ids, tag and wave" },
-      tag: {
-        ...TAG_FILTER,
-        description: "Watch the tasks and the waves whose tag is this one or lies under it, those started during the wait too; give exactly one of ids, tag and wave",
-      },
-      wave: { type: "string", description: "Watch this wave (id or unique prefix) and its tasks; give exactly one of ids, tag and wave" },
-      ignore: { type: "array", items: { type: "string" }, description: "Task or wave ids (or prefixes) left out of the watched ones" },
-      timeoutMs: { type: "integer", minimum: WAIT_TIMEOUT_MS.minimum, maximum: WAIT_TIMEOUT_MS.maximum, description: `Default: ${WAIT_TIMEOUT_MS.default}` },
-    },
-    [],
-    false,
-  ),
-  "tasks.approve": spec("Merge a task waiting for approve", { id: ID }, ["id"], true),
-  "tasks.retry": spec("Another round on a blocked, cancelled or interrupted task", { id: ID }, ["id"], true),
-  "tasks.cancel": spec("Stop a task", { id: ID }, ["id"], true),
-  "tasks.remove": spec(
-    "Delete a task's worktree, branch and record",
-    { id: ID, force: { type: "boolean", description: "Also drop commits its target branch lacks and uncommitted changes" } },
-    ["id"],
-    true,
-  ),
-  "tasks.message": spec(
-    "Send a task a message: a resting task runs new rounds, a task in waiting_answer gets it as the answer to its question (same round), a running coder gets it as a follow-up",
-    { id: ID, text: { type: "string", description: "The message" } },
-    ["id", "text"],
-    true,
-  ),
-  "waves.start": spec(
-    "Declare a wave: a set of tasks on one new branch (<target>-<tag with / as ->) off the target, the factory starts each task once the tasks it waits for (after) are done. With after (waves it waits for): queued, its branch cut and its tasks started once every one of them is merged; answers {wave}",
-    {
-      repo: REPO,
-      tag: { ...TAG, description: "The wave's tag (its tasks carry it): segments of A-Z a-z 0-9 . _ @ + - joined by /" },
-      title: { type: "string", description: "A short title of the wave" },
-      request: { type: "string", description: "The reviewer's instructions for the wave's whole diff" },
-      tasks: {
-        type: "array",
-        description:
-          "The wave's tasks: key unique in the wave (A-Z a-z 0-9 . _ -), title, request (full and self-contained for the coder), after: keys this task waits for, model: \"small\" or \"big\", which of the wave's models this task's coder runs with (default big; the reviewer's stays the wave's)",
-        items: WAVE_TASK_ITEM,
-      },
-      plan: { type: "string", description: "The memory_store path of the plan the wave works from (only stored)" },
-      after: {
-        type: "array",
-        items: { type: "string" },
-        description:
-          "Waves this one waits for, by tag (the newest not cancelled) or id, of the same repository and target: the wave is queued, gets its branch off the target's tip and starts once every one is merged",
-      },
-      contracts: {
-        type: "array",
-        items: { type: "string" },
-        description:
-          "Contracts (memory-store directories run/contract/<name>/ or documents run/contract/<name>.md in plan) the wave's coders work by; core is added when it exists. Needs plan and memory-store on PATH",
-      },
-      overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, remote: REMOTE } },
-    },
-    ["repo", "tag", "title", "request", "tasks"],
-    true,
-  ),
-  "waves.add": spec(
-    "Add tasks to a wave (after may name its existing keys); a rejected, blocked, reviewing or waiting_approve wave builds again. Pending tasks that can never start (a task they wait for was cancelled or removed) are dropped: they count as cancelled. Answers {wave}",
-    {
-      id: WAVE_ID,
-      tasks: { type: "array", description: "Tasks as for waves.start: key, title, request, after?, model? (\"small\" or \"big\", default big)", items: WAVE_TASK_ITEM },
-    },
-    ["id", "tasks"],
-    true,
-  ),
-  "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage. Answers {wave}", { id: WAVE_ID }, ["id"], false),
-  "waves.list": spec(
-    "Every wave, or the repository's, or those under a tag. Answers {waves}",
-    { repo: { type: "string", description: "Only the waves of this repository" }, tag: { type: "string", description: "Only the waves whose tag is this one or lies under it" } },
-    [],
-    false,
-  ),
-  "waves.timeline": spec(
-    "A wave's events; poll with since = the last answer's next. Answers {events, next}",
-    { id: WAVE_ID, since: { type: "integer", minimum: 0, description: "The cursor an earlier answer returned as next" } },
-    ["id"],
-    false,
-  ),
-  "waves.retry": spec(
-    "Run a blocked or interrupted wave again: a blocked wave with tasks not started or not finished builds again (starts them), else review and merge from the rebase on; an interrupted one resumes from its log. Answers {wave}",
-    { id: WAVE_ID },
-    ["id"],
-    true,
-  ),
-  "waves.approve": spec("Merge a wave waiting for approve (its merge setting is review). Answers {wave}", { id: WAVE_ID }, ["id"], true),
-  "waves.cancel": spec("Stop a wave: cancel its tasks that are not done or cancelled, stop its runner; its branch stays. Answers {wave}", { id: WAVE_ID }, ["id"], true),
-  "waves.remove": spec(
-    "Delete a wave's record, its tasks (as tasks.remove does) and a review worktree a block left (one holding uncommitted changes only with force); its branch only when the wave is merged. Refused while the wave or one of its tasks runs. Answers {removed: id}",
-    { id: WAVE_ID, force: { type: "boolean", description: "Also drop commits its target branch lacks and uncommitted changes" } },
-    ["id"],
-    true,
-  ),
-  "scouts.start": spec(
-    "Start a scout: a read-only pi child on the project's small model in the caller's working directory that answers a concern from the map (memory-store map/ of the task's or wave's plan, else store), explores where the map is not current, writes what it learns there and reports MISSING / DECISIONS / KEY FACTS / MEMORY. At most four of a caller run, more queue. Answers {scout, timedOut}",
-    {
-      concern: { type: "string", description: "What the scout finds out" },
-      questions: { type: "array", items: { type: "string" }, description: "Questions the report answers" },
-      wait: { type: "boolean", description: "Answer once the scout reported, after 15 minutes at the latest with what it wrote so far; default false: answer with its id at once" },
-      store: { type: "string", description: "The memory-store whose map/ the scout reads and writes; a task's or wave's plan wins" },
-      repo: { type: "string", description: "The directory the scout explores. Default: the current directory" },
-    },
-    ["concern"],
-    true,
-  ),
-  "scouts.get": spec("One scout: caller, concern, state, usage, report, the map paths it wrote. Answers {scout}", { id: { type: "string", description: "The scout id or a unique prefix of it" } }, ["id"], false),
-  "scouts.list": spec(
-    "Every scout, or the repository's, or a caller's, with state, cost and caller. Answers {scouts}",
-    { repo: { type: "string", description: "Only the scouts of this repository" }, caller: { type: "string", description: "Only the scouts of this caller: a task, wave or session id or a prefix of it" } },
-    [],
-    false,
-  ),
-  "gates.prove": spec(
-    "Prove a branch's merge_gates in the background: a fresh worktree of its tip (hooks.after_create run), every step once more when it fails; passed, flaky (passed on the rerun, with the failing test names) or failing. Reported to the declaring Pi session; tasks.wait {ids} watches it. Answers {proof}",
-    { repo: REPO, branch: { type: "string", description: "The branch whose tip is proven. Default: the repository's branch" } },
-    ["repo"],
-    true,
-  ),
-  "gates.get": spec("One gate proof: state (running, passed, flaky, failing), steps, flaky names, the failing step. Answers {proof}", { id: { type: "string", description: "The proof id or a unique prefix of it" } }, ["id"], false),
-  "contracts.apply": spec(
-    "Change one fact of a contract (one memory-store op) and tell the tasks of every wave listing it: running ones get a follow-up, others keep it for their next turn (waiting_answer: with its answer), pending ones nothing; done ones are answered and reported. Answers {store, name, changed, notified, kept, done}",
-    {
-      store: { type: "string", description: "The memory-store of the contract (the waves' plan)" },
-      name: { type: "string", description: "The contract's name (run/contract/<name>/ or run/contract/<name>.md)" },
-      op: {
-        type: "object",
-        description: "One memory-store op: {op: add|update|retire|write_doc, path: the fact's path inside the contract, ...} (a one-document contract: write_doc, path omitted)",
-      },
-    },
-    ["store", "name", "op"],
-    true,
-  ),
-  "tasks.update": spec(
-    "Change a task of a wave: a pending one's title, request, after (keys of the wave, no cycle) and model; a running one's (or waiting_answer, blocked) title and request only, its coder is told old and new. Refused when done, cancelled or merging: add a task with waves.add. Answers {wave, key, changed, delivery}",
-    {
-      id: { ...ID, description: "The task id or a unique prefix of it, a pending task's too (waves.get shows it)" },
-      title: { type: "string" },
-      request: { type: "string", description: "The full, self-contained task for the coder" },
-      after: { type: "array", items: { type: "string" }, description: "Keys of the wave this task waits for (pending only)" },
-      model: { type: "string", enum: ["small", "big"], description: "Which of the wave's models its coder runs with (pending only)" },
-    },
-    ["id"],
-    true,
-  ),
-  "waves.update": spec(
-    "Change a wave's title or its reviewer's instructions (request) before it is merged or cancelled; a review that runs keeps the text it started with. Answers {wave, changed}",
-    { id: WAVE_ID, title: { type: "string" }, request: { type: "string", description: "The reviewer's instructions for the wave's whole diff" } },
-    ["id"],
-    true,
-  ),
-} satisfies Record<string, ActionSpec>;
-
-export type ActionName = keyof typeof ACTIONS;
+/** The name of an action of a feature in `FEATURES`. */
+export type ActionName = (typeof FEATURES)[number] extends infer F ? (F extends Feature<infer A> ? A : never) : never;
 
 /**
  * `cwd`: where relative `repo` params start. `signal`: aborts a `tasks.start` before its runner is spawned. `env`: the
@@ -368,11 +102,11 @@ function checkParams(name: ActionName, raw: unknown, cwd: string | undefined): P
 let handlers: Record<ActionName, Handler> | undefined;
 
 /**
- * Every action's handler, from the area modules. Assembled on the first call, not on load: `waves.ts` imports this
- * module, so an area module loaded first may not have finished when this one runs.
+ * Every action's handler, from the features. Assembled on the first call, not on load: a handler module may import a
+ * module that imports this one, and may not have finished when this one runs.
  */
 function handlersByName(): Record<ActionName, Handler> {
-  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS, ...SCOUT_HANDLERS, ...PROOF_HANDLERS, ...CONTRACT_HANDLERS, ...PLAN_HANDLERS };
+  handlers ??= Object.assign({}, ...FEATURES.map((feature) => feature.handlers)) as Record<ActionName, Handler>;
   return handlers;
 }
 

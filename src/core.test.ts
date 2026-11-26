@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ACTIONS, callAction } from "./core.ts";
+import { FEATURES } from "./features.ts";
 import { caseDir, exitingRunner, expectError, failure, fakeRecord, fakeWaveRunner, ID_1, ID_2, makeRepo, until, useCoreFixture } from "./core-test-kit.ts";
 import { liveRunners } from "./launch.ts";
 import { writeTask } from "./tasks.ts";
@@ -13,50 +14,8 @@ import { writeTask } from "./tasks.ts";
 useCoreFixture();
 
 describe("callAction", () => {
-  test("ACTIONS names every action of the contract", () => {
-    expect(Object.keys(ACTIONS).sort()).toEqual(
-      [
-        "models.get",
-        "models.set",
-        "repos.list",
-        "repos.add",
-        "repos.remove",
-        "branches.list",
-        "settings.get",
-        "settings.set",
-        "config.get",
-        "config.write",
-        "tasks.list",
-        "tasks.get",
-        "tasks.import",
-        "tasks.timeline",
-        "tasks.diff",
-        "tasks.start",
-        "tasks.approve",
-        "tasks.retry",
-        "tasks.cancel",
-        "tasks.remove",
-        "tasks.message",
-        "tasks.wait",
-        "waves.start",
-        "waves.add",
-        "waves.get",
-        "waves.list",
-        "waves.timeline",
-        "waves.retry",
-        "waves.approve",
-        "waves.cancel",
-        "waves.remove",
-        "scouts.start",
-        "scouts.get",
-        "scouts.list",
-        "gates.prove",
-        "gates.get",
-        "contracts.apply",
-        "tasks.update",
-        "waves.update",
-      ].sort(),
-    );
+  test("ACTIONS names every action of every feature, in the features' order", () => {
+    expect(Object.keys(ACTIONS)).toEqual(FEATURES.flatMap((feature) => Object.keys(feature.actions)));
     expect(ACTIONS["tasks.get"].mutates).toBe(false);
     expect(ACTIONS["tasks.start"].params.required).toEqual(["repo", "title", "request"]);
   });

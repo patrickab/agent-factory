@@ -21,7 +21,6 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadTaskFiles } from "./config.ts";
-import type { ActionName } from "./core.ts";
 import { FactoryError, nonEmpty, primaryOf, type Handler } from "./core-shared.ts";
 import { branchHasConfig } from "./core-settings.ts";
 import { runGateStep } from "./flaky-rerun.ts";
@@ -275,7 +274,7 @@ export const PROOF_HANDLERS = {
     await removeLeftover(proof);
     return { proof };
   },
-} satisfies Partial<Record<ActionName, Handler>>;
+} satisfies Record<string, Handler>;
 
 // ---- the runner ----
 

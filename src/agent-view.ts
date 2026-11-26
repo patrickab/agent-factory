@@ -1,8 +1,9 @@
 /**
  * The agent view: what an agent gets back from the factory, as text lines that hold only what its next decision needs.
- * Pure: no I/O, no import but types. The full view (JSON, `callAction`'s answer) is for programs.
+ * Pure: no I/O. The full view (JSON, `callAction`'s answer) is for programs.
  *
- * - `agentView(action, params, result)`: the full view of every action in `ACTIONS` rendered as text
+ * - `agentView(action, params, result)`: the full view of every action in `ACTIONS` rendered as text, by the renderer
+ *   its feature registers (`features.ts`); the helpers here (blocks, headers, receipts) are what the renderers share
  * - `taskBlock`, `waveBlock`: one task, one wave. First line kind, short id (8 chars), state; then only the lines that
  *   matter in that state, and `next:` with the actions valid now. A notification is `factory: <what>` over one of them
  * - `agentError`: an error as one line with the way out. `agentActions`: the action list, or one action's params
@@ -10,10 +11,12 @@
  *   Usage is one cost figure. Every rendering goes through `scrub`: a home directory becomes `~`, any other absolute
  *   path `<path>` (`withoutPaths`, also the rule of a wave's stage details), a uuid its short id
  */
-import type { ActionSpec, TaskView } from "./core.ts";
+import type { TaskView } from "./core.ts";
+import type { ActionSpec } from "./feature.ts";
 import type { Finding } from "./state.ts";
 import type { WaveView } from "./waves.ts";
-import { SCOUT_RENDERERS } from "./scout-view.ts";
+import { FEATURES } from "./features.ts";
+import type { Renderer } from "./feature.ts";
 import type { ProofView } from "./gates-prove.ts";
 
 const SHORT = 8;
@@ -39,7 +42,7 @@ export function scrub(text: string, keepPaths = false): string {
   return (keepPaths ? homeless : withoutPaths(homeless)).replace(UUID, "$1");
 }
 
-function short(id: string | null | undefined): string {
+export function short(id: string | null | undefined): string {
   return (id ?? "").slice(0, SHORT);
 }
 
@@ -48,7 +51,7 @@ function cost(usage: { cost: number } | null | undefined): string | null {
 }
 
 /** Fields joined by two spaces, the empty ones left out. */
-function fields(...parts: (string | null | undefined | false)[]): string {
+export function fields(...parts: (string | null | undefined | false)[]): string {
   return parts.filter((part): part is string => typeof part === "string" && part !== "").join("  ");
 }
 
@@ -58,7 +61,7 @@ function labelled(indent: string, label: string, text: string): string[] {
   return [`${indent}${label}${first}`, ...rest.map((line) => `${indent}  ${line}`)];
 }
 
-function plural(count: number, word: string): string {
+export function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
@@ -67,7 +70,7 @@ function plural(count: number, word: string): string {
 const FINISHED_TASK_STATES = ["done", "cancelled"];
 const RESTING_TASK_STATES = ["waiting_approve", "waiting_answer", "blocked", "done", "cancelled"];
 
-function taskState(view: TaskView): string {
+export function taskState(view: TaskView): string {
   if (view.state === null) return "starting";
   if (view.interrupted) return "interrupted";
   if (view.state === "blocked") return `blocked: ${view.reason ?? "unknown"}`;
@@ -79,7 +82,7 @@ function taskRests(view: TaskView): boolean {
 }
 
 /** `task 4ae7325b  waiting_answer  round 1  factory/w1  wave 3f2a91c0  $2.10` */
-function taskHeader(view: TaskView): string {
+export function taskHeader(view: TaskView): string {
   return fields(
     `task ${short(view.id)}`,
     taskState(view),
@@ -146,12 +149,12 @@ function taskLine(view: TaskView): string {
 }
 
 /** `tasks.get` and the tasks.* mutations answer a TaskView; `{task}` is accepted too. */
-function asTask(result: unknown): TaskView {
+export function asTask(result: unknown): TaskView {
   const record = result as { task?: TaskView };
   return record.task ?? (result as TaskView);
 }
 
-function taskList(tasks: TaskView[]): string {
+export function taskList(tasks: TaskView[]): string {
   const open = tasks.filter((task) => task.state === null || !FINISHED_TASK_STATES.includes(task.state));
   const rest = tasks.length - open.length;
   if (tasks.length === 0) return "no tasks";
@@ -187,7 +190,7 @@ export function neverStarts(view: WaveView): boolean {
 }
 
 /** `3f2a91c0, factory/w1`: the waves a queued wave waits for, by tag when `known` holds the wave, else by short id. */
-function afterNames(view: WaveView, known: readonly WaveView[] = []): string {
+export function afterNames(view: WaveView, known: readonly WaveView[] = []): string {
   return view.after.map((id) => known.find((wave) => wave.id === id)?.tag ?? short(id)).join(", ");
 }
 
@@ -339,7 +342,7 @@ export function waveBlock(view: WaveView): string {
   return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...flakyLine(flaky), ...updateLines(view), ...feedbackLines(view), `  ${next}`].join("\n"));
 }
 
-function waveList(waves: WaveView[]): string {
+export function waveList(waves: WaveView[]): string {
   if (waves.length === 0) return "no waves";
   const open = waves.filter((wave) => !FINISHED_WAVE_STAGES.includes(wave.stage));
   const rest = waves.length - open.length;
@@ -350,7 +353,7 @@ function waveList(waves: WaveView[]): string {
 }
 
 /** One line: the header of a wave after a mutation, with what it started. */
-function waveReceipt(prefix: string, view: WaveView, extra: string[] = []): string {
+export function waveReceipt(prefix: string, view: WaveView, extra: string[] = []): string {
   return [fields(`${prefix}wave ${short(view.id)}`, waveState(view), `${view.counts.done}/${view.counts.total} done`, view.tag), ...extra].join(" · ");
 }
 
@@ -361,7 +364,7 @@ function proofState(view: ProofView): string {
 }
 
 /** `proof 1a2b3c4d  failing  main 0ab12cd` */
-function proofHeader(view: ProofView): string {
+export function proofHeader(view: ProofView): string {
   return fields(`proof ${short(view.id)}`, proofState(view), `${view.branch} ${view.commit.slice(0, 7)}`);
 }
 
@@ -382,7 +385,7 @@ export function proofBlock(view: ProofView): string {
 
 // ---- tasks.wait ----
 
-type WaitResult = { tasks: TaskView[]; waves: WaveView[]; proofs?: ProofView[]; attention: string[]; timedOut: boolean };
+export type WaitResult = { tasks: TaskView[]; waves: WaveView[]; proofs?: ProofView[]; attention: string[]; timedOut: boolean };
 
 function duration(ms: number): string {
   return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`;
@@ -400,7 +403,7 @@ function indentBlock(block: string): string[] {
   return block.split("\n").map((line) => `  ${line}`);
 }
 
-function waitView(params: Record<string, unknown>, result: WaitResult): string {
+export function waitView(params: Record<string, unknown>, result: WaitResult): string {
   const attention = new Set(result.attention);
   const wanted = (id: string) => attention.has(id);
   const lines: string[] = [];
@@ -447,155 +450,34 @@ function entryText(kind: string, data: Record<string, unknown>): string {
   return text.length > TIMELINE_TEXT_CHARS ? `${text.slice(0, TIMELINE_TEXT_CHARS)}...` : text;
 }
 
-function timelineView(entries: { kind: string; data?: object }[], next: number, read: (entry: { kind: string; data?: object }) => Record<string, unknown>): string {
+export function timelineView(entries: { kind: string; data?: object }[], next: number, read: (entry: { kind: string; data?: object }) => Record<string, unknown>): string {
   const lines = entries.map((entry) => entryText(entry.kind, read(entry)));
   lines.push(`${entries.length} ${entries.length === 1 ? "entry" : "entries"} · since: ${next} for the next ones`);
   return lines.join("\n");
 }
 
-// ---- settings and config ----
-
-type SettingsAnswer = { stored: Record<string, unknown>; resolved: Record<string, unknown>; defaults: Record<string, unknown> };
-
-/** `key: value`, `models.coder: x`; `(default)` after a value not stored. */
-function settingsLines(answer: SettingsAnswer, only?: Set<string>): string[] {
-  const lines: string[] = [];
-  for (const [key, value] of Object.entries(answer.resolved)) {
-    if (only !== undefined && !only.has(key)) continue;
-    if (value !== null && typeof value === "object") {
-      const stored = (answer.stored[key] ?? {}) as Record<string, unknown>;
-      const entries = Object.entries(value as Record<string, unknown>);
-      if (entries.length === 0) lines.push(`${key}: none${key in answer.stored ? "" : " (default)"}`);
-      for (const [inner, innerValue] of entries) {
-        // `big` only repeats `coder` (its alias).
-        if (key === "models" && inner === "big") continue;
-        lines.push(`${key}.${inner}: ${String(innerValue)}${inner in stored ? "" : " (default)"}`);
-      }
-      continue;
-    }
-    lines.push(`${key}: ${String(value)}${key in answer.stored ? "" : " (default)"}`);
-  }
-  return lines;
-}
-
 // ---- the actions ----
 
 type Params = Record<string, unknown>;
-type Renderer = (params: Params, result: never) => string;
 
-const RENDERERS: Record<string, Renderer> = {
-  "models.get": (_params, result: { models: string[] }) => (result.models.length === 0 ? "no models set (models.set)" : result.models.join("\n")),
-  "models.set": (_params, result: { models: string[] }) => `${plural(result.models.length, "model")} set`,
+let renderers: Record<string, Renderer> | undefined;
 
-  "repos.list": (_params, result: { repos: string[] }) => (result.repos.length === 0 ? "no repositories registered (repos.add)" : result.repos.join("\n")),
-  "repos.add": (_params, result: { repo: string }) => `registered ${result.repo}`,
-  "repos.remove": (params) => `unregistered ${String(params.repo)}`,
-  "branches.list": (_params, result: { branches: { name: string; default: boolean; hasConfig: boolean }[] }) =>
-    result.branches.length === 0
-      ? "no branches"
-      : result.branches
-          .map((branch) => {
-            const marks = [branch.default ? "default" : null, branch.hasConfig ? "factory.yaml" : null].filter((mark) => mark !== null);
-            return marks.length === 0 ? branch.name : `${branch.name} (${marks.join(", ")})`;
-          })
-          .join(" · "),
-
-  "settings.get": (_params, result: SettingsAnswer) => settingsLines(result).join("\n"),
-  "settings.set": (params, result: SettingsAnswer) => {
-    const changed = new Set(Object.keys((params.settings ?? {}) as Params));
-    const lines = settingsLines(result, changed);
-    return lines.length === 0 ? "settings set: every value is the default" : ["settings set:", ...lines.map((line) => `  ${line}`)].join("\n");
-  },
-  "config.get": (params, result: { exists: boolean; text: string | null; draft: string | null; source: string[] }) => {
-    if (result.exists) {
-      const where = typeof params.branch === "string" ? `committed on ${params.branch}` : "working copy";
-      return `factory.yaml (${where})\n${(result.text ?? "").trimEnd()}`;
-    }
-    const from = result.source.length > 0 ? `, a draft from ${result.source.join(", ")}` : ", a draft";
-    return `no factory.yaml${from}:\n${(result.draft ?? "").trimEnd()}`;
-  },
-  "config.write": () => "wrote factory.yaml (not committed)",
-
-  "tasks.list": (_params, result: { tasks: TaskView[] }) => taskList(result.tasks),
-  "tasks.get": (_params, result: unknown) => taskBlock(asTask(result)),
-  "tasks.import": (_params, result: unknown) => `imported ${taskHeader(asTask(result))}`,
-  "tasks.timeline": (_params, result: { entries: { kind: string; data: object }[]; next: number }) =>
-    timelineView(result.entries, result.next, (entry) => (entry.data ?? {}) as Record<string, unknown>),
-  "tasks.diff": (_params, result: { files: { path: string; added: number; removed: number }[] }) => {
-    if (result.files.length === 0) return "no changes";
-    const added = result.files.reduce((sum, file) => sum + file.added, 0);
-    const removed = result.files.reduce((sum, file) => sum + file.removed, 0);
-    return [`${plural(result.files.length, "file")}  +${added} -${removed}`, ...result.files.map((file) => `  +${file.added} -${file.removed}  ${file.path}`)].join("\n");
-  },
-  "tasks.start": (_params, result: unknown) => {
-    const task = asTask(result);
-    return fields(`started task ${short(task.id)}`, taskState(task), task.tag);
-  },
-  "tasks.wait": (params, result: WaitResult) => waitView(params, result),
-  "tasks.approve": (_params, result: unknown) => taskHeader(asTask(result)),
-  "tasks.retry": (_params, result: unknown) => taskHeader(asTask(result)),
-  "tasks.cancel": (_params, result: unknown) => taskHeader(asTask(result)),
-  "tasks.remove": (_params, result: { removed: string; dropped: string | null }) =>
-    [`removed task ${short(result.removed)}`, ...(result.dropped ? [`dropped: ${result.dropped}`] : [])].join(" · "),
-  "tasks.message": (_params, result: unknown) => {
-    const task = asTask(result);
-    return fields(`sent to task ${short(task.id)}`, taskState(task), task.round === null ? null : `round ${task.round}`);
-  },
-
-  "waves.start": (_params, result: { wave: WaveView }) => {
-    const wave = result.wave;
-    if (wave.stage === "queued") return waveReceipt("declared ", wave, [`waits for: ${afterNames(wave)}`]);
-    const started = wave.tasks.filter((task) => task.taskId !== null).map((task) => task.key);
-    const waiting = wave.tasks.filter((task) => task.taskId === null && task.state === "pending").map((task) => `${task.key} (${task.after.join(", ")})`);
-    return waveReceipt("started ", wave, [`started: ${started.join(", ") || "none"}`, ...(waiting.length > 0 ? [`waits: ${waiting.join(", ")}`] : [])]);
-  },
-  "waves.add": (params, result: { wave: WaveView }) => {
-    const wave = result.wave;
-    const keys = new Set(Array.isArray(params.tasks) ? params.tasks.map((task) => String((task as Params).key)) : []);
-    const added = wave.tasks.filter((task) => keys.has(task.key)).map((task) => `${task.key} ${task.state}`);
-    return waveReceipt("", wave, [`added: ${added.join(", ") || "none"}`]);
-  },
-  "waves.get": (_params, result: { wave: WaveView }) => waveBlock(result.wave),
-  "waves.list": (_params, result: { waves: WaveView[] }) => waveList(result.waves),
-  "waves.timeline": (_params, result: { events: ({ kind: string } & Record<string, unknown>)[]; next: number }) =>
-    timelineView(result.events, result.next, (event) => event as Record<string, unknown>),
-  "waves.retry": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
-  "waves.approve": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
-  "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
-  "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
-  ...SCOUT_RENDERERS,
-  "gates.prove": (_params, result: { proof: ProofView }) => `started ${proofHeader(result.proof)}`,
-  "gates.get": (_params, result: { proof: ProofView }) => proofBlock(result.proof),
-  "tasks.update": (_params, result: { wave: WaveView; key: string; changed: boolean; delivery: string }) => {
-    if (!result.changed) return waveReceipt("", result.wave, [`task ${result.key}: nothing changed`]);
-    const told: Record<string, string> = { pending: "starts with it", sent: "its coder was told", kept: "its coder is told at its next turn", starting: "its coder is told as it starts" };
-    return waveReceipt("", result.wave, [`task ${result.key} updated, ${told[result.delivery] ?? result.delivery}`]);
-  },
-  "waves.update": (_params, result: { wave: WaveView; changed: boolean }) => waveReceipt("", result.wave, [result.changed ? "updated, the next review reads it" : "nothing changed"]),
-  "contracts.apply": (_params, result: { name: string; changed: string[]; notified: ContractTask[]; kept: ContractTask[]; done: ContractTask[] }) => {
-    const keys = (tasks: ContractTask[]) => tasks.map((task) => `${task.tag}:${task.key}`).join(", ");
-    if (result.changed.length === 0) return `contract ${result.name}: nothing changed`;
-    return [
-      `contract ${result.name}: ${plural(result.changed.length, "fact")} changed`,
-      ...(result.notified.length > 0 ? [`told: ${keys(result.notified)}`] : []),
-      ...(result.kept.length > 0 ? [`next turn: ${keys(result.kept)}`] : []),
-      ...(result.done.length > 0 ? [`done, may need a follow-up task: ${keys(result.done)}`] : []),
-    ].join(" · ");
-  },
-};
-
-type ContractTask = { wave: string; tag: string; key: string; task: string };
+/** Every action's renderer, from the features (`features.ts`). Read on the first call: a feature imports this module. */
+function renderersByName(): Record<string, Renderer> {
+  renderers ??= Object.assign({}, ...FEATURES.map((feature) => feature.renderers)) as Record<string, Renderer>;
+  return renderers;
+}
 
 /** Whether `agentView` renders `action`. */
 export function hasAgentView(action: string): boolean {
-  return Object.hasOwn(RENDERERS, action);
+  return Object.hasOwn(renderersByName(), action);
 }
 
 /** The full view `result` of `action` called with `params`, as the agent's text lines. Throws for an unknown action. */
 export function agentView(action: string, params: unknown, result: unknown): string {
   if (!hasAgentView(action)) throw new Error(`no agent view for ${action}`);
   const given = params !== null && typeof params === "object" ? (params as Params) : {};
-  return scrub(RENDERERS[action](given, result as never), action.startsWith("repos."));
+  return scrub(renderersByName()[action](given, result as never), action.startsWith("repos."));
 }
 
 // ---- errors ----

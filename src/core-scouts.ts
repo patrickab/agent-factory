@@ -11,7 +11,6 @@
  */
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import type { ActionName } from "./core.ts";
 import { FactoryError, nonEmpty, primaryOf, repoPath, stringsParam, type Handler } from "./core-shared.ts";
 import { defaultSmallModel } from "./core-settings.ts";
 import { waveReviewWorktree } from "./core-waves.ts";
@@ -129,4 +128,4 @@ export const SCOUT_HANDLERS = {
     scouts.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     return { scouts };
   },
-} satisfies Partial<Record<ActionName, Handler>>;
+} satisfies Record<string, Handler>;

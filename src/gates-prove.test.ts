@@ -61,10 +61,10 @@ describe("gates.prove", () => {
       ["sh", true],
     ]);
     expectWorktreeGone(repo, proof);
-    const notices = pendingNotices([], [], new Set(), [], [proof]);
+    const notices = pendingNotices([], [], new Set(), { gates: [proof] });
     expect(notices.map((notice) => [notice.key, notice.origin])).toEqual([[`proof:${proof.id}:passed`, ORIGIN]]);
     expect(notices[0].text).toStartWith("factory: the gates of main pass\nproof ");
-    expect(pendingNotices([], [], new Set([`proof:${proof.id}:passed`]), [], [proof])).toEqual([]);
+    expect(pendingNotices([], [], new Set([`proof:${proof.id}:passed`]), { gates: [proof] })).toEqual([]);
   });
 
   test("flaky: a step that fails and passes on its rerun names its failing tests; no attention", async () => {
@@ -75,7 +75,7 @@ describe("gates.prove", () => {
     expect(proof).toMatchObject({ state: "flaky", flaky: ["a timing test"], failing: null });
     expect(proof.steps[0]).toMatchObject({ passed: true, flaky: ["a timing test"] });
     expectWorktreeGone(repo, proof);
-    const [notice] = pendingNotices([], [], new Set(), [], [proof]);
+    const [notice] = pendingNotices([], [], new Set(), { gates: [proof] });
     expect(notice.key).toBe(`proof:${proof.id}:flaky`);
     expect(notice.text).toContain("pass, flaky");
     expect(notice.text).toContain("flaky: a timing test");
@@ -91,7 +91,7 @@ describe("gates.prove", () => {
     expect(proof.failing?.tail).toContain("the suite is broken");
     expect(readFileSync(proof.failing?.log ?? "", "utf8")).toContain("the suite is broken");
     expectWorktreeGone(repo, proof);
-    const [notice] = pendingNotices([], [], new Set(), [], [proof]);
+    const [notice] = pendingNotices([], [], new Set(), { gates: [proof] });
     expect(notice.key).toBe(`proof:${proof.id}:failing`);
     expect(notice.text).toContain("factory: the gates of main fail");
     expect(notice.text).toContain("the suite is broken");
@@ -135,7 +135,7 @@ describe("gates.prove", () => {
     const answer = (await callAction("tasks.wait", { ids: [id] })) as WaitAnswer;
     expect(answer.attention).toEqual([id]);
     expect(answer.proofs[0]).toMatchObject({ state: "running", running: false, interrupted: true });
-    expect(pendingNotices([], [], new Set(), [], answer.proofs).map((notice) => notice.key)).toEqual([`proof:${id}:interrupted`]);
+    expect(pendingNotices([], [], new Set(), { gates: answer.proofs }).map((notice) => notice.key)).toEqual([`proof:${id}:interrupted`]);
   });
 });
 

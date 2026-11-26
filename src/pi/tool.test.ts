@@ -47,7 +47,7 @@ describe("factoryToolParameters", () => {
   test("action is the enum of the ACTIONS that are not hostOnly nor a timeline, every param of those is a property", () => {
     const parameters = factoryToolParameters();
     expect(parameters.required).toEqual(["action"]);
-    const offered = Object.keys(ACTIONS).filter((name) => !["tasks.import", "tasks.timeline", "waves.timeline"].includes(name));
+    const offered = (Object.keys(ACTIONS) as (keyof typeof ACTIONS)[]).filter((name) => !ACTIONS[name].hostOnly && !name.endsWith(".timeline"));
     expect(parameters.properties.action.enum).toEqual(offered);
     expect(String(parameters.properties.action.description)).not.toContain("tasks.import");
     expect(parameters.properties.record).toBeUndefined();

@@ -10,7 +10,6 @@
  * - `noticeInputs`: the tasks and waves a Pi session started, for its notifications (`notify.ts`)
  */
 import { existsSync } from "node:fs";
-import type { ActionName } from "./core.ts";
 import { waveContracts } from "./core-contracts.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
@@ -650,7 +649,7 @@ export const WAVE_HANDLERS = {
       await unlockWave(id).catch(() => undefined);
     }
   },
-} satisfies Partial<Record<ActionName, Handler>>;
+} satisfies Record<string, Handler>;
 
 /** The wave's stage, `interrupted (<stage> ...)` when no runner drives it. */
 function waveStageText(view: WaveView): string {

@@ -14,7 +14,6 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
-import type { ActionName } from "./core.ts";
 import { FactoryError, primaryOf, repoPath, type Handler } from "./core-shared.ts";
 import { initDraft } from "./draft.ts";
 import { git } from "./git.ts";
@@ -172,4 +171,4 @@ export const SETTINGS_HANDLERS = {
     await writeFile(path, text, "utf8");
     return { path };
   },
-} satisfies Partial<Record<ActionName, Handler>>;
+} satisfies Record<string, Handler>;

@@ -15,7 +15,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { readFile, stat, truncate } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import type { ActionName } from "./core.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { requireFactoryModels } from "./core-settings.ts";
 import { diffFileCounts, git, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
@@ -808,4 +807,4 @@ export const TASK_HANDLERS = {
     await pokeWaveOf(record, env);
     return taskView(record);
   },
-} satisfies Partial<Record<ActionName, Handler>>;
+} satisfies Record<string, Handler>;

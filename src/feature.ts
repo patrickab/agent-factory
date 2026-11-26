@@ -1,0 +1,83 @@
+/**
+ * What a feature registers: its actions (`ActionSpec`), their handlers, their agent views, its notices and its sentence
+ * of the `factory` tool's description. One module per feature in `feature-<name>.ts`, listed by `features.ts`; `core.ts`,
+ * `agent-view.ts`, `notify.ts` and `factory-tool.ts` read the list, so a new feature edits none of them.
+ *
+ * - `handlers` is a getter: read on the first call, never on load (a handler module may import a module that imports
+ *   the registry)
+ * - `renderers`: one per action, `(params, result) => text` (`agent-view.ts` scrubs it)
+ * - `notices`: the feature's notices from the items the notifier looked up under the feature's `name`
+ * - Also the schema helpers the features' action specs share
+ */
+import type { Handler, Params } from "./core-shared.ts";
+import type { Notice } from "./notify.ts";
+
+export type Schema = Record<string, unknown>;
+
+export interface ActionSpec {
+  summary: string;
+  params: { type: "object"; required: string[]; properties: Record<string, Schema> };
+  mutates: boolean;
+  /** For the host only: never offered to an agent. */
+  hostOnly: boolean;
+}
+
+export type Handlers = Readonly<Record<string, Handler>>;
+
+export type Renderer = (params: Params, result: never) => string;
+
+export interface Feature<A extends string = string> {
+  /** One word; the key of the items `pendingNotices` hands to `notices`. */
+  name: string;
+  actions: { readonly [K in A]: ActionSpec };
+  /** Typed loosely: a handler module's types reach `ActionName`. `features.test.ts` checks they match `actions`. */
+  readonly handlers: Handlers;
+  renderers: Record<NoInfer<A>, Renderer>;
+  notices?: (items: readonly unknown[]) => Notice[];
+  /** Its sentences of the `factory` tool's description. */
+  toolBlurb?: string;
+}
+
+/** `feature` as it is, its action names checked against its handlers and renderers. */
+export function feature<A extends string>(declared: Feature<A>): Feature<A> {
+  return declared;
+}
+
+export function spec(summary: string, properties: Record<string, Schema>, required: string[], mutates: boolean, hostOnly = false): ActionSpec {
+  return { summary, params: { type: "object", required, properties }, mutates, hostOnly };
+}
+
+export const REPO: Schema = { type: "string", description: "A path inside the git repository. Default: the current directory" };
+export const ID: Schema = { type: "string", description: "The task id or a unique prefix of it" };
+export const WAVE_ID: Schema = { type: "string", description: "The wave id or a unique prefix of it" };
+/** One task of `waves.start` / `waves.add`. */
+export const WAVE_TASK_ITEM: Schema = {
+  type: "object",
+  required: ["key", "title", "request"],
+  properties: {
+    key: { type: "string" },
+    title: { type: "string" },
+    request: { type: "string" },
+    after: { type: "array", items: { type: "string" } },
+    model: { type: "string", enum: ["small", "big"], description: "Which of the wave's two models this task's coder runs with: small for easy tasks; default big" },
+  },
+};
+export const TAG: Schema = { type: "string", description: "A task tag: segments of A-Z a-z 0-9 . _ @ + - joined by /" };
+export const TAG_FILTER: Schema = { type: "string", description: "Only the tasks whose tag is this one or lies under it (a holds a/b, not ab)" };
+export const SETTINGS_PROPERTIES: Record<string, Schema> = {
+  merge: { type: "string", enum: ["auto", "review"], description: "auto: merge a passed round. review: wait for approve" },
+  maxRounds: { type: "integer", minimum: 1, maximum: 20 },
+  review: { type: "boolean", description: "Run the reviewer on every round" },
+  branch: { type: "string", description: "The branch the task starts from and merges into" },
+  models: {
+    type: "object",
+    properties: {
+      coder: { type: "string", description: "provider/model; absent: Pi's session model" },
+      big: { type: "string", description: "provider/model; the same as coder (either name sets both)" },
+      small: { type: "string", description: "provider/model for a wave's easy tasks (model small)" },
+      reviewer: { type: "string", description: "provider/model; absent: Pi's session model" },
+    },
+  },
+};
+
+export const REMOTE: Schema = { type: "boolean", description: "Push a wave's branch, open its pull/merge request on the origin's forge (gh, glab), comment the reviews, push the target after the merge" };

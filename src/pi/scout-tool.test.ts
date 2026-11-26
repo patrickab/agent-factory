@@ -131,7 +131,7 @@ describe("a supervisor's scouts", () => {
     const { text, result } = await tracker.call({ concern: "how a works" }, undefined, ctx);
     expect(text).toContain("arrives as a factory report");
     expect(await tracker.held(() => false)).toEqual([]);
-    const notices = pendingNotices([], [], await readDelivered(), [view(result.scout.id, "session", "done")]);
+    const notices = pendingNotices([], [], await readDelivered(), { scouts: [view(result.scout.id, "session", "done")] });
     expect(notices).toHaveLength(1);
     expect(notices[0]).toMatchObject({ key: scoutNoticeKey(result.scout.id), origin: "supervisor-session" });
     expect(notices[0].text).toContain(REPORT);
@@ -151,7 +151,7 @@ describe("a supervisor's scouts", () => {
     expect(text).toContain(REPORT);
     const delivered = await readDelivered();
     expect(delivered.has(scoutNoticeKey(result.scout.id))).toBe(true);
-    expect(pendingNotices([], [], delivered, [view(result.scout.id, "session", "done")])).toEqual([]);
+    expect(pendingNotices([], [], delivered, { scouts: [view(result.scout.id, "session", "done")] })).toEqual([]);
   });
 
   test("wait: true whose report a factory report delivered first does not give it again", async () => {
