@@ -88,6 +88,8 @@ type WaveView = {                     // as in the contract
   usage: Usage | null                 // tasks, reviews and scouts
   scoutingCost?: number               // the scouts alone
   actions: string[]
+  contracts?: string[]                // names, as declared (absent: none)
+  updates?: { at: string; key: string | null; fields: string[] }[]   // tasks.update (key) and waves.update (null) events, oldest first
   feedback?: { kind: string; what: string; cost: string | null; suggestion: string | null; task: string; wave: string | null; role: string }[]   // waves.get only, oldest first
 }
 
@@ -112,6 +114,7 @@ wave 3f2a91c0  rejected  4/5 done  factory/w1  $18.40
     major  src/wave-runner.ts:309  A wave whose remaining tasks can never start stays building forever. Fix: ...
     major  src/core.ts:1060  A task that fails to launch is retried every 10 s, silently. Fix: ...
     minor  src/tasks.ts:94  tasks.import can put a task into a wave. Fix: ...
+  updated: docs (request), wave (title)
   feedback: 1
     context (coder, task a113f7bb): read 40 files, needed 3 · cost: 2 avoidable rounds · suggestion: ...
   next: waves.add, waves.cancel
@@ -170,12 +173,15 @@ tasks.wait ...                       (limit reached)
 
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
-| `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], after?, plan?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5 done  factory/w1 · started: record · waits: actions (record), runner (actions)`; with `after`: `declared wave 9c4d1e2f  queued  0/2 done  factory/w3 · waits for: 3f2a91c0` |
+| `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], after?, plan?, contracts?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5 done  factory/w1 · started: record · waits: actions (record), runner (actions)`; with `after`: `declared wave 9c4d1e2f  queued  0/2 done  factory/w3 · waits for: 3f2a91c0` |
 | `waves.add` | `{id, tasks}` | `{wave: WaveView}` | `wave 3f2a91c0  building  4/6 done  factory/w1 · added: fix running` |
 | `waves.get` | `{id}` | `{wave: WaveView}` | the wave block above |
 | `waves.list` | `{repo?, tag?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count |
 | `waves.timeline` | `{id, since?}` | `{events: WaveEvent[], next: number}` | none: not offered to agents; the CLI prints JSON |
 | `waves.retry` · `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  reviewing  5/5 done  factory/w1` · `... merging ...` · `... cancelled ...` |
+| `waves.update` | `{id, title?, request?}` | `{wave: WaveView, changed: boolean}` | the wave line, `updated, the next review reads it` · `nothing changed` |
+| `tasks.update` | `{id, title?, request?, after?, model?}` | `{wave: WaveView, key, changed: boolean, delivery: "pending"\|"sent"\|"kept"\|"starting"}` | the wave line, `task docs updated, <starts with it \| its coder was told \| its coder is told at its next turn \| its coder is told as it starts>` · `task docs: nothing changed` |
+| `contracts.apply` | `{store, name, op}` | `{store, name, changed: string[], notified, kept, done: {wave, tag, key, task}[]}` | `contract core: 1 fact changed · told: factory/w1:docs · next turn: ... · done, may need a follow-up task: ...` · `contract core: nothing changed` |
 | `waves.remove` | `{id, force?}` | `{removed: string}` | `removed wave 3f2a91c0` |
 
 ```
@@ -247,6 +253,8 @@ not_found: no task has an id starting with "4ae7" · next: tasks.list
 ```
 
 ## Notifications (pushed into the origin session)
+
+A contract change that reaches done tasks of a wave: `factory: contract core changed (<facts>): wave factory/w1 has done tasks docs, which may need a follow-up task`, once.
 
 The same blocks, with one line on top saying why it arrived. A queued wave says nothing until it can never start:
 `factory: wave factory/w3 can never start`, once.

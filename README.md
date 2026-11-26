@@ -135,8 +135,8 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `actions` = the task actions the core accepts now), `tasks.timeline` (session entries as `{at, kind, data}`,
   `since`/`next` = a byte cursor, read from `since` on), `tasks.diff` (base, patch, per-file added/removed lines),
   `tasks.start|approve|retry|cancel|remove|message`, `tasks.wait`,
-  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below), `scouts.start|get|list` (below),
-  `gates.prove|get` (below)
+  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below), `tasks.update`, `waves.update`,
+  `contracts.apply` (below), `scouts.start|get|list` (below), `gates.prove|get` (below)
 - `tasks.list {repo?, tag?}`: `tag` keeps the tasks whose tag is it or starts with `tag + "/"` (`a` holds `a/b`, not
   `ab`)
 - `tasks.wait {ids? | tag? | wave?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique
@@ -399,6 +399,15 @@ Commands (inside a task's own Pi session):
   `tasks.list {tag: "plugin/m1"}` lists them and `tasks.wait {tag: "plugin/m1"}` blocks until the tasks and waves
   under it rest or one needs attention. `plan` stores a memory_store path next to the tag; the factory only keeps it
 - A wave's tasks merge into a wave branch; its runner then gates that branch into the target all waves flow into
+
+## Contracts and an adjustable plan
+
+- A contract is a memory-store directory of facts, `<plan>/run/contract/<name>/<fact>`, or one document `<plan>/run/contract/<name>.md`. `waves.start {contracts: [names]}` lists the ones its coders work by; `core` is added when it exists. Refused: `contracts` without `plan`, an unknown contract, no `memory-store` on PATH
+- A coder's first message (not the stored request) starts with the contracts' names and the command that reads each. A hash of each is stored on the task at launch and compared before every coder turn: a difference sends the changed facts as a follow-up
+- `contracts.apply {store, name, op}`: `op` is one `memory-store` op (`add`, `update`, `retire`, `write_doc`) on one fact of the contract, applied under a lock. Then for every wave of that store listing it: a `running` task gets the follow-up at once; another started task keeps it for its next turn (`waiting_answer`: with its answer); pending tasks nothing, they read the contract at launch; `done` tasks are answered and reported once to the wave's origin (`factory: contract <name> changed ...`). Answers `{store, name, changed, notified, kept, done}`; nothing changed: no notice
+- `tasks.update {id, title?, request?, after?, model?}`: for a task of a wave, a pending one's id (`waves.get`) too. Pending: the declaration is replaced (`after` checked as at `waves.add`: unknown key, itself, cycle; a new `after` may start it now). Started (`running`, `waiting_answer`, `blocked`): only `title` and `request`, the coder is told old and new text (at once while `running`, else at its next turn); `after` and `model` refused. `done`, `cancelled`, `merging`, `waiting_approve`, a dropped task, a merged or cancelled wave: refused, add a task with `waves.add`. Answers `{wave, key, changed, delivery}`, `delivery` one of `pending`, `sent`, `kept`, `starting`
+- `waves.update {id, title?, request?}`: the wave's title and the reviewer's instructions, until it is `merged` or `cancelled`; a review that runs keeps the text it started with. Answers `{wave, changed}`
+- Both are `update` events in the wave's log; `waves.get` shows `updated: docs (request), wave (title)`
 
 ## Questions to the supervisor
 

@@ -26,6 +26,7 @@ export const FACTORY_TOOL_DESCRIPTION = [
   "Run coding work in the background: a task codes in its own git worktree of a repository with a committed factory.yaml, passes its gates and merges into its target.",
   '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, reviewed as a whole and merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',
   '"gates.prove" runs a branch\'s merge_gates in the background before a wave is declared on it: passed, flaky or failing.',
+  '"contracts.apply" changes one fact of a contract the waves list and tells their tasks; "tasks.update" and "waves.update" adjust a declared plan (a pending task fully, a started one its title and request); coders report what cost runtime or context with their feedback tool, "waves.get" lists it.',
   'Answers are short text: an id (8 chars are enough), the state, what matters in it, and "next:" with the actions valid now.',
   'Tasks and waves started from a Pi session report back to it when they need you; elsewhere block on "tasks.wait" (ids, tag or wave) instead of polling.',
   "A tag (path segments like plugin/m1/w1) groups related work for tasks.list, waves.list and tasks.wait.",
