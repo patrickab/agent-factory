@@ -4,11 +4,12 @@
  * whose findings `$FAKE_VERDICT` chooses). `runWave` runs in this process; the poke tests start real detached runners.
  */
 import { randomBytes } from "node:crypto";
-import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { caseDigits, caseSerial, caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
 import { worktreePath } from "./launch.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
@@ -18,6 +19,7 @@ import { appendWaveEvent, createWave, foldWave, listWaves, lockWave, readWave, u
 import { MERGE_PUSH_PENDING } from "./remote.ts";
 import { pendingMarks } from "./sync.ts";
 
+const test = caseTests();
 const savedEnv = { ...process.env };
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-wave-runner-test-")));
 const fakeBin = join(scratch, "bin");
@@ -102,9 +104,9 @@ async function until(check: () => boolean | Promise<boolean>, timeoutMs = 15_000
 
 /** Part of every fixed id and session id here: a concurrent test run (another worktree) never matches these runners. */
 const RUN = randomBytes(2).toString("hex");
-const WAVE = `30000000-${RUN}-4000-8000-000000000001`;
+const WAVE = (): string => `30000000-${RUN}-4000-8000-${caseDigits()}`;
 const BRANCH = "main-factory-w1";
-const taskId = (n: number) => `40000000-0000-4000-8000-00000000000${n}`;
+const taskId = (n: number) => `40000000-${RUN}-4000-8000-${caseDigits(caseSerial() * 10 + n)}`;
 
 /**
  * A repo on `main` with `factory.yaml` (`config`), the wave's branch off it holding one commit per task (a, then b after
@@ -124,12 +126,12 @@ async function waveRepo(config = "gates:\n  - [\"true\"]\n", state = "done", ove
   commit(work, "b.txt", "b\n", "feat: add b");
   commit(work, "c.txt", "c\n", "feat: add c");
   git(repo, "worktree", "remove", work);
-  await createWave({ id: WAVE, repo, tag: "factory/w1", plan: null, title: "Wave one", request: "Check b and c.\nKeep it small.", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides });
+  await createWave({ id: WAVE(), repo, tag: "factory/w1", plan: null, title: "Wave one", request: "Check b and c.\nKeep it small.", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides });
   const specs = [
     { key: "a", title: "Add b", request: "add b", after: [] },
     { key: "b", title: "Add c", request: "add c", after: ["a"] },
   ];
-  await appendWaveEvent(WAVE, { kind: "tasks", tasks: specs });
+  await appendWaveEvent(WAVE(), { kind: "tasks", tasks: specs });
   for (const [index, spec] of specs.entries()) {
     const record: TaskRecord = {
       id: taskId(index + 1),
@@ -137,48 +139,48 @@ async function waveRepo(config = "gates:\n  - [\"true\"]\n", state = "done", ove
       worktree: join(caseDir, `task-${spec.key}`),
       branch: `task-${spec.key}`,
       title: spec.title,
-      sessionId: `session-${RUN}-${spec.key}`,
+      sessionId: `session-${RUN}-${caseSerial()}-${spec.key}`,
       sessionDir: join(caseDir, "sessions"),
       createdAt: `2026-01-01T00:00:0${index + 1}.000Z`,
       tag: "factory/w1",
       plan: null,
-      wave: WAVE,
+      wave: WAVE(),
       origin: null,
     };
     await writeTask(record);
     mkdirSync(record.sessionDir, { recursive: true });
     const entry = { type: "custom", customType: "factory-state", data: { state, round: 1, reason: "r" } };
     writeFileSync(join(record.sessionDir, `2026-01-01T00-00-00-000Z_${record.sessionId}.jsonl`), `${JSON.stringify(entry)}\n`);
-    await appendWaveEvent(WAVE, { kind: "task", key: spec.key, taskId: record.id, sessionId: record.sessionId });
+    await appendWaveEvent(WAVE(), { kind: "task", key: spec.key, taskId: record.id, sessionId: record.sessionId });
   }
   return repo;
 }
 
-const getWave = async () => ((await callAction("waves.get", { id: WAVE })) as { wave: WaveView }).wave;
+const getWave = async () => ((await callAction("waves.get", { id: WAVE() })) as { wave: WaveView }).wave;
 type Event = { at?: string; kind: string; stage?: string; reason?: string | null; detail?: string; dropped?: string[]; key?: string; taskId?: string };
-const timeline = async () => ((await callAction("waves.timeline", { id: WAVE })) as { events: Event[] }).events;
+const timeline = async () => ((await callAction("waves.timeline", { id: WAVE() })) as { events: Event[] }).events;
 type WaitResult = { waves: WaveView[]; attention: string[]; timedOut: boolean };
-const waitWave = async (timeoutMs: number) => (await callAction("tasks.wait", { wave: WAVE, timeoutMs })) as WaitResult;
+const waitWave = async (timeoutMs: number) => (await callAction("tasks.wait", { wave: WAVE(), timeoutMs })) as WaitResult;
 /** Overwrites the session of the wave's task `key` with one state. */
 const setState = (key: string, state: string) =>
-  writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${key}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "r" } })}\n`);
+  writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseSerial()}-${key}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "r" } })}\n`);
 /** Holds the runner's lock in this process while `act` runs: a poke leaves its marker and starts no runner. */
 async function holding<T>(act: () => Promise<T>): Promise<T> {
-  await lockWave(WAVE);
+  await lockWave(WAVE());
   try {
     return await act();
   } finally {
-    await unlockWave(WAVE);
+    await unlockWave(WAVE());
   }
 }
-const reviewWorktree = (repo: string) => worktreePath(repo, `wave-${WAVE.slice(0, 8)}-review`);
+const reviewWorktree = (repo: string) => worktreePath(repo, `wave-${WAVE().slice(0, 8)}-review`);
 
 describe("the wave runner", () => {
   test("a wave of two chained tasks runs to merged: the target holds both commits unsquashed, every step has its event", async () => {
     const repo = await waveRepo();
     // The target moved on meanwhile: the wave is rebased onto it, commit by commit.
     const moved = commit(repo, "d.txt", "d\n", "main: add d");
-    expect(await runWave(WAVE)).toBe(0);
+    expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.running, wave.interrupted, wave.counts]).toEqual(["merged", null, false, false, { total: 2, done: 2 }]);
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\nmain: add d\ninit");
@@ -189,12 +191,12 @@ describe("the wave runner", () => {
     ]);
     expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", true]]);
     expect(wave.usage).toEqual({ input: 100, output: 20, cacheRead: 900, cacheWrite: 30, cost: 0.5 });
-    const timeline = (await callAction("waves.timeline", { id: WAVE })) as { events: { kind: string; stage?: string }[] };
+    const timeline = (await callAction("waves.timeline", { id: WAVE() })) as { events: { kind: string; stage?: string }[] };
     expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "gate", "review", "merging", "merge", "merged"]);
     // The reviewer got the wave's whole diff and its request verbatim.
     const prompt = readFileSync(promptLog, "utf8");
     expect(prompt).toContain(`Review the wave "Wave one": the branch ${BRANCH}, rebased onto main, merges into it.`);
-    const requestFile = join(waveReviewsDir(WAVE), "round-1.request.md");
+    const requestFile = join(waveReviewsDir(WAVE()), "round-1.request.md");
     expect(prompt).toContain(requestFile);
     expect(readFileSync(requestFile, "utf8")).toContain("## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n\n## Tasks of the wave\n");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
@@ -203,7 +205,7 @@ describe("the wave runner", () => {
   test("a merged wave calls waveLanded: the other building wave's branch is rebased onto the target, its running task marked, both in the log", async () => {
     const repo = await waveRepo();
     // A second wave on main, building, with a running task off its branch.
-    const other = `30000000-${RUN}-4000-8000-000000000002`;
+    const other = `31000000-${RUN}-4000-8000-${caseDigits()}`;
     const otherBranch = "main-factory-w2";
     git(repo, "branch", otherBranch, "main");
     const work = join(caseDir, "work2");
@@ -211,13 +213,13 @@ describe("the wave runner", () => {
     commit(work, "e.txt", "e\n", "feat: add e");
     git(repo, "worktree", "remove", work);
     await createWave({ id: other, repo, tag: "factory/w2", plan: null, title: "Wave two", request: "r", branch: otherBranch, target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    const running: TaskRecord = { id: taskId(7), repo, worktree: join(caseDir, "task-w2"), branch: "task-w2", title: "Two", sessionId: `session-${RUN}-w2`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:07.000Z", tag: "factory/w2", plan: null, wave: other, origin: null };
+    const running: TaskRecord = { id: taskId(7), repo, worktree: join(caseDir, "task-w2"), branch: "task-w2", title: "Two", sessionId: `session-${RUN}-${caseSerial()}-w2`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:07.000Z", tag: "factory/w2", plan: null, wave: other, origin: null };
     await writeTask(running);
     writeFileSync(join(running.sessionDir, `2026-01-01T00-00-00-000Z_${running.sessionId}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "running", round: 1, reason: "r" } })}\n`);
     const lines: string[] = [];
     const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args.join(" ")));
     try {
-      expect(await runWave(WAVE)).toBe(0);
+      expect(await runWave(WAVE())).toBe(0);
     } finally {
       spy.mockRestore();
     }
@@ -231,12 +233,12 @@ describe("the wave runner", () => {
     await waveRepo();
     // Task a's coder said what it left open; a third task was cancelled (its record removed).
     const say = (text: string) => JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
-    writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-a.jsonl`), [JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "done", round: 1, reason: "r" } }), say("Risk: b.txt has no newline check.")].join("\n") + "\n");
-    await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "c", title: "Add nothing", request: "a cancelled request", after: [] }] });
-    await appendWaveEvent(WAVE, { kind: "task", key: "c", taskId: taskId(9), sessionId: `session-${RUN}-c` });
-    expect(await runWave(WAVE)).toBe(0);
+    writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseSerial()}-a.jsonl`), [JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "done", round: 1, reason: "r" } }), say("Risk: b.txt has no newline check.")].join("\n") + "\n");
+    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add nothing", request: "a cancelled request", after: [] }] });
+    await appendWaveEvent(WAVE(), { kind: "task", key: "c", taskId: taskId(9), sessionId: `session-${RUN}-${caseSerial()}-c` });
+    expect(await runWave(WAVE())).toBe(0);
     expect((await getWave()).stage).toBe("merged");
-    const request = readFileSync(join(waveReviewsDir(WAVE), "round-1.request.md"), "utf8");
+    const request = readFileSync(join(waveReviewsDir(WAVE()), "round-1.request.md"), "utf8");
     expect(request).toBe(
       "# Wave one\n\n## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n\n## Tasks of the wave\n\n" +
         "### Add b\n\n#### Request\n\nadd b\n\n#### The coder's last message\n\nRisk: b.txt has no newline check.\n\n" +
@@ -251,25 +253,25 @@ describe("the wave runner", () => {
     await waveRepo();
     process.env.FAKE_REVIEW_SLEEP = "1500";
     process.env.FAKE_VERDICT = "reject";
-    const running = runWave(WAVE);
-    const requestFile = (round: number) => join(waveReviewsDir(WAVE), `round-${round}.request.md`);
+    const running = runWave(WAVE());
+    const requestFile = (round: number) => join(waveReviewsDir(WAVE()), `round-${round}.request.md`);
     await until(() => existsSync(promptLog));
-    await callAction("waves.update", { id: WAVE, title: "Wave renamed", request: "Check the docs too." });
+    await callAction("waves.update", { id: WAVE(), title: "Wave renamed", request: "Check the docs too." });
     expect(await running).toBe(0);
     expect((await getWave()).stage).toBe("rejected");
     expect(readFileSync(requestFile(1), "utf8")).toStartWith("# Wave one\n\n## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n");
     // The supervisor acts on the rejection: the next review reads the new text.
     delete process.env.FAKE_REVIEW_SLEEP;
     delete process.env.FAKE_VERDICT;
-    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
-    expect(await runWave(WAVE)).toBe(0);
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+    expect(await runWave(WAVE())).toBe(0);
     expect(readFileSync(requestFile(2), "utf8")).toStartWith("# Wave renamed\n\n## Instructions from the supervisor\n\nCheck the docs too.\n");
     expect((await getWave()).updates).toEqual([{ at: expect.any(String), key: null, fields: ["title", "request"] }]);
   }, 30_000);
 
   test("merge review: an approved wave waits for approve, its worktree removed", async () => {
     const repo = await waveRepo(undefined, "done", { merge: "review" });
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect((await getWave()).stage).toBe("waiting_approve");
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
@@ -278,7 +280,7 @@ describe("the wave runner", () => {
   test("a wave resolved from stored settings (merge review, a reviewer model) waits for approve; its reviewer runs on that model", async () => {
     // waves.start stores the repository's settings resolved in the declaration (core.test.ts); the runner reads only it.
     const repo = await waveRepo(undefined, "done", { merge: "review", maxRounds: 2, review: false, models: { reviewer: "x/y" } });
-    await runWave(WAVE);
+    await runWave(WAVE());
     const wave = await getWave();
     expect([wave.stage, wave.reviews.map((review) => review.model)]).toEqual(["waiting_approve", ["x/y"]]);
     const argv = readFileSync(argvLog, "utf8").split("\n");
@@ -289,20 +291,20 @@ describe("the wave runner", () => {
   test("a rejected review rests rejected with its findings; waves.add moves the wave again and pokes the runner", async () => {
     process.env.FAKE_VERDICT = "reject";
     const repo = await waveRepo();
-    await runWave(WAVE);
+    await runWave(WAVE());
     const rejected = await getWave();
     expect(rejected.stage).toBe("rejected");
     expect(rejected.reviews.map((review) => [review.verdict, review.findings])).toEqual([["rejected", [{ severity: "major", file: "b.txt", line: 1, text: "b is wrong" }]]]);
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
     // A live runner holds the wave (this process): the poke leaves its marker and starts none.
-    await lockWave(WAVE);
+    await lockWave(WAVE());
     try {
-      const added = ((await callAction("waves.add", { id: WAVE, tasks: [{ key: "fix", title: "Fix b", request: "fix b", after: ["a"] }] })) as { wave: WaveView }).wave;
+      const added = ((await callAction("waves.add", { id: WAVE(), tasks: [{ key: "fix", title: "Fix b", request: "fix b", after: ["a"] }] })) as { wave: WaveView }).wave;
       expect([added.stage, added.counts]).toEqual(["building", { total: 3, done: 2 }]);
-      expect(existsSync(wavePokePath(WAVE))).toBe(true);
-      expect(await liveWaveRunners(WAVE)).toEqual([]);
+      expect(existsSync(wavePokePath(WAVE()))).toBe(true);
+      expect(await liveWaveRunners(WAVE())).toEqual([]);
     } finally {
-      await unlockWave(WAVE);
+      await unlockWave(WAVE());
     }
   });
 
@@ -316,7 +318,7 @@ describe("the wave runner", () => {
 
   /** The wave's two conflict tasks, used up (their `conflict` events only): the next conflict blocks it. */
   async function usedUpConflicts(): Promise<void> {
-    for (const key of ["conflict-1", "conflict-2"]) await appendWaveEvent(WAVE, { kind: "conflict", phase: "review", key, head: "0".repeat(40), onto: "1".repeat(40), files: ["a.txt"] });
+    for (const key of ["conflict-1", "conflict-2"]) await appendWaveEvent(WAVE(), { kind: "conflict", phase: "review", key, head: "0".repeat(40), onto: "1".repeat(40), files: ["a.txt"] });
   }
 
   test("a third rebase conflict that changes a line blocks it with reason conflict and deletes nothing", async () => {
@@ -326,7 +328,7 @@ describe("the wave runner", () => {
     const wave = git(repo, "rev-parse", BRANCH);
     commit(repo, "a.txt", "main's a\n", "main: change a");
     const main = git(repo, "rev-parse", "main");
-    await runWave(WAVE);
+    await runWave(WAVE());
     const view = await getWave();
     expect([view.stage, view.reason, view.detail]).toEqual(["blocked", "conflict", "the rebase onto main conflicts on a.txt; its 2 conflict tasks are used up"]);
     expect([git(repo, "rev-parse", BRANCH), git(repo, "rev-parse", "main")]).toEqual([wave, main]);
@@ -343,7 +345,7 @@ describe("the wave runner", () => {
     const lines: string[] = [];
     const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args.join(" ")));
     try {
-      expect(await runWave(WAVE)).toBe(0);
+      expect(await runWave(WAVE())).toBe(0);
     } finally {
       spy.mockRestore();
     }
@@ -364,11 +366,11 @@ describe("the wave runner", () => {
     const count = join(caseDir, "merge-gates");
     const repo = await waveRepo(`gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "cat a.txt >> ${count}"]\n`, "done", { merge: "review" });
     waveCommit(repo, "a.txt", "a\nwave\n", "feat: wave adds to a");
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect((await getWave()).stage).toBe("waiting_approve");
     const main = commit(repo, "a.txt", "a\nmain\n", "main: add to a");
-    await holding(() => callAction("waves.approve", { id: WAVE }));
-    expect(await runWave(WAVE)).toBe(0);
+    await holding(() => callAction("waves.approve", { id: WAVE() }));
+    expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect([wave.stage, wave.resolved]).toEqual(["merged", [{ at: expect.any(String), phase: "merge", onto: main, files: ["a.txt"] }]]);
     expect(git(repo, "show", "main:a.txt")).toBe("a\nmain\nwave");
@@ -382,36 +384,36 @@ describe("the wave runner", () => {
     waveCommit(repo, "a.txt", "wave's a\n", "feat: change a");
     const init = git(repo, "rev-parse", "main");
     commit(repo, "a.txt", "main's a\n", "main: change a");
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect([(await getWave()).stage, (await getWave()).actions]).toEqual(["blocked", ["waves.add", "waves.retry", "waves.cancel", "waves.remove"]]);
     // The supervisor resolves it: the conflicting commit leaves the target.
     git(repo, "reset", "--quiet", "--hard", init);
-    const retried = ((await callAction("waves.retry", { id: WAVE })) as { wave: WaveView }).wave;
+    const retried = ((await callAction("waves.retry", { id: WAVE() })) as { wave: WaveView }).wave;
     expect(retried.stage).toBe("reviewing");
     await until(async () => (await getWave()).stage === "merged");
-    await until(async () => (await liveWaveRunners(WAVE)).length === 0);
+    await until(async () => (await liveWaveRunners(WAVE())).length === 0);
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: change a\nfeat: add c\nfeat: add b\ninit");
-    const timeline = (await callAction("waves.timeline", { id: WAVE })) as { events: { kind: string; stage?: string; reason?: string }[] };
+    const timeline = (await callAction("waves.timeline", { id: WAVE() })) as { events: { kind: string; stage?: string; reason?: string }[] };
     expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "conflict", "conflict", "reviewing", "blocked", "reviewing", "gate", "review", "merging", "merge", "merged"]);
   }, 30_000);
 
   test("merge review: waves.approve only from waiting_approve, then the runner merges", async () => {
     const repo = await waveRepo(undefined, "done", { merge: "review" });
-    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
-    await expect(callAction("waves.approve", { id: WAVE })).rejects.toThrow("is reviewing, approve needs waiting_approve");
-    await runWave(WAVE);
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+    await expect(callAction("waves.approve", { id: WAVE() })).rejects.toThrow("is reviewing, approve needs waiting_approve");
+    await runWave(WAVE());
     const waiting = await getWave();
     expect([waiting.stage, waiting.actions.includes("waves.approve")]).toEqual(["waiting_approve", true]);
-    const approved = ((await callAction("waves.approve", { id: WAVE })) as { wave: WaveView }).wave;
+    const approved = ((await callAction("waves.approve", { id: WAVE() })) as { wave: WaveView }).wave;
     expect(approved.stage).toBe("merging");
     await until(async () => (await getWave()).stage === "merged");
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
-    await expect(callAction("waves.approve", { id: WAVE })).rejects.toThrow("is merged, approve needs waiting_approve");
+    await expect(callAction("waves.approve", { id: WAVE() })).rejects.toThrow("is merged, approve needs waiting_approve");
   }, 30_000);
 
   test("a failing gate blocks it with reason gates, its output in the gate event; the wave's commits stay", async () => {
     const repo = await waveRepo('gates:\n  - ["sh", "-c", "echo gate broke; exit 1"]\n');
-    await runWave(WAVE);
+    await runWave(WAVE());
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.reviews]).toEqual(["blocked", "gates", []]);
     expect(wave.gates).toEqual([{ at: expect.any(String), phase: "review", passed: false, wallMs: expect.any(Number), log: expect.stringContaining("gate broke") }]);
@@ -421,7 +423,7 @@ describe("the wave runner", () => {
 
   test("a gate exiting 75 blocks it with reason infra", async () => {
     await waveRepo('gates:\n  - ["sh", "-c", "exit 75"]\n');
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect((await getWave()).reason).toBe("infra");
   });
 
@@ -433,7 +435,7 @@ describe("the wave runner", () => {
     test("failing merge_gates block the wave with reason gates before any reviewer starts", async () => {
       const count = join(caseDir, "merge-gates");
       const repo = await waveRepo(config(count, 1));
-      await runWave(WAVE);
+      await runWave(WAVE());
       const wave = await getWave();
       // A failed step runs once more before it counts.
       expect([wave.stage, wave.reason, wave.reviews, runs(count)]).toEqual(["blocked", "gates", [], 2]);
@@ -445,12 +447,12 @@ describe("the wave runner", () => {
     test("the merge skips them when the target did not move since the review's run", async () => {
       const count = join(caseDir, "merge-gates");
       const repo = await waveRepo(config(count), "done", { merge: "review" });
-      await runWave(WAVE);
+      await runWave(WAVE());
       expect([(await getWave()).stage, runs(count)]).toEqual(["waiting_approve", 1]);
       // The gate event names the commit the suite passed on; the view does not show it (invariant 11).
       expect((await getWave()).gates).toEqual([{ at: expect.any(String), phase: "review", passed: true, wallMs: expect.any(Number), log: expect.any(String) }]);
-      await holding(() => callAction("waves.approve", { id: WAVE }));
-      await runWave(WAVE);
+      await holding(() => callAction("waves.approve", { id: WAVE() }));
+      await runWave(WAVE());
       const wave = await getWave();
       expect([wave.stage, runs(count), wave.gates.map((gate) => gate.phase)]).toEqual(["merged", 1, ["review"]]);
       expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
@@ -459,11 +461,11 @@ describe("the wave runner", () => {
     test("the merge runs them again when the target moved since", async () => {
       const count = join(caseDir, "merge-gates");
       const repo = await waveRepo(config(count), "done", { merge: "review" });
-      await runWave(WAVE);
+      await runWave(WAVE());
       expect([(await getWave()).stage, runs(count)]).toEqual(["waiting_approve", 1]);
       commit(repo, "d.txt", "d\n", "main: add d");
-      await holding(() => callAction("waves.approve", { id: WAVE }));
-      await runWave(WAVE);
+      await holding(() => callAction("waves.approve", { id: WAVE() }));
+      await runWave(WAVE());
       const wave = await getWave();
       expect([wave.stage, runs(count), wave.gates.map((gate) => [gate.phase, gate.passed])]).toEqual(["merged", 2, [["review", true], ["merge", true]]]);
       expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\nmain: add d\ninit");
@@ -479,7 +481,7 @@ describe("the wave runner", () => {
     test("review: fails then passes, the wave goes on and its gate event records flaky", async () => {
       const count = join(caseDir, "merge-gates");
       await waveRepo(config(count, [1]), "done", { merge: "review" });
-      await runWave(WAVE);
+      await runWave(WAVE());
       const wave = await getWave();
       expect([wave.stage, runs(count)]).toEqual(["waiting_approve", 2]);
       expect(wave.gates).toEqual([{ at: expect.any(String), phase: "review", passed: true, wallMs: expect.any(Number), log: expect.any(String), flaky: ["wave > races"] }]);
@@ -488,22 +490,23 @@ describe("the wave runner", () => {
     test("merge: fails then passes, merged with flaky on the merge gate event", async () => {
       const count = join(caseDir, "merge-gates");
       const repo = await waveRepo(config(count, [2]), "done", { merge: "review" });
-      await runWave(WAVE);
+      await runWave(WAVE());
       commit(repo, "d.txt", "d\n", "main: add d");
-      await holding(() => callAction("waves.approve", { id: WAVE }));
-      await runWave(WAVE);
+      await holding(() => callAction("waves.approve", { id: WAVE() }));
+      await runWave(WAVE());
       const wave = await getWave();
       expect([wave.stage, runs(count)]).toEqual(["merged", 3]);
       expect(wave.gates.map((gate) => [gate.phase, gate.passed, gate.flaky])).toEqual([["review", true, undefined], ["merge", true, ["wave > races"]]]);
     }, 30_000);
 
-    test.each([
-      ["exit 75", "exit 75", "infra" as const],
-      ["a kill", "kill -9 $$", "gates" as const],
-    ])("no rerun after %s", async (_name, end, reason) => {
+    for (const [name, end, reason] of [
+      ["exit 75", "exit 75", "infra"],
+      ["a kill", "kill -9 $$", "gates"],
+    ] as const)
+    test(`no rerun after ${name}`, async () => {
       const count = join(caseDir, "merge-gates");
       await waveRepo(`gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "echo run >> ${count}; ${end}"]\n`);
-      await runWave(WAVE);
+      await runWave(WAVE());
       const wave = await getWave();
       expect([wave.stage, wave.reason, runs(count)]).toEqual(["blocked", reason, 1]);
     });
@@ -512,25 +515,25 @@ describe("the wave runner", () => {
   test("a failing after_create hook blocks it (infra) and removes the review worktree it created: waves.retry prepares a fresh one", async () => {
     const mark = join(caseDir, "hook-may-pass");
     const repo = await waveRepo(`hooks:\n  after_create:\n    - ["test", "-e", "${mark}"]\ngates: []\n`);
-    await runWave(WAVE);
+    await runWave(WAVE());
     const blocked = await getWave();
     expect([blocked.stage, blocked.reason]).toEqual(["blocked", "infra"]);
     expect(existsSync(reviewWorktree(repo))).toBe(false);
     expect(git(repo, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
     // The hook passes now: the retry creates the worktree again, its hook runs, the wave merges.
     writeFileSync(mark, "");
-    await callAction("waves.retry", { id: WAVE });
+    await callAction("waves.retry", { id: WAVE() });
     await until(async () => (await getWave()).stage === "merged");
-    await until(async () => (await liveWaveRunners(WAVE)).length === 0);
+    await until(async () => (await liveWaveRunners(WAVE())).length === 0);
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
   }, 30_000);
 
   test("an invalid factory.yaml blocks the wave as infra, naming the file; nothing is reviewed or merged", async () => {
     const repo = await waveRepo("gates: []\ntask_gate: []\n");
-    await runWave(WAVE);
+    await runWave(WAVE());
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.reviews]).toEqual(["blocked", "infra", []]);
-    const timeline = (await callAction("waves.timeline", { id: WAVE })) as { events: { kind: string; detail?: string }[] };
+    const timeline = (await callAction("waves.timeline", { id: WAVE() })) as { events: { kind: string; detail?: string }[] };
     expect(timeline.events.at(-1)?.detail).toContain("factory.yaml: unknown key task_gate");
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
@@ -539,18 +542,18 @@ describe("the wave runner", () => {
   test("a review worktree created again after the review ran the after_create hooks again", async () => {
     const count = join(caseDir, "hook-count");
     await waveRepo(`hooks:\n  after_create:\n    - ["sh", "-c", "echo x >> ${count}"]\ngates: []\n`, "done", { merge: "review" });
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect((await getWave()).stage).toBe("waiting_approve");
     expect(readFileSync(count, "utf8")).toBe("x\n");
-    await callAction("waves.approve", { id: WAVE });
+    await callAction("waves.approve", { id: WAVE() });
     await until(async () => (await getWave()).stage === "merged");
-    await until(async () => (await liveWaveRunners(WAVE)).length === 0);
+    await until(async () => (await liveWaveRunners(WAVE())).length === 0);
     expect(readFileSync(count, "utf8")).toBe("x\nx\n");
   }, 30_000);
 
   test("a dirty review worktree blocks it with reason dirty; the file and the worktree stay", async () => {
     const repo = await waveRepo('hooks:\n  after_create:\n    - ["sh", "-c", "echo x > stray.txt"]\ngates: []\n');
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect([(await getWave()).stage, (await getWave()).reason]).toEqual(["blocked", "dirty"]);
     expect(readFileSync(join(reviewWorktree(repo), "stray.txt"), "utf8")).toBe("x\n");
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
@@ -558,40 +561,40 @@ describe("the wave runner", () => {
 
   test("a gate that rewrites a tracked file blocks it as dirty: nothing reviewed, the target unmoved", async () => {
     const repo = await waveRepo('gates:\n  - ["sh", "-c", "echo changed > b.txt"]\n');
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect([(await getWave()).stage, (await getWave()).reason, (await getWave()).reviews]).toEqual(["blocked", "dirty", []]);
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
   });
 
   test("all tasks cancelled: the wave ends cancelled without a review", async () => {
     await waveRepo(undefined, "cancelled");
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect([(await getWave()).stage, (await getWave()).reviews]).toEqual(["cancelled", []]);
   });
 
   test("a poke during a run does not start a second runner; the running one is the wave's view", async () => {
     // A task still runs: the runner waits for it and lives.
     await waveRepo(undefined, "running");
-    expect(await pokeWave(WAVE)).toBe(true);
-    await until(async () => (await liveWaveRunners(WAVE)).length === 1);
-    expect(await pokeWave(WAVE)).toBe(false);
-    expect(await pokeWave(WAVE)).toBe(false);
+    expect(await pokeWave(WAVE())).toBe(true);
+    await until(async () => (await liveWaveRunners(WAVE())).length === 1);
+    expect(await pokeWave(WAVE())).toBe(false);
+    expect(await pokeWave(WAVE())).toBe(false);
     await Bun.sleep(500);
-    expect(await liveWaveRunners(WAVE)).toHaveLength(1);
+    expect(await liveWaveRunners(WAVE())).toHaveLength(1);
     expect([(await getWave()).running, (await getWave()).interrupted]).toEqual([true, false]);
     // The runner saw the pokes: their marker is gone.
-    await until(() => !existsSync(wavePokePath(WAVE)));
+    await until(() => !existsSync(wavePokePath(WAVE())));
   });
 
   test("a runner started by hand while another holds the wave ends at once", async () => {
     await waveRepo(undefined, "running");
-    await lockWave(WAVE);
+    await lockWave(WAVE());
     try {
-      const child = Bun.spawn(["bun", join(import.meta.dirname, "wave-runner.ts"), WAVE], { env: process.env, stderr: "pipe" });
+      const child = Bun.spawn(["bun", join(import.meta.dirname, "wave-runner.ts"), WAVE()], { env: process.env, stderr: "pipe" });
       expect(await child.exited).toBe(0);
       expect(await new Response(child.stderr).text()).toContain("another runner holds the wave");
     } finally {
-      await unlockWave(WAVE);
+      await unlockWave(WAVE());
     }
   });
 });
@@ -601,19 +604,19 @@ describe("a wave never waits silently (invariant 8)", () => {
     await waveRepo();
     // a was cancelled after b finished; c waits for a and can never start.
     setState("a", "cancelled");
-    await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"] }] });
-    expect(await runWave(WAVE)).toBe(0);
+    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"] }] });
+    expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect([wave.stage, wave.running, wave.interrupted, wave.tasks.map((task) => task.state)]).toEqual(["building", false, false, ["cancelled", "done", "pending"]]);
     const said = (await timeline()).filter((event) => event.kind === "stage");
     expect(said).toEqual([{ at: expect.any(String), kind: "stage", stage: "building", reason: null, detail: expect.stringContaining("task c can never start") }]);
     const waited = await waitWave(10_000);
-    expect([waited.timedOut, waited.attention, waited.waves[0].stage]).toEqual([false, [WAVE], "building"]);
+    expect([waited.timedOut, waited.attention, waited.waves[0].stage]).toEqual([false, [WAVE()], "building"]);
     // A second look says nothing new.
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect((await timeline()).filter((event) => event.kind === "stage")).toHaveLength(1);
     // The supervisor adds a task: c leaves the wave (cancelled), the new one is pending.
-    const added = await holding(async () => ((await callAction("waves.add", { id: WAVE, tasks: [{ key: "c2", title: "Add d again", request: "add d", after: ["b"] }] })) as { wave: WaveView }).wave);
+    const added = await holding(async () => ((await callAction("waves.add", { id: WAVE(), tasks: [{ key: "c2", title: "Add d again", request: "add d", after: ["b"] }] })) as { wave: WaveView }).wave);
     expect([added.stage, added.tasks.map((task) => [task.key, task.state]), added.counts]).toEqual([
       "building",
       [["a", "cancelled"], ["b", "done"], ["c", "cancelled"], ["c2", "pending"]],
@@ -624,19 +627,19 @@ describe("a wave never waits silently (invariant 8)", () => {
 
   test("a task that fails to launch blocks the wave (infra, the error in its stage event); waves.retry builds again", async () => {
     const repo = await waveRepo();
-    await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"] }] });
+    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"] }] });
     // The launch refuses before it creates anything: the wave's branch is gone.
     const tip = git(repo, "rev-parse", BRANCH);
     git(repo, "branch", "-D", BRANCH);
-    expect(await runWave(WAVE)).toBe(0);
+    expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.running, wave.tasks.map((task) => task.state)]).toEqual(["blocked", "infra", false, ["done", "done", "pending"]]);
     expect((await timeline()).at(-1)).toMatchObject({ kind: "stage", stage: "blocked", reason: "infra", detail: expect.stringContaining(`starting its task c failed: ${repo}: branch ${BRANCH} does not exist locally`) });
     const waited = await waitWave(10_000);
-    expect([waited.timedOut, waited.attention]).toEqual([false, [WAVE]]);
+    expect([waited.timedOut, waited.attention]).toEqual([false, [WAVE()]]);
     // Fixed: a retry with a task not started builds again (not a review).
     git(repo, "branch", BRANCH, tip);
-    const retried = await holding(async () => ((await callAction("waves.retry", { id: WAVE })) as { wave: WaveView }).wave);
+    const retried = await holding(async () => ((await callAction("waves.retry", { id: WAVE() })) as { wave: WaveView }).wave);
     expect(retried.stage).toBe("building");
   }, 30_000);
 
@@ -649,24 +652,24 @@ describe("a wave never waits silently (invariant 8)", () => {
       worktree: join(caseDir, "task-x"),
       branch: "task-x",
       title: "Fix b",
-      sessionId: `session-${RUN}-x`,
+      sessionId: `session-${RUN}-${caseSerial()}-x`,
       sessionDir: join(caseDir, "sessions"),
       createdAt: "2026-01-01T00:00:03.000Z",
       tag: "factory/w1",
       plan: null,
-      wave: WAVE,
+      wave: WAVE(),
       origin: null,
     };
     await writeTask(record);
     setState("x", "done");
     process.env.FAKE_REVIEW_SLEEP = "120000";
-    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
-    const run = runWave(WAVE);
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+    const run = runWave(WAVE());
     await until(() => existsSync(promptLog));
     // The next reviewer answers at once.
     delete process.env.FAKE_REVIEW_SLEEP;
     const added = Date.now();
-    await callAction("waves.add", { id: WAVE, tasks: [{ key: "x", title: "Fix b", request: "fix b", after: ["a"] }] });
+    await callAction("waves.add", { id: WAVE(), tasks: [{ key: "x", title: "Fix b", request: "fix b", after: ["a"] }] });
     await until(async () => (await timeline()).some((event) => event.kind === "task" && event.key === "x"), 10_000);
     expect(Date.now() - added).toBeLessThan(10_000);
     expect(await run).toBe(0);
@@ -681,10 +684,10 @@ describe("a wave never waits silently (invariant 8)", () => {
 describe("resuming from the log", () => {
   test("an interrupted merging stage merges", async () => {
     const repo = await waveRepo();
-    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
-    await appendWaveEvent(WAVE, { kind: "review", round: 1, sessionId: null, model: null, verdict: "approved", status: "ok", findings: [], usage: null, wallMs: 1 });
-    await appendWaveEvent(WAVE, { kind: "stage", stage: "merging", reason: null });
-    expect(await runWave(WAVE)).toBe(0);
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+    await appendWaveEvent(WAVE(), { kind: "review", round: 1, sessionId: null, model: null, verdict: "approved", status: "ok", findings: [], usage: null, wallMs: 1 });
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "merging", reason: null });
+    expect(await runWave(WAVE())).toBe(0);
     expect((await getWave()).stage).toBe("merged");
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
     expect((await timeline()).slice(-2).map((event) => event.stage ?? event.kind)).toEqual(["merge", "merged"]);
@@ -696,19 +699,19 @@ describe("resuming from the log", () => {
     // A runner killed outright during a gate left the worktree and the gate's output.
     git(repo, "worktree", "add", "--quiet", reviewWorktree(repo), BRANCH);
     writeFileSync(join(reviewWorktree(repo), "gate-output.log"), "x\n");
-    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
-    await runWave(WAVE);
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+    await runWave(WAVE());
     expect([(await getWave()).stage, (await getWave()).reason]).toEqual(["blocked", "dirty"]);
     const detail = (await timeline()).at(-1)?.detail ?? "";
     // No path in the event (invariant 10): the worktree is named by its wave; its path is in the runner's log only.
     expect(detail).not.toContain(reviewWorktree(repo));
     expect(detail).not.toContain(caseDir);
-    expect(detail).toContain(`the review worktree of wave ${WAVE.slice(0, 8)}`);
+    expect(detail).toContain(`the review worktree of wave ${WAVE().slice(0, 8)}`);
     expect(detail).toContain("gate-output.log");
     expect(existsSync(join(reviewWorktree(repo), "gate-output.log"))).toBe(true);
     rmSync(join(reviewWorktree(repo), "gate-output.log"));
-    expect((await holding(async () => ((await callAction("waves.retry", { id: WAVE })) as { wave: WaveView }).wave)).stage).toBe("reviewing");
-    await runWave(WAVE);
+    expect((await holding(async () => ((await callAction("waves.retry", { id: WAVE() })) as { wave: WaveView }).wave)).stage).toBe("reviewing");
+    await runWave(WAVE());
     expect((await getWave()).stage).toBe("merged");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
   });
@@ -716,9 +719,9 @@ describe("resuming from the log", () => {
 
 /** The log of a wave whose review approved it: the runner resumes at the merge. */
 async function approvedForMerge(): Promise<void> {
-  await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
-  await appendWaveEvent(WAVE, { kind: "review", round: 1, sessionId: null, model: null, verdict: "approved", status: "ok", findings: [], usage: null, wallMs: 1 });
-  await appendWaveEvent(WAVE, { kind: "stage", stage: "merging", reason: null });
+  await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+  await appendWaveEvent(WAVE(), { kind: "review", round: 1, sessionId: null, model: null, verdict: "approved", status: "ok", findings: [], usage: null, wallMs: 1 });
+  await appendWaveEvent(WAVE(), { kind: "stage", stage: "merging", reason: null });
 }
 
 describe("the merge takes the review worktree as it is (invariant 2)", () => {
@@ -727,7 +730,7 @@ describe("the merge takes the review worktree as it is (invariant 2)", () => {
     git(repo, "worktree", "add", "--quiet", reviewWorktree(repo), BRANCH);
     writeFileSync(join(reviewWorktree(repo), "notes.txt"), "mine\n");
     await approvedForMerge();
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect([(await getWave()).stage, (await getWave()).reason, (await getWave()).merge]).toEqual(["blocked", "dirty", null]);
     expect((await timeline()).at(-1)?.detail).toContain("notes.txt");
     expect(readFileSync(join(reviewWorktree(repo), "notes.txt"), "utf8")).toBe("mine\n");
@@ -737,7 +740,7 @@ describe("the merge takes the review worktree as it is (invariant 2)", () => {
   test("a merge gate that rewrites a tracked file blocks it as dirty: the gated tree is not the one that would merge", async () => {
     const repo = await waveRepo('gates: []\nmerge_gates:\n  - ["sh", "-c", "echo changed > b.txt"]\n');
     await approvedForMerge();
-    await runWave(WAVE);
+    await runWave(WAVE());
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.merge, wave.gates.map((gate) => [gate.phase, gate.passed])]).toEqual(["blocked", "dirty", null, [["merge", true]]]);
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
@@ -747,7 +750,7 @@ describe("the merge takes the review worktree as it is (invariant 2)", () => {
   test("what a merge gate leaves untracked is removed: the target gets the wave's commits only, the worktree goes", async () => {
     const repo = await waveRepo('gates: []\nmerge_gates:\n  - ["sh", "-c", "echo x > out.log"]\n');
     await approvedForMerge();
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect([(await getWave()).stage, (await getWave()).gates.map((gate) => [gate.phase, gate.passed])]).toEqual(["merged", [["merge", true]]]);
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
     expect(git(repo, "ls-tree", "-r", "--name-only", "main")).toBe("a.txt\nb.txt\nc.txt\nfactory.yaml");
@@ -760,18 +763,18 @@ describe("a runner stopped from outside", () => {
   test("SIGTERM while it reviews leaves the wave interrupted, not blocked: nothing recorded, the worktree kept; a resume reviews again", async () => {
     const repo = await waveRepo();
     process.env.FAKE_REVIEW_SLEEP = "120000";
-    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
-    expect(await pokeWave(WAVE)).toBe(true);
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+    expect(await pokeWave(WAVE())).toBe(true);
     await until(() => existsSync(promptLog));
-    const [pid] = await liveWaveRunners(WAVE);
+    const [pid] = await liveWaveRunners(WAVE());
     process.kill(pid, "SIGTERM");
-    await until(async () => (await liveWaveRunners(WAVE)).length === 0);
+    await until(async () => (await liveWaveRunners(WAVE())).length === 0);
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.interrupted, wave.reviews, wave.actions.includes("waves.retry")]).toEqual(["reviewing", null, true, [], true]);
     expect((await timeline()).map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "gate"]);
     expect(existsSync(reviewWorktree(repo))).toBe(true);
     delete process.env.FAKE_REVIEW_SLEEP;
-    expect(await runWave(WAVE)).toBe(0);
+    expect(await runWave(WAVE())).toBe(0);
     expect((await getWave()).stage).toBe("merged");
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
   }, 30_000);
@@ -817,7 +820,7 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
   test("off: no push, no forge call, no remote event; the wave merges", async () => {
     const repo = await waveRepo();
     const bare = origin(repo);
-    expect(await runWave(WAVE)).toBe(0);
+    expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect([wave.stage, wave.remote]).toEqual(["merged", null]);
     expect(refs(bare)).toBe("");
@@ -829,7 +832,7 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
     process.env.FAKE_VERDICT = "reject";
     const repo = await waveRepo(undefined, "done", { remote: true });
     const bare = origin(repo);
-    await runWave(WAVE);
+    await runWave(WAVE());
     const rejected = await getWave();
     expect(rejected.stage).toBe("rejected");
     const head = git(repo, "rev-parse", BRANCH);
@@ -847,8 +850,8 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
 
     // A second review (the supervisor's fixes are in): the request is reused, its verdict commented, the merge pushed.
     delete process.env.FAKE_VERDICT;
-    await appendWaveEvent(WAVE, { kind: "stage", stage: "reviewing", reason: null });
-    expect(await runWave(WAVE)).toBe(0);
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
+    expect(await runWave(WAVE())).toBe(0);
     const merged = await getWave();
     expect(merged.stage).toBe("merged");
     expect(calls().map((call) => call.slice(0, 3).join(" "))).toEqual(["gh pr create", "gh pr comment", "gh pr comment"]);
@@ -868,9 +871,9 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
   test("a runner that dies between the merge and its push leaves the log saying the push is pending", async () => {
     const repo = await waveRepo(undefined, "done", { remote: true });
     origin(repo);
-    await runWave(WAVE);
+    await runWave(WAVE());
     // What the log held before the push: everything up to the merged stage.
-    const { declaration, events } = await readWave(WAVE);
+    const { declaration, events } = await readWave(WAVE());
     const before = events.slice(0, events.findIndex((event) => event.kind === "stage" && event.stage === "merged") + 1);
     const fold = foldWave(declaration, before);
     expect(fold.stage).toBe("merged");
@@ -880,7 +883,7 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
   test("on (GitLab): glab opens the merge request and notes the verdict", async () => {
     const repo = await waveRepo(undefined, "done", { remote: true });
     origin(repo, "git@gitlab.example.com:acme/app.git");
-    await runWave(WAVE);
+    await runWave(WAVE());
     const wave = await getWave();
     expect([wave.stage, wave.remote?.number, wave.remote?.url]).toEqual(["merged", 7, "https://gitlab.com/acme/app/-/merge_requests/7"]);
     const [create, note] = calls();
@@ -893,7 +896,7 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
     const bare = origin(repo);
     writeFileSync(join(bare, "hooks", "pre-receive"), "#!/bin/sh\necho refused by policy >&2\nexit 1\n");
     chmodSync(join(bare, "hooks", "pre-receive"), 0o755);
-    expect(await runWave(WAVE)).toBe(0);
+    expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect(wave.stage).toBe("merged");
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
@@ -907,7 +910,7 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
     rmSync(join(forgeBin(), "gh"));
     const repo = await waveRepo(undefined, "done", { remote: true });
     const bare = origin(repo);
-    expect(await runWave(WAVE)).toBe(0);
+    expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect(wave.stage).toBe("merged");
     const events = await remoteEvents();
@@ -919,7 +922,7 @@ if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/a
   test("an origin that is no GitHub or GitLab: pushed, the request recorded unsupported", async () => {
     const repo = await waveRepo(undefined, "done", { remote: true });
     const bare = origin(repo, "https://git.example.com/acme/app.git");
-    await runWave(WAVE);
+    await runWave(WAVE());
     expect((await getWave()).stage).toBe("merged");
     expect((await remoteEvents()).some((event) => typeof event.error === "string" && event.error.startsWith("unsupported:"))).toBe(true);
     expect(calls()).toEqual([]);

@@ -2,12 +2,13 @@
  * Notifications delivered by the extension, against a temp factory home: task records with an origin and session files
  * holding their state, a fake `pi` that notes `sendMessage`. No runner, no model.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect } from "bun:test";
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { caseDigits, caseSerial, caseTests } from "../test-case.ts";
 import factory from "./index.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
@@ -17,7 +18,6 @@ import { appendScoutEvent, scoutDir, writeScoutDeclaration } from "../scouts.ts"
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-notifier-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
-let counter = 0;
 const stops: (() => void)[] = [];
 // These tests may run inside a factory task's own Pi (the runner sets it): each test sets it itself.
 const savedTaskSession = process.env[TASK_SESSION_ENV];
@@ -26,17 +26,16 @@ afterAll(() => {
   else process.env[TASK_SESSION_ENV] = savedTaskSession;
 });
 
-beforeEach(() => {
+const test = caseTests(() => {
   delete process.env[TASK_SESSION_ENV];
-  counter += 1;
-  process.env.PI_CODING_AGENT_DIR = join(scratch, `agent-${counter}`);
+  process.env.PI_CODING_AGENT_DIR = join(scratch, `agent-${caseSerial()}`);
 });
 afterEach(() => {
   for (const stop of stops.splice(0)) stop();
   delete process.env[TASK_SESSION_ENV];
 });
 
-const ID = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
+const ID = (n: number) => `00000000-0000-4000-8000-${caseDigits(caseSerial() * 10 + n)}`;
 
 /** A task of `origin` whose session holds the state `state`. Answers the session file's path. */
 async function taskOf(n: number, origin: string | null, state: string): Promise<{ record: TaskRecord; file: string }> {
@@ -47,7 +46,7 @@ async function taskOf(n: number, origin: string | null, state: string): Promise<
     worktree: join(scratch, `wt-${n}`),
     branch: `task-${n}`,
     title: `task ${n}`,
-    sessionId: `session-${counter}-${n}`,
+    sessionId: `session-${caseSerial()}-${n}`,
     sessionDir,
     createdAt: `2026-01-01T00:00:0${n}.000Z`,
     tag: "team/a",
