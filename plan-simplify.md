@@ -29,7 +29,7 @@ Status: agreed in outline with the user, nothing started. Open points at the end
 | Files in step (`sync.ts`) | 990 | only "rebase a wave's branch when the target moves"; the conflict task covers the rest | 700 |
 | Additions-only merge (`additions-merge.ts`) | 375 | delete; a conflict task on the small model does it | 375 |
 | The archive as a copy (`archive.ts`, the archived view in `core-waves.ts`) | 650 | one home | 550 |
-| Reviewer context editing (`review-session.ts`) | 270 | a fresh session per review, earlier findings as text | 270 |
+| Reviewer context editing (`review-session.ts`) | 270 | stays (decided): one reviewer session per wave is resumed, for the cached input and the context it built. Report 7 looks for a cleaner, stable way to drop the earlier diffs | open |
 | Gate proofs as their own state machine (`gates-prove.ts`) | 610 | a thin command that runs the gates once in a worktree | 400 |
 | Forge fallbacks (`remote.ts`) | 370 | two cases: merged on the forge, or landed locally | 150 |
 | `core-waves.ts`, `wave-runner.ts`, `core-tasks.ts` | 5,500 | split by stage, shared helpers | 1,500 |
@@ -52,9 +52,9 @@ findings. The recurring causes over all four retros:
 
 ## Steps
 
-### 1. Audit: six read-only review agents on the big model, in parallel, no code changes
+### 1. Audit: seven read-only review agents on the big model, in parallel, no code changes
 
-Each applies the skill `thermo-nuclear-code-quality-review` (`~/.agents/skills/thermo-nuclear-code-quality-review/SKILL.md`)
+Reports 1 to 6 apply the skill `thermo-nuclear-code-quality-review` (`~/.agents/skills/thermo-nuclear-code-quality-review/SKILL.md`)
 to its area, gets this plan and the retro, and writes `~/git/worktrees/agent-factory/audit/<n>-<area>.md`: a ranked
 cut list, each entry with what, `file:line`, the simplifying move, lines before and after, the risk, and what it must
 come after. A proposal to remove a feature (not code) is marked as such.
@@ -67,8 +67,9 @@ come after. A proposal to remove a feature (not code) is marked as such.
 | 4 | Side features | `sync.ts`, `additions-merge.ts`, `archive.ts`, `remote.ts`, `gates-prove.ts`, `flaky-rerun.ts`, `test-slots.ts`, `scouts.ts`, `scout-*.ts`, `core-scouts.ts`, `contracts.ts`, `core-contracts.ts`, `feedback.ts`, `settings.ts`, `core-settings.ts`, `config.ts`, `models.ts` |
 | 5 | The outside contract | what gigachad-bot (`src/lib/factory*.py`, `pi-host/src/factory.ts`, `src/frontend/features/factory/`, `features/pi/SessionWaves.tsx`, `factoryCard`) and `tui/` call and read: the actions and fields that are "core behaviour", and the ones nobody reads |
 | 6 | Tests | every `*.test.ts`, the kits (`core-test-kit.ts`, `test-case.ts`, `fake-memory-store.ts`, `test-preload.ts`): what to purge, what a small suite that guards the core looks like, and four or five rules for writing tests that add value |
+| 7 | The reviewer's session | How earlier diffs and tool output leave a resumed Pi session's context without rewriting its file in an undocumented shape. Read Pi's docs and extension API (`/home/noob/.local/share/mise/installs/pi/1.6.1/pi/docs`: sessions, compaction, extensions, context hooks, `context_edit`), `review-session.ts`, `review-each.ts`, `review-diff.ts` and the map fact on Pi's stored `context_edit` shape. Candidates to judge: a supported hook that filters the context before each model call · the diff never entering the context as a tool result (the reviewer reads it through a tool whose result is replaced once judged) · a supported Pi command or API for editing context · keeping today's way behind one small, tested boundary. For each: does the prefix stay cached, what breaks on a Pi update, lines of code. Recommend one |
 
-### 2. One plan from the six reports
+### 2. One plan from the seven reports
 
 The supervisor merges them, reads the cited lines for every cut it accepts, orders them, and shows the user the
 result before any wave is declared, with every feature removal flagged.
@@ -102,9 +103,7 @@ result before any wave is declared, with every feature removal flagged.
 ## Open points (the supervisor's defaults, the audit may overrule with evidence)
 
 1. Files in step reduced to "rebase a wave's branch when the target moves" plus the conflict task
-2. Reviewer context editing replaced by a fresh session per review with the earlier findings as text (simpler, some
-   prompt cache lost)
-3. The leftover worktree cleanup happens after the refactor (step 5)
+2. The leftover worktree cleanup happens after the refactor (step 5)
 
 ## Working facts
 
