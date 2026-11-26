@@ -233,7 +233,7 @@ Parallel waves on the same lines are wanted. Conflicts must be rare, and cheap w
 - **Test queue**: full-suite runs (`merge_gates`) of all waves and repositories on the machine run through one queue, a fixed number at a time (default 1), each with all cores. Per-turn `gates` and `task_gates` take slots from the same pool, so nothing oversubscribes the machine. A wave's reviewer starts when its full suite passed
 - **After a merge into the target**: every open wave branch and its running tasks are brought onto it (section 7)
 - **Conflicts, three steps, cheapest first**:
-  1. both sides only added lines at one place (lists, imports, docs): the factory keeps both, no model involved, then runs the gates
+  1. both sides only added lines at one place (lists, imports, docs): the factory keeps both, no model involved, then runs the gates. Its own check per hunk that both sides are pure additions; never git's `union` driver, which also keeps both versions of changed lines (it broke code fences and doubled lines in this plan's own run)
   2. anything else: the wave's reviewer gets both sides' commits and the conflicting hunks and starts a `fix: <...>` task in the wave (a coder writes the resolution, the reviewer reviews it like every task)
   3. the reviewer cannot settle it, or its fix task used up its rounds: `notify_supervisor`
 - **The reviewer's authority**: it may start `fix:` tasks in the waves it reviews, for conflicts and for its own blocker and major findings at the wave's final pass. At most three per wave, then the supervisor. Each is reported to the supervisor as information, not as a question
@@ -242,3 +242,31 @@ Parallel waves on the same lines are wanted. Conflicts must be rare, and cheap w
 ### Decisions
 - The reviewer never edits code itself: whoever approves a change did not write it
 - The supervisor's part is the contracts: shared interfaces are agreed before the waves start, so what is left to collide is lists and docs
+
+## 9. An adjustable plan, feedback, the reviewer's voice (built in `contracts/1` and `review/1`)
+
+### Specification
+- **A plan is declared whole and stays correctable**: all waves at once, later ones `queued` behind the waves they need. Only the supervisor adjusts it
+  - `tasks.update {id, title?, request?, after?, model?}`: a pending task's brief is replaced; a running one is replaced and its coder gets old and new text; a done one is refused (add a task)
+  - `waves.update {id, title?, request?}`: a wave's goal and reviewer instructions; the next review reads the new text
+  - `waves.add`, `tasks.cancel`: the set of tasks. `contracts.apply`: a shared rule
+  - Fixed: what a queued wave waits for
+- **`feedback {kind, what, cost?, suggestion?}`**, a tool of coders, the reviewer and scouts. `kind`: `runtime`, `context`, `request`, `contract`, `tools`, `environment`, `communication`. The rest is free text (`cost` e.g. "2 avoidable reviewer and coder rounds"). The description asks for what cost runtime or context, one call per problem when it happens. Stored by the factory under `run/feedback` with task, wave and role; wakes nobody
+- **`notify_supervisor {text}`**, a tool of the reviewer: something about the plan the supervisor should know while the wave can still be changed. It wakes the supervisor, the review goes on
+
+## 10. The supervisor's part (the skill)
+
+- **Maximize parallel work through contracts**: every interface two tasks or waves share (a signature, a route, a shape, the parameters of a shared function) is agreed in a contract before they start. What is then left to collide is lists and docs, which sections 7 and 8 make cheap
+- A shared function two waves must both extend is a contract fact naming its final signature, owned by one of them
+- Contract changes are safe to make mid-run: the factory tells every affected running task the changed fact (section 2)
+
+## What the first parallel run showed (2026-11, five waves at once on today's factory)
+
+| Seen | Answered by |
+|---|---|
+| Load 60 on 8 cores, tests timing out, a wave blocked on an unrelated test | test queue and shared slots (8), flaky rerun (5) |
+| Seven rebase conflicts resolved by the supervisor, all in shared lists and docs | registrations per feature and the additions-only merge (8), syncs (7) |
+| Two waves each added a fourth parameter to one function | a contract fact for the shared signature (10) |
+| The supervisor's union rule damaged two docs | no union driver (8) |
+| A reviewer's instructions could not be changed after the declaration | contracts read fresh at every review (2), `waves.update` (9) |
+| A wave's type check failed on another wave's merged file | syncs bring open waves onto each merge (7) |
