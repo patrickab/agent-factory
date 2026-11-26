@@ -110,12 +110,12 @@ describe("reviewer tools", () => {
       expect([result.isError, result.terminate]).toEqual([undefined, undefined]);
       const { tasks, waves } = await noticeInputs(ORIGIN);
       // Only the note: the wave's other notice (interrupted: no runner drives it in this test) is not the reviewer's.
-      const notices = pendingNotices(tasks, waves, new Set()).filter((notice) => notice.tone === "quiet");
+      const notices = pendingNotices(tasks, waves, new Set()).filter((notice) => notice.key.includes(":note:"));
       expect(notices).toEqual([
-        { key: expect.stringMatching(new RegExp(`^wave:${id}:note:\\d+$`)), origin: ORIGIN, text: "factory: the reviewer of wave rt/w1 notes (reviewing task 4ae7325b): contract api lacks the error case", tone: "quiet" },
+        { key: expect.stringMatching(new RegExp(`^wave:${id}:note:\\d+$`)), origin: ORIGIN, text: "factory: the reviewer of wave rt/w1 notes (reviewing task 4ae7325b): contract api lacks the error case", card: expect.objectContaining({ kind: "wave", tone: "quiet", tag: "rt/w1", text: "contract api lacks the error case" }) },
       ]);
       // Delivered once, it is not pending again.
-      expect(pendingNotices(tasks, waves, new Set([notices[0].key])).filter((notice) => notice.tone === "quiet")).toEqual([]);
+      expect(pendingNotices(tasks, waves, new Set([notices[0].key])).filter((notice) => notice.key.includes(":note:"))).toEqual([]);
       expect((await call(notify, { text: " " })).isError).toBe(true);
     } finally {
       await release();
@@ -144,7 +144,7 @@ describe("reviewer tools", () => {
       // Each started fix reaches the supervisor as information.
       const { tasks, waves } = await noticeInputs(ORIGIN);
       const notices = pendingNotices(tasks, waves, new Set());
-      expect(notices.filter((notice) => notice.key.includes(":fix:")).map((notice) => [notice.text, notice.tone])).toEqual([
+      expect(notices.filter((notice) => notice.key.includes(":fix:")).map((notice) => [notice.text, notice.card.tone])).toEqual([
         ['factory: the reviewer of wave rt/w1 started fix-1 "fix: fix(api): handle empty input"', "quiet"],
         ['factory: the reviewer of wave rt/w1 started fix-2 "fix: repair 2"', "quiet"],
         ['factory: the reviewer of wave rt/w1 started fix-3 "fix: repair 3"', "quiet"],
