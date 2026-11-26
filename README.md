@@ -118,6 +118,8 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `core.ts` (`ACTIONS`, handlers), `agent-view.ts` (renderers), `notify.ts` (notices) and `factory-tool.ts` (the tool's
   description) read that list, in that order; a duplicate action name throws on load. A new action goes in its feature's
   module only; a new feature is a new module and one line in `features.ts`
+- The tool description's sentences and the notices (after waves and tasks) follow the feature list; both changed order
+  with the registry (gate proofs' notices before scouts', `contracts.apply` its own sentence)
 - `core.ts` is the one module clients import, the package's entry (`import { callAction } from "agent-factory"`): `ACTIONS` (name -> `{summary, params (JSON schema), mutates, hostOnly}`)
   and `callAction(name, params, {cwd?, signal?, env?, origin?})`, plain JSON in and out (`origin`: the calling Pi
   session's id, which `waves.start` records; the Pi tool passes it, the CLI and MCP do not). A failure throws

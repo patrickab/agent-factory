@@ -8,7 +8,8 @@
  *   rounded down (min 1) unless the environment sets it, and `FACTORY_SLOT_HELD=1`. A process with `FACTORY_SLOT_HELD`
  *   set holds a slot already and takes none
  * - Waiting ends when `stop()` says so, as a killed result. A waiting process leaves a marker `waiting/<pid>.<uuid>`:
- *   `slotWaiting(pids)` tells a task's or a wave's view
+ *   `slotWaiting(pids)` tells a task's or a wave's view; a marker whose process
+ *   died is ignored and removed
  * - `runInSlot`: `factory slot -- <command...>`, for test runs outside the factory's gates
  */
 import { constants } from "node:os";
@@ -115,11 +116,32 @@ export async function withSlot(pool: SlotPool, stop: () => boolean, run: (env: R
   }
 }
 
-/** Whether one of `pids` waits for a slot now. */
+/** Whether process `pid` lives (one of another user counts as alive). */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Whether one of `pids` waits for a slot now. A marker of `pids` whose process is gone (it died waiting) is ignored and
+ * removed.
+ */
 export async function slotWaiting(pids: readonly number[], dir: string = slotsDir()): Promise<boolean> {
   if (pids.length === 0) return false;
-  const names = await readdir(join(dir, "waiting")).catch(() => [] as string[]);
-  return names.some((name) => pids.some((pid) => name.startsWith(`${pid}.`)));
+  const waiting = join(dir, "waiting");
+  const names = await readdir(waiting).catch(() => [] as string[]);
+  let found = false;
+  for (const name of names) {
+    const pid = Number(name.slice(0, name.indexOf(".")));
+    if (!pids.includes(pid)) continue;
+    if (alive(pid)) found = true;
+    else await rm(join(waiting, name), { force: true });
+  }
+  return found;
 }
 
 /** `factory slot -- <command...>`: runs `argv` holding a slot (directly with `FACTORY_SLOT_HELD` set); its exit code. */

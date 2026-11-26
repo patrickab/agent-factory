@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runGateStep } from "./flaky-rerun.ts";
@@ -101,6 +101,22 @@ await takeSlot(${JSON.stringify(slots)}); console.log("held"); await Bun.sleep(6
     expect(ran).toBe(false);
     expect(await slotWaiting([process.pid], slots.dir)).toBe(false);
     await release!();
+  });
+
+  test("a waiting marker whose process is gone is ignored and removed", async () => {
+    const slots = pool(1);
+    const dead = Bun.spawn(["true"]);
+    await dead.exited;
+    mkdirSync(join(slots.dir, "waiting"), { recursive: true });
+    const marker = join(slots.dir, "waiting", `${dead.pid}.${crypto.randomUUID()}`);
+    writeFileSync(marker, "");
+    expect(await slotWaiting([dead.pid], slots.dir)).toBe(false);
+    expect(existsSync(marker)).toBe(false);
+    // A live one's marker counts and stays.
+    const live = join(slots.dir, "waiting", `${process.pid}.${crypto.randomUUID()}`);
+    writeFileSync(live, "");
+    expect(await slotWaiting([dead.pid, process.pid], slots.dir)).toBe(true);
+    expect(existsSync(live)).toBe(true);
   });
 
   test("FACTORY_TEST_JOBS and FACTORY_SLOT_HELD reach the command", async () => {

@@ -202,3 +202,12 @@ describe("pendingNotices: waves", () => {
     expect(pendingNotices([], [later], new Set(first.map((notice) => notice.key))).map((notice) => notice.key)).toEqual([`wave:${WAVE_ID}:rejected:5`]);
   });
 });
+
+describe("pendingNotices: order", () => {
+  test("waves, tasks, then the features' in the features' order: gate proofs before scouts (since the feature registry)", () => {
+    const proof = { id: "9c1d0000-0000-4000-8000-000000000000", origin: ORIGIN, state: "passed", interrupted: false, branch: "main", commit: "0ab12cd", failing: null, steps: [], flaky: [] };
+    const scout = { id: "5c0a0000-0000-4000-8000-000000000000", caller: { kind: "session", id: ORIGIN }, state: "done", interrupted: false, reportPath: null, usage: null, error: null, concern: "c", report: "r", written: [] };
+    const notices = pendingNotices([task({ state: "blocked", reason: "gates_failed" })], [wave({ stage: "merged" })], none, { scouts: [scout], gates: [proof] });
+    expect(notices.map((notice) => notice.key.split(":")[0])).toEqual(["wave", "task", "proof", "scout"]);
+  });
+});

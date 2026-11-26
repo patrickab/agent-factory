@@ -50,6 +50,7 @@ import {
   type WaveConflict,
   type WaveDeclaration,
   type WaveFile,
+  type TaskStates,
   type WaveFold,
   type WaveOverrides,
   type WaveStage,
@@ -470,15 +471,38 @@ async function conflictBranch(fold: StartedWaveFold, conflict: WaveConflict): Pr
 }
 
 /**
+ * The latest conflict's task was cancelled or removed while the wave's branch sits on the target's tip `conflictBranch`
+ * moved it to: the branch goes back to the tip the conflict recorded (`update-ref` from that tip only), so no review
+ * sees an empty diff and records `merged` without the wave's change. The detail of the block, or null when nothing
+ * is to undo.
+ */
+export async function undoConflictBranch(fold: StartedWaveFold, states: TaskStates): Promise<string | null> {
+  const conflict = fold.conflicts?.at(-1);
+  if (conflict === undefined) return null;
+  const task = fold.tasks.find((candidate) => candidate.key === conflict.key);
+  if (task !== undefined && waveTaskState(task, states) !== "cancelled") return null;
+  const tip = await git(runCommand, fold.repo, ["rev-parse", `refs/heads/${fold.branch}`]);
+  if (tip !== conflict.onto) return null;
+  const why = `its conflict task ${conflict.key} was cancelled`;
+  const worktrees = await git(runCommand, fold.repo, ["worktree", "list", "--porcelain"]);
+  if (worktrees.split("\n").includes(`branch refs/heads/${fold.branch}`)) {
+    return `${why} and its branch ${fold.branch} is still on ${fold.target}'s ${conflict.onto.slice(0, 12)}, checked out in a worktree: remove that worktree, put it back on ${conflict.head.slice(0, 12)}, then waves.retry`;
+  }
+  await git(runCommand, fold.repo, ["update-ref", "-m", `factory: ${fold.branch} back from ${fold.target}, ${conflict.key} cancelled`, `refs/heads/${fold.branch}`, conflict.head, conflict.onto]);
+  return `${why}: its branch ${fold.branch} is back on ${conflict.head.slice(0, 12)}; waves.retry rebases it again, or waves.cancel`;
+}
+
+/**
  * The conflict task's new worktree (on the target's tip `onto`): the wave's change (`head`) merged onto it with the
- * conflict markers left, uncommitted, as `applySync` (`sync.ts`) leaves a sync's.
+ * conflict markers left, uncommitted, as `applySync` (`sync.ts`) leaves a sync's. On the files the merge changes it
+ * wins over what the `after_create` hooks left there; their changes to other files stay, as in any task's worktree.
  */
 async function leaveMarkers(worktree: string, conflict: WaveConflict): Promise<void> {
   const head = await git(runCommand, worktree, ["rev-parse", "HEAD"]);
   if (head !== conflict.onto) throw new Error(`the worktree of ${conflict.key} is on ${head.slice(0, 12)}, not on ${conflict.onto.slice(0, 12)}`);
   const base = await git(runCommand, worktree, ["merge-base", conflict.head, conflict.onto]);
   const merged = await mergeTrees(runCommand, worktree, base, conflict.onto, conflict.head);
-  await git(runCommand, worktree, ["read-tree", "-m", "-u", "HEAD", merged.tree]);
+  await git(runCommand, worktree, ["read-tree", "--reset", "-u", "HEAD", merged.tree]);
   await git(runCommand, worktree, ["reset", "-q"]);
 }
 

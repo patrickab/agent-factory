@@ -78,20 +78,46 @@ describe("resolveAdditions", () => {
     expect(readFileSync(join(work, "list.ts"), "utf8")).toBe(show(repo, "wave", "list.ts"));
   });
 
-  test("lines both sides added the same at a hunk's start or end are kept once", async () => {
+  test("lines both sides added the same at a hunk's start or end are kept with each side: ours whole, then theirs whole", async () => {
     const { repo, work } = repoWith({ "list.ts": LIST });
     commit(work, { "list.ts": LIST.replace("  2,\n", "  2,\n  shared,\n  wave,\n  end,\n") }, "wave");
     commit(repo, { "list.ts": LIST.replace("  2,\n", "  2,\n  shared,\n  main,\n  end,\n") }, "main");
     expect(await resolveAdditions(runCommand, work, "main")).toEqual({ onto: git(repo, "rev-parse", "main"), files: ["list.ts"] });
-    expect(show(repo, "wave", "list.ts")).toBe(LIST.replace("  2,\n", "  2,\n  shared,\n  main,\n  wave,\n  end,\n"));
+    const merged = show(repo, "wave", "list.ts");
+    expect(merged).toContain("  main,\n");
+    expect(merged).toContain("  wave,\n");
+    expect(merged.indexOf("  main,\n")).toBeLessThan(merged.indexOf("  wave,\n"));
+    expect(merged.match(/ {2}end,\n/g)?.length).toBe(2);
   });
 
-  test("a file added on both sides: one file, ours then theirs where they differ", async () => {
+  test("two functions appended on both sides: both kept with their closing braces", async () => {
+    const base = "export const x = 1;\n";
+    const { repo, work } = repoWith({ "f.ts": base });
+    const wave = "\nexport function wave() {\n  return 1;\n}\n";
+    const main = "\nexport function main() {\n  return 2;\n}\n";
+    commit(work, { "f.ts": base + wave }, "wave adds a function");
+    commit(repo, { "f.ts": base + main }, "main adds a function");
+    expect(await resolveAdditions(runCommand, work, "main")).toEqual({ onto: git(repo, "rev-parse", "main"), files: ["f.ts"] });
+    expect(show(repo, "wave", "f.ts")).toBe(base + main + wave);
+  });
+
+  test("two fenced blocks appended on both sides: two blocks", async () => {
+    const base = "# Doc\n";
+    const { repo, work } = repoWith({ "doc.md": base });
+    const wave = "\n```sh\nwave\n```\n";
+    const main = "\n```sh\nmain\n```\n";
+    commit(work, { "doc.md": base + wave }, "wave adds a block");
+    commit(repo, { "doc.md": base + main }, "main adds a block");
+    expect(await resolveAdditions(runCommand, work, "main")).toEqual({ onto: git(repo, "rev-parse", "main"), files: ["doc.md"] });
+    expect(show(repo, "wave", "doc.md")).toBe(base + main + wave);
+  });
+
+  test("a file added on both sides: one file, ours whole then theirs whole", async () => {
     const { repo, work } = repoWith({ "a.txt": "a\n" });
     commit(work, { "new.md": "# New\n\nwave's line\n" }, "wave adds new.md");
     commit(repo, { "new.md": "# New\n\nmain's line\n" }, "main adds new.md");
     expect(await resolveAdditions(runCommand, work, "main")).toEqual({ onto: git(repo, "rev-parse", "main"), files: ["new.md"] });
-    expect(show(repo, "wave", "new.md")).toBe("# New\n\nmain's line\nwave's line\n");
+    expect(show(repo, "wave", "new.md")).toBe("# New\n\nmain's line\n# New\n\nwave's line\n");
   });
 
   test("one side changes a base line: not resolved, the branch stays", async () => {
@@ -144,6 +170,11 @@ describe("resolveHunks", () => {
 
   test("an empty base: ours then theirs", () => {
     expect(resolveHunks(`a\n${conflict("m\n", "", "w\n")}b\n`, 1)).toBe("a\nm\nw\nb\n");
+  });
+
+  test("a common start or end is kept with each side; identical sides once", () => {
+    expect(resolveHunks(conflict("f() {\n}\n", "", "g() {\n}\n"), 1)).toBe("f() {\n}\ng() {\n}\n");
+    expect(resolveHunks(conflict("x\n}\n", "", "x\n}\n"), 1)).toBe("x\n}\n");
   });
 
   test("a base line in a hunk, or markers that do not add up: null", () => {

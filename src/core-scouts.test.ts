@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileS
 import { join } from "node:path";
 import { callAction, type TaskView } from "./core.ts";
 import { caseDir, expectError, fakeRecord, git, ID_1, makeRepo, scratch, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
-import { appendScoutEvent, cancelScout, cancelScouts, readScout, runningScouts, scoutDir, scoutDirs, writeScoutDeclaration, type ScoutView } from "./scouts.ts";
+import { appendScoutEvent, cancelScout, cancelScouts, readScout, runningScouts, scoutDir, scoutDirs, scoutRunnerAlive, writeScoutDeclaration, type ScoutView } from "./scouts.ts";
 import { runCommand } from "./run.ts";
 import { ownRunners, signalRunner } from "./spawn.ts";
 import { writeTask } from "./tasks.ts";
@@ -207,7 +207,8 @@ describe("scouts.start", () => {
   test("a timed-out wait answers with what the scout wrote so far", async () => {
     const repo = makeRepo();
     createStore("team/plan");
-    process.env.FACTORY_SCOUT_WAIT_MS = "1500";
+    // Long enough for the scout (three bun starts) to write under a loaded gate run.
+    process.env.FACTORY_SCOUT_WAIT_MS = "3000";
     scoutPlan({ writes: [{ path: "map/a", description: "a", text: "a.txt:1" }], hold: true });
     const result = (await callAction("scouts.start", { concern: "a", store: "team/plan", wait: true }, { cwd: repo })) as { scout: ScoutView; timedOut: boolean };
     expect(result.timedOut).toBe(true);
@@ -241,5 +242,20 @@ describe("scouting cost", () => {
     const cancelled = ((await callAction("scouts.get", { id: second.id })) as { scout: ScoutView }).scout;
     expect(cancelled).toMatchObject({ state: "cancelled", running: false });
     expect(((await callAction("scouts.list", { caller: ID_1.slice(0, 8) })) as { scouts: ScoutView[] }).scouts).toHaveLength(2);
+  });
+});
+
+describe("scoutRunnerAlive", () => {
+  test("a runner whose pid is not yet its command (the spawner's fork before exec) counts as alive, a gone one not", async () => {
+    const dir = join(caseDir, "scout-dir");
+    // The command line names the scout's directory only after a moment, as a spawn's fork does after its exec.
+    const child = Bun.spawn(["sh", "-c", 'sleep 0.1; exec sh -c "sleep 5; true" "$SCOUT_DIR"'], { env: { ...process.env, SCOUT_DIR: dir } });
+    try {
+      expect(await scoutRunnerAlive(child.pid, dir)).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+    expect(await scoutRunnerAlive(child.pid, dir)).toBe(false);
   });
 });

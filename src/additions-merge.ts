@@ -5,8 +5,8 @@
  *   plumbing (`git merge-tree --write-tree`, author and message kept, no ref written): a dry run. A commit whose merge
  *   conflicts is resolved when every conflicting file is a content conflict (`CONFLICT (contents)`, also a file added
  *   on both sides) and every hunk of it (`git merge-file --diff3`, own markers) has an empty base: both sides only added
- *   lines, neither changed nor removed one. Each such hunk becomes ours (the target's lines) then theirs (the wave's);
- *   lines both added the same at the hunk's start or end are kept once. Anything else (a changed or removed base line,
+ *   lines, neither changed nor removed one. Each such hunk becomes ours (the target's lines) then theirs (the wave's),
+ *   both whole; a hunk whose two sides are identical is kept once. Anything else (a changed or removed base line,
  *   modify/delete, rename, binary, mode, a merge commit) is refused with why
  * - `resolveAdditions` moves the checked-out branch of a clean worktree to that replay (`git reset --keep`)
  * - Never git's `union` driver: it keeps both versions of changed lines
@@ -74,13 +74,10 @@ function bare(line: string): string {
   return line.replace(/\r?\n$/, "");
 }
 
-/** Ours then theirs, the lines both start or end with kept once. */
+/** Ours then theirs, both whole (a common start or end is no duplicate: two functions both end in `}`); identical sides once. */
 function bothAdded(ours: string[], theirs: string[]): string[] {
-  let start = 0;
-  while (start < ours.length && start < theirs.length && ours[start] === theirs[start]) start++;
-  let end = 0;
-  while (end < ours.length - start && end < theirs.length - start && ours[ours.length - 1 - end] === theirs[theirs.length - 1 - end]) end++;
-  return [...ours.slice(0, ours.length - end), ...theirs.slice(start, theirs.length - end), ...ours.slice(ours.length - end)];
+  if (ours.length === theirs.length && ours.every((line, index) => line === theirs[index])) return ours;
+  return [...ours, ...theirs];
 }
 
 /**

@@ -187,12 +187,31 @@ export async function readScout(dir: string): Promise<{ declaration: ScoutDeclar
   return { declaration, fold: foldScout(events) };
 }
 
-/** Whether `pid` is the live runner of the scout in `dir` (its command line names the directory, invariant 16's marker). */
+/** How often a process that is not (yet) readable as the scout's runner is looked at again, and how long between. */
+const ALIVE_RETRIES = 10;
+const ALIVE_RETRY_MS = 25;
+
+/** Whether process `pid` exists and is not a zombie. */
+async function processExists(pid: number): Promise<boolean> {
+  const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
+  // `<pid> (<comm>) <state> …`: the state follows the last `)`.
+  return stat !== "" && stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
+}
+
+/**
+ * Whether `pid` is the live runner of the scout in `dir` (its command line names the directory, invariant 16's marker).
+ * The spawn's pid may name the spawner's fork before its `execve` (its command line the spawner's, or empty mid-exec;
+ * longer under load): while the process exists it is looked at again for a moment before it counts as no runner, so a
+ * waiter does not take a starting scout for an interrupted one.
+ */
 export async function scoutRunnerAlive(pid: number | null, dir: string): Promise<boolean> {
   if (pid === null) return false;
-  const argv = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
-  if (!argv.split("\0").includes(dir)) return false;
-  return ownRunner(pid);
+  for (let attempt = 0; ; attempt++) {
+    const argv = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
+    if (argv.split("\0").includes(dir)) return ownRunner(pid);
+    if (attempt >= ALIVE_RETRIES || !(await processExists(pid))) return false;
+    await Bun.sleep(ALIVE_RETRY_MS);
+  }
 }
 
 /** The paths `written.jsonl` names, in order, each once. */

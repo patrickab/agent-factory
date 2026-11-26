@@ -47,7 +47,7 @@ import { runGateStep } from "./flaky-rerun.ts";
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
 import { resolveAdditions } from "./additions-merge.ts";
-import { CONFLICT_TASKS, conflictTask } from "./core-waves.ts";
+import { CONFLICT_TASKS, conflictTask, undoConflictBranch } from "./core-waves.ts";
 import { commentReview, mergePending, publishMerge, publishWave } from "./remote.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
@@ -338,8 +338,16 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
 
     const base = await taskBase(runner.run, root, task);
     const diff = await treeDiff(runner.run, root, base, await git(runner.run, root, ["rev-parse", "HEAD^{tree}"]), config.lockfiles);
-    // Nothing differs from the target: nothing to review or merge.
-    if (diff.paths.length === 0) return leave("merged", null);
+    // Nothing differs from the target: nothing to review or merge. Unless a conflict moved the branch onto the target
+    // and done tasks' change is no longer on it: that is no merge.
+    if (diff.paths.length === 0) {
+      const { states } = await waveTaskViews(fold);
+      const done = fold.tasks.filter((spec) => states.get(spec.key) === "done").map((spec) => spec.key);
+      if (done.length > 0 && (fold.conflicts?.length ?? 0) > 0) {
+        return leave("blocked", "conflict", `nothing differs from ${fold.target} though ${done.length === 1 ? "task" : "tasks"} ${done.join(", ")} ${done.length === 1 ? "is" : "are"} done and a conflict moved the branch: the wave's change is lost, not merged; waves.cancel, or put ${fold.branch} back by hand and waves.retry`);
+      }
+      return leave("merged", null);
+    }
     const round = fold.reviews.length + 1;
     log(id, `review round ${round}`);
     // What each done task was asked and its coder's last message (the risks it named): the reviewer may have no shell.
@@ -540,6 +548,11 @@ async function step(id: string): Promise<Next> {
 async function build(fold: WaveFold): Promise<Next> {
   const { id } = fold;
   const { states } = await waveTaskViews(fold);
+  if (waveStarted(fold)) {
+    // A cancelled or removed conflict task left the branch on the target's tip: back to its own, and blocked.
+    const undone = await undoConflictBranch(fold, states);
+    if (undone !== null) return (await moveStage(id, "building", "blocked", "conflict", pathFree(fold, undone))) ? "rest" : "again";
+  }
   if (allCancelled(fold, states)) return (await moveStage(id, "building", "cancelled", null)) ? "rest" : "again";
   if (readyForReview(fold, states)) {
     await moveStage(id, "building", "reviewing", null);
