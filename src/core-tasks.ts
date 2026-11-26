@@ -715,6 +715,26 @@ async function pokeWaveOf(record: TaskRecord, env?: RunnerEnv): Promise<void> {
   if (record.wave) await pokeWave(record.wave, env).catch(() => undefined);
 }
 
+/**
+ * `tasks.retry` but the poke of its wave: the checks (not a merge request, blocked, cancelled or interrupted, continuable),
+ * `/factory retry` to its session, and for an interrupted task the wait until its runner started. Throws the refusal
+ * as a `FactoryError`. `waves.retry` retries its interrupted tasks through it and pokes the wave once.
+ */
+export async function retryRestingTask(record: TaskRecord, env?: RunnerEnv): Promise<void> {
+  refuseMergeRequest(record, "retry");
+  // An interrupted task is set right by the session's start (`resumeTask`) before the retry runs.
+  const check = async (view: TaskView) => {
+    requireState(view, RETRY_STATES, "retry needs blocked, cancelled or interrupted", true);
+    await requireContinuable(record, "retry");
+  };
+  const sent = await withTaskLock(record, check, async (view) => {
+    const statesBefore = (await readFactoryStates(record.sessionDir, record.sessionId)).count;
+    await sendToRestingTask(record, "/factory retry", env);
+    return { interrupted: view.interrupted, statesBefore };
+  });
+  if (sent.interrupted) await requireRunnerStarted(record, sent.statesBefore);
+}
+
 export const TASK_HANDLERS = {
   "tasks.list": async (params, { cwd }) => {
     const tag = tagParam("tasks.list", params.tag);
@@ -804,18 +824,7 @@ export const TASK_HANDLERS = {
 
   "tasks.retry": async (params, { env }) => {
     const record = await findTask(params.id);
-    refuseMergeRequest(record, "retry");
-    // An interrupted task is set right by the session's start (`resumeTask`) before the retry runs.
-    const check = async (view: TaskView) => {
-      requireState(view, RETRY_STATES, "retry needs blocked, cancelled or interrupted", true);
-      await requireContinuable(record, "retry");
-    };
-    const sent = await withTaskLock(record, check, async (view) => {
-      const statesBefore = (await readFactoryStates(record.sessionDir, record.sessionId)).count;
-      await sendToRestingTask(record, "/factory retry", env);
-      return { interrupted: view.interrupted, statesBefore };
-    });
-    if (sent.interrupted) await requireRunnerStarted(record, sent.statesBefore);
+    await retryRestingTask(record, env);
     await pokeWaveOf(record, env);
     return taskView(record);
   },

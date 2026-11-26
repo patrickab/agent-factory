@@ -6,7 +6,8 @@
  * - `pendingNotices(tasks, waves, delivered, looked)`: one `Notice` per event not in `delivered`, only for an `origin` (a task or
  *   wave declared without a Pi session gets none: `tasks.wait` is the way there)
  * - Task events: `waiting_answer`, `blocked`, `interrupted`, `waiting_approve`; only for a task outside a wave, or a
- *   wave's task while its wave builds (past `building` the wave's own notice covers it)
+ *   wave's task while its wave builds (past `building` the wave's own notice covers it). A task interrupted while its
+ *   wave is interrupted gets none: the wave's notice names it and says `waves.retry` retries it
  * - Wave events: `rejected`, `blocked`, `waiting_approve`, `interrupted`, `unreachable` (building with tasks that can
  *   never start, nothing else moving it), `never` (queued after a wave that was cancelled), `merged`. A queued wave
  *   that can still start says nothing
@@ -75,7 +76,7 @@ const WAVE_STAGE_EVENTS: Partial<Record<WaveView["stage"], string>> = {
 /** The events a supervisor's action appends with no runner: they do not make an interrupted wave a new event. */
 const SUPERVISOR_EVENTS: readonly string[] = ["update", "contract"];
 
-export function waveNotice({ view, stuck, events }: NoticeWave, origin: string): Notice | null {
+export function waveNotice({ view, stuck, events }: NoticeWave, origin: string, interruptedTasks: readonly TaskView[] = []): Notice | null {
   let event: string;
   let n: number | string;
   let what: string;
@@ -91,8 +92,17 @@ export function waveNotice({ view, stuck, events }: NoticeWave, origin: string):
     if (said === undefined) return null;
     [event, n, what] = [view.stage, events.findLastIndex((entry) => entry.kind === "stage"), said];
   }
+  // Its interrupted tasks are named here, not in notices of their own (`pendingNotices`): `waves.retry` retries them.
+  let told = what;
+  if (event === "interrupted" && interruptedTasks.length > 0) {
+    const named = interruptedTasks.map((task) => {
+      const key = view.tasks.find((entry) => entry.taskId === task.id)?.key;
+      return key === undefined ? task.id.slice(0, 8) : `${key} (${task.id.slice(0, 8)})`;
+    });
+    told = `${what} with ${interruptedTasks.length === 1 ? "task" : "tasks"} ${named.join(", ")}; waves.retry retries ${interruptedTasks.length === 1 ? "it" : "them"}`;
+  }
   const tone = event === "merged" ? "quiet" : "attention";
-  return { key: `wave:${view.id}:${event}:${n}`, origin, text: `factory: wave ${view.tag} ${what}\n${waveBlock(view)}`, card: safeCard("wave", `wave ${view.tag} ${what}`, () => waveCard(view, `wave ${view.tag} ${what}`, tone)) };
+  return { key: `wave:${view.id}:${event}:${n}`, origin, text: `factory: wave ${view.tag} ${told}\n${waveBlock(view)}`, card: safeCard("wave", `wave ${view.tag} ${what}`, () => waveCard(view, `wave ${view.tag} ${what}`, tone)) };
 }
 
 /** One notice per `contract` event of the wave (`contracts.apply` changed a contract its done tasks worked by). */
@@ -133,8 +143,10 @@ export function scoutNoticeKey(id: string): string {
 export function pendingNotices(tasks: readonly TaskView[], waves: readonly NoticeWave[], delivered: ReadonlySet<string>, looked: Readonly<Record<string, readonly unknown[]>> = {}): Notice[] {
   const notices: Notice[] = [];
   const stages = new Map(waves.map((wave) => [wave.view.id, wave.view.stage]));
+  const interruptedWaves = new Set(waves.filter((wave) => wave.view.interrupted).map((wave) => wave.view.id));
   for (const wave of waves) {
-    const notice = wave.view.origin === null ? null : waveNotice(wave, wave.view.origin);
+    const interruptedTasks = wave.view.interrupted ? tasks.filter((task) => task.wave === wave.view.id && task.interrupted && !task.running) : [];
+    const notice = wave.view.origin === null ? null : waveNotice(wave, wave.view.origin, interruptedTasks);
     // An interrupted notice delivered under its old key (every event counted) stays delivered.
     const legacy = `wave:${wave.view.id}:interrupted:${wave.events.length}`;
     if (notice !== null && !(wave.view.interrupted && delivered.has(legacy))) notices.push(notice);
@@ -144,6 +156,8 @@ export function pendingNotices(tasks: readonly TaskView[], waves: readonly Notic
     if (task.origin === null) continue;
     // A wave's task speaks only while its wave builds; an unknown (removed) wave says nothing either.
     if (task.wave !== null && stages.get(task.wave) !== "building") continue;
+    // An interrupted wave's one notice names its interrupted tasks: none of their own.
+    if (task.wave !== null && task.interrupted && interruptedWaves.has(task.wave)) continue;
     const notice = taskNotice(task, task.origin);
     if (notice !== null) notices.push(notice);
   }

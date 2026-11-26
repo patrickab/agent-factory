@@ -51,6 +51,9 @@ describe("agentView", () => {
     );
     expect(agentView("waves.add", FIXTURES["waves.add"].params, FIXTURES["waves.add"].result)).toBe("wave 3f2a91c0  building  1/3 done  factory/w1 · added: fix running");
     expect(agentView("waves.remove", {}, { removed: WAVE_ID })).toBe("removed wave 3f2a91c0");
+    expect(agentView("waves.retry", {}, { wave: wave(), retried: [TASK_ID], refused: [{ id: OTHER_WAVE, why: "its runner did not start" }] })).toBe(
+      "wave 3f2a91c0  building  1/3 done  factory/w1 · retried tasks: 4ae7325b · refused task 77b0c2e1: its runner did not start",
+    );
     expect(agentView("contracts.apply", {}, FIXTURES["contracts.apply"].result)).toBe(
       "contract api: 1 fact changed · told: factory/w1:record · done, may need a follow-up task: factory/w1:docs",
     );

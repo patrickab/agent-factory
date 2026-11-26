@@ -218,6 +218,25 @@ describe("pendingNotices: waves", () => {
     const old = new Set([`wave:${WAVE_ID}:interrupted:3`]);
     expect(pendingNotices([], [wave({ stage: "building", interrupted: true }, false, events)], old).filter((notice) => notice.key.includes(":interrupted:"))).toEqual([]);
   });
+
+  test("an interrupted wave's one notice names its interrupted tasks and waves.retry; they get none of their own", () => {
+    const OTHER = "4ae7325b-1111-4222-8333-944445555777";
+    const tasks: WaveView["tasks"] = [
+      { key: "a", title: "a", after: [], model: "big", taskId: TASK_ID, sessionId: "s", state: "running", usage: null },
+      { key: "b", title: "b", after: [], model: "big", taskId: OTHER, sessionId: "s2", state: "running", usage: null },
+    ];
+    const own = [task({ wave: WAVE_ID, interrupted: true }), task({ id: OTHER, wave: WAVE_ID, interrupted: true })];
+    const notices = pendingNotices(own, [wave({ stage: "building", interrupted: true, tasks })], none);
+    expect(notices.map((notice) => notice.key)).toEqual([`wave:${WAVE_ID}:interrupted:2`]);
+    expect(notices[0].text.split("\n")[0]).toBe("factory: wave factory/w1 was interrupted with tasks a (4ae7325b), b (4ae7325b); waves.retry retries them");
+    expect(notices[0].card.title).toBe("wave factory/w1 was interrupted");
+    // One task interrupted, the other blocked: only that one is named; the blocked one speaks as before.
+    const one = pendingNotices([own[0], task({ id: OTHER, wave: WAVE_ID, state: "blocked" })], [wave({ stage: "building", interrupted: true, tasks })], none);
+    expect(one.map((notice) => notice.text.split("\n")[0])).toEqual(["factory: wave factory/w1 was interrupted with task a (4ae7325b); waves.retry retries it", "factory: task 4ae7325b is blocked"]);
+    // While the wave still runs, an interrupted task is announced as before.
+    const running = pendingNotices([own[0]], [wave({ stage: "building", running: true, tasks })], none);
+    expect(running.map((notice) => notice.key)).toEqual([`task:${TASK_ID}:interrupted:1@2025-01-02T10:09:00.000Z`]);
+  });
 });
 
 describe("pendingNotices: order", () => {

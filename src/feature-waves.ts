@@ -110,7 +110,11 @@ export const WAVES = feature({
     "waves.list": (_params, result: { waves: WaveView[] }) => waveList(result.waves),
     "waves.timeline": (_params, result: { events: ({ kind: string } & Record<string, unknown>)[]; next: number }) =>
       timelineView(result.events, result.next, (event) => event as Record<string, unknown>),
-    "waves.retry": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
+    "waves.retry": (_params, result: { wave: WaveView; retried?: string[]; refused?: { id: string; why: string }[] }) =>
+      waveReceipt("", result.wave, [
+        ...((result.retried ?? []).length > 0 ? [`retried tasks: ${(result.retried ?? []).map(short).join(", ")}`] : []),
+        ...(result.refused ?? []).map((task) => `refused task ${short(task.id)}: ${task.why}`),
+      ]),
     "waves.approve": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
     "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
     "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
@@ -134,7 +138,10 @@ export const WAVES = feature({
         rows: result.waves.map((wave) => ({ label: wave.tag, text: `${waveCardState(wave)}  ${wave.counts.done}/${wave.counts.total}  ${shortId(wave.id)}` })),
       }),
     "waves.timeline": (params, result: { events: { kind: string; at?: unknown }[]; next: number }) => timelineCard(`timeline of wave ${String(params.id)}`, result.events, result.next),
-    "waves.retry": (_params, result: { wave: WaveView }) => decision(waveCard(result.wave, ""), `retried wave ${result.wave.tag}`),
+    "waves.retry": (_params, result: { wave: WaveView; retried?: string[]; refused?: { id: string; why: string }[] }) => {
+      const lines = [...(result.retried ?? []).map((id) => `- retried task ${shortId(id)}`), ...(result.refused ?? []).map((task) => `- refused task ${shortId(task.id)}: ${task.why}`)];
+      return decision(waveCard(result.wave, ""), `retried wave ${result.wave.tag}`, ...(lines.length > 0 ? [lines.join("\n")] : []));
+    },
     "waves.approve": (_params, result: { wave: WaveView }) => waveCard(result.wave, `approved wave ${result.wave.tag}`),
     "waves.cancel": (_params, result: { wave: WaveView }) => decision(waveCard(result.wave, ""), `cancelled wave ${result.wave.tag}`),
     "waves.remove": (_params, result: { removed: string }) => card("action", "quiet", `removed wave ${shortId(result.removed)}`, { id: shortId(result.removed) }),

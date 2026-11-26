@@ -14,7 +14,7 @@ import { waveContracts } from "./core-contracts.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, requireFactoryModels, wantedModels } from "./core-settings.ts";
-import { cancelTask, cents, droppedWork, FINAL_STATES, rawScoutingCost, rawUsage, removable, requireRemovable, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
+import { cancelTask, cents, droppedWork, FINAL_STATES, rawScoutingCost, rawUsage, removable, requireRemovable, retryRestingTask, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
 import { git, uncommittedFiles } from "./git.ts";
 import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchExists, type RunnerEnv, worktreePath } from "./launch.ts";
 import type { NoticeWave } from "./notify.ts";
@@ -696,8 +696,26 @@ export const WAVE_HANDLERS = {
       if (view.branch === null) to = "queued";
       await moveWave(id, "blocked", to, "retry needs blocked or interrupted");
     }
+    // Its tasks a dead runner left running (`interrupted`) run again through `tasks.retry`'s internals; a refusal is
+    // named in the answer and keeps no other from its retry.
+    const records = new Map((await listTasks()).map((record) => [record.id, record]));
+    const { views } = await waveTaskViews(foldWave(file.declaration, file.events), { records });
+    const outcomes = await Promise.all(
+      [...views.values()]
+        .filter((task) => task.interrupted)
+        .map(async (task) => {
+          try {
+            await retryRestingTask(records.get(task.id) as TaskRecord, env);
+            return { id: task.id, why: null };
+          } catch (error) {
+            return { id: task.id, why: oneLine(errorText(error)) };
+          }
+        }),
+    );
+    const retried = outcomes.filter((outcome) => outcome.why === null).map((outcome) => outcome.id);
+    const refused = outcomes.flatMap((outcome) => (outcome.why === null ? [] : [{ id: outcome.id, why: outcome.why }]));
     await pokeWaveRunner(id, env);
-    return { wave: await waveView(await readWave(id)) };
+    return { wave: await waveView(await readWave(id)), retried, refused };
   },
 
   "waves.approve": async (params, { env }) => {

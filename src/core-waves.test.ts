@@ -7,6 +7,8 @@ import { ACTIONS, callAction } from "./core.ts";
 import type { TaskView } from "./core-tasks.ts";
 import { caseDir, expectError, failure, fakeRecord, fakeWaveRunner, git, makeRepo, modelsFile, prompts, RUN, runnerEnded, stateOf, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { startWaveTasks, taskWave, waveMergeRefusal, waveReviewWorktree } from "./core-waves.ts";
+import { stopRunners } from "./launch.ts";
+import { lastFactoryState } from "./runner.ts";
 import { defaultModels } from "./settings.ts";
 import { listTasks, writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath } from "./wave-poke.ts";
@@ -143,6 +145,58 @@ describe("waves", () => {
     await appendWaveEvent(wave.id, { kind: "stage", stage: "merged", reason: null });
     await expectError(callAction("waves.add", { id: wave.id, tasks: [spec("late")] }), "refused", "is merged");
     await expectError(callAction("waves.add", { id: "ffffffff", tasks: [spec("late")] }), "not_found", "no wave");
+  }, 30_000);
+
+  /** A wave whose two tasks run held; then its runner and theirs are stopped: the wave and both tasks interrupted. */
+  async function interruptedWave(repo: string): Promise<{ wave: WaveView; a: TaskRecord; c: TaskRecord }> {
+    process.env.FAKE_PI_HOLD = "1";
+    process.env.FACTORY_WAVE_POLL_MS = "600000";
+    const started = await startWave(repo, [spec("a"), spec("c")]);
+    await until(async () => (await getWave(started.id)).tasks.every((task) => task.taskId !== null));
+    const wave = await getWave(started.id);
+    const [a, c] = await Promise.all(["a", "c"].map((key) => recordById(taskOf(wave, key).taskId)));
+    for (const record of [a, c]) await until(async () => (await stateOf(record)) === "running");
+    await stopWaveRunners(wave.id);
+    for (const record of [a, c]) await stopRunners(record);
+    for (const record of [a, c]) expect(((await callAction("tasks.get", { id: record.id })) as TaskView).interrupted).toBe(true);
+    delete process.env.FAKE_PI_HOLD;
+    return { wave, a, c };
+  }
+
+  test("waves.retry of an interrupted wave retries its interrupted tasks; one whose retry is refused is named, the other runs", async () => {
+    const repo = await registeredRepo();
+    const { wave, a, c } = await interruptedWave(repo);
+    expect((await getWave(wave.id)).interrupted).toBe(true);
+    // c's runner cannot start: its retry fails, a's goes on.
+    rmSync(c.worktree, { recursive: true, force: true });
+    const answer = (await callAction("waves.retry", { id: wave.id })) as { wave: WaveView; retried: string[]; refused: { id: string; why: string }[] };
+    expect(answer.retried).toEqual([a.id]);
+    expect(answer.refused).toEqual([{ id: c.id, why: expect.stringMatching(new RegExp(`^the runner of task ${c.id.slice(0, 8)} ended before it ran`)) }]);
+    expect(prompts().filter((line) => line === "prompt /factory retry")).toHaveLength(1);
+    await until(async () => (await lastFactoryState(a.sessionDir, a.sessionId))?.reason === "gates");
+  }, 30_000);
+
+  test("waves.retry of a blocked wave builds again and retries its interrupted tasks", async () => {
+    const repo = await registeredRepo();
+    const { wave, a, c } = await interruptedWave(repo);
+    await appendWaveEvent(wave.id, { kind: "stage", stage: "blocked", reason: "infra" });
+    const answer = (await callAction("waves.retry", { id: wave.id })) as { wave: WaveView; retried: string[]; refused: unknown[] };
+    expect([...answer.retried].sort()).toEqual([a.id, c.id].sort());
+    expect(answer.refused).toEqual([]);
+    expect((await readWave(wave.id)).events.filter((event) => event.kind === "stage").map((event) => (event as { stage: string }).stage)).toEqual(["blocked", "building"]);
+    await until(() => prompts().filter((line) => line === "prompt /factory retry").length === 2);
+  }, 30_000);
+
+  test("waves.retry with no interrupted task retries none", async () => {
+    process.env.FACTORY_WAVE_POLL_MS = "600000";
+    const repo = await registeredRepo();
+    const wave = await startWave(repo, [spec("a")]);
+    await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null);
+    await until(async () => (await stateOf(await recordById(taskOf(await getWave(wave.id), "a").taskId))) === "waiting_approve");
+    await stopWaveRunners(wave.id);
+    const answer = (await callAction("waves.retry", { id: wave.id })) as { retried: string[]; refused: unknown[] };
+    expect([answer.retried, answer.refused]).toEqual([[], []]);
+    expect(prompts().filter((line) => line === "prompt /factory retry")).toEqual([]);
   }, 30_000);
 
   test("a wave's small task runs its coder on the small model, its neighbour on the big one (coder); no reviewer named, none", async () => {
