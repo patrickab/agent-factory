@@ -1,6 +1,6 @@
 # agent-factory
 
-What the factory is and how it works: `README.md`. Its views: `VIEWS.md`. Open work: `backlog.md`. This file holds the rules that every change keeps.
+What the factory is and how it works: `README.md`. Its views: `VIEWS.md`. Open work: `plan-simplify.md`, `backlog.md`. This file holds the rules that every change keeps.
 
 ## Design rules
 
