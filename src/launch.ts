@@ -391,7 +391,7 @@ export async function unmergedWork(record: TaskRecord, target: string | undefine
 
 /**
  * Removes the task's worktree, its own branch (through git; an old merge request's source branch stays), its record,
- * its runner log, its lock, its inbox and its sync state (`sync.ts`). The session file stays.
+ * its runner log, its lock, its inbox and its sync state (`sync.ts`). The session file stays; the archive (`archive.ts`) is the caller's step before it.
  */
 export async function deleteTask(record: TaskRecord): Promise<void> {
   const branch = ownBranch(record);

@@ -178,7 +178,9 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   closed Pi goes to a successor runner. Cancel or retry of an interrupted task fails when its runner ends before it ran
 - `tasks.remove`: deletes the record, log, worktree and the task's own branch (through git) of a task that is not
   running (an interrupted task counts as not running) and not in `waiting_answer`. It refuses a task with commits its target branch lacks or
-  uncommitted changes (untracked files count whatever `status.showUntrackedFiles` says); with `force: true` it removes it anyway and names what it dropped. A record an older
+  uncommitted changes (untracked files count whatever `status.showUntrackedFiles` says); with `force: true` it removes it anyway and names what it dropped.
+  A task outside a wave is archived first (see "Where state lives"); when that fails the removal is refused with nothing deleted
+  (`the archive failed: <why>; nothing was deleted`), and with `force: true` it goes on and the answer has `archive: "failed: <why>"`. A record an older
   version wrote with a `kind` loads; an old `merge_request` keeps its limits: its `branch` is the source it merged,
   which removing it keeps (its commits count as no unmerged work), and approve, retry, cancel and message are refused
 - `overrides` and stored settings: `merge` (`auto` | `review`), `maxRounds` (1..20), `review` (bool), `branch`,
@@ -253,8 +255,10 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   Answers `{wave}`
 - `waves.remove {id, force?}`: refused while the wave's runner lives or one of its tasks runs or waits for an answer;
   removes its tasks as `tasks.remove` does (refused, before anything is deleted, for unmerged work without `force`),
-  then its record, lock, log and reviews. The wave's branch is deleted only when the wave is `merged`. Answers
-  `{removed: id}`
+  then its record, lock, log and reviews. The wave is archived first (this covers a cancelled wave and a runner that died
+  before archiving); if that fails nothing is deleted and the removal is refused, unless `force: true`, which goes on and
+  adds `archive: "failed: <why>"` to the answer. The wave's branch is deleted only when the wave is `merged`. Answers
+  `{removed: id, archive?}`
 - `WaveView.actions` lists exactly the `waves.*` actions valid now
 - The record `waves/<id>.jsonl` is an event log, append-only: line 1 the declaration, then one event per line
   (`tasks`, `task`, `stage`, `gate`, `review`, `merge`, `remote`); the wave's state is their fold plus its tasks' states
@@ -327,7 +331,9 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - Every step appends its event (`stage`, `gate`, `review` with the reviewer's session id, model, findings, usage and
   wall time, `merge`). The review worktree is removed when the wave leaves review and merge (unless it is dirty: then
   it stays). A runner started on a wave in `reviewing` or `merging` runs that step again from its start
-- `waves.get {id}` / `waves.list {repo?, tag?, origin?, open?}` (tag: equal or prefix + `/`; origin: the declaring Pi
+- `waves.get {id}` / `waves.list {repo?, tag?, origin?, open?, archived?}` (`archived: true` adds the removed waves
+  from the archive, `archived: true` in their view, `actions: []`, `running: false`, their cost computed from the archived log,
+  sessions and scouts, none stored; `open: true` leaves them out; `waves.get` of a removed wave answers from the archive; tag: equal or prefix + `/`; origin: the declaring Pi
   session's id; `open: true`: not merged or cancelled; filters combine) answer `WaveView`s: the declaration
   (without `overrides`), `stage`, `detail` (the last `stage` event's why, else null), each task's `state` (`pending`
   before it started) and `usage`, `counts` (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus
@@ -561,6 +567,17 @@ Commands (inside a task's own Pi session):
 - `cache/sessions/<session file name>.json`: what a finished task's (`done`, `cancelled`) session file says (state,
   usage, outcome), with the file's size and mtime; read instead of the session while both match. Only a cache: deleting
   it costs one read per session
+- `cache/sessions/archive/<sha256 of the file's path>.json`: the same for an archived session file (kept whatever its
+  state; archives share file names, so the path is the key)
+- The archive: `<archive root>/` is `<memory-store root>/<plan>/run/sessions` when the plan's store directory exists
+  (root = `MEMORY_STORE_ROOT`, else `~/.pi/memory_store`; `memory-store` ignores that directory), else `<factory home>/archive`.
+  A wave: `<root>/<tag>/<first 8 of its id>/` with `wave.jsonl` (its log), `reviews/`, `tasks/<key>.jsonl` (each task's session
+  file), `scouts/<caller kind>-<id>/` (those of the wave and of its tasks) and `index.json` (`{id, tag, repo, plan, origin,
+  archivedAt, tasks: {<key>: {id, sessionId}}}`; no cost is stored). A task outside a wave: `<root>/tasks/<tag>/<first 8 of
+  its id>/` with `session.jsonl`, `scouts/`, `index.json`. Files are copies (mtimes kept, written under a temp name and
+  renamed); archiving again replaces what grew and is otherwise a no-op; the live files stay where they are. A wave is
+  archived after it merges (an error is logged and never fails the merge) and before `waves.remove` deletes anything; a task
+  outside a wave before `tasks.remove`. Pruning is deleting a directory there
 - Reviews: `<agent dir>/factory-reviews/<session id>/`. Merge lock and queue: in the repo's git common dir
 
 ## Entry protocol

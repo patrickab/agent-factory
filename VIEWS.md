@@ -147,7 +147,7 @@ lines list only blocker and major findings: only they reject).
 | `tasks.diff` | `{id}` | `{base, diff, files: {path, added, removed}[]}` | file list with counts; the patch only in the full view |
 | `tasks.message` | `{id, text}` | `TaskView` | `sent to task 4ae7325b  running  round 1` |
 | `tasks.approve` · `tasks.retry` · `tasks.cancel` | `{id}` | `TaskView` | `task 4ae7325b  merging` · `... running  round 3` · `... cancelled` |
-| `tasks.remove` | `{id, force?}` | `{removed: string, dropped: string \| null}` | `removed task 4ae7325b` (+ ` · dropped: 1 unmerged commit ...`) |
+| `tasks.remove` | `{id, force?}` | `{removed: string, dropped: string \| null, archive?: string}` | `removed task 4ae7325b` (+ ` · dropped: 1 unmerged commit ...`; + `archive: failed: <why>` when `force` removed it though its archive failed) |
 | `tasks.wait` | `{ids? \| tag? \| wave?, ignore?, timeoutMs?}` | `{tasks: TaskView[], waves: WaveView[], attention: string[], timedOut: boolean}` | only what needs attention (below) |
 
 ```
@@ -184,14 +184,14 @@ tasks.wait ...                       (limit reached)
 | `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], after?, plan?, contracts?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5 done  factory/w1 · started: record · waits: actions (record), runner (actions)`; with `after`: `declared wave 9c4d1e2f  queued  0/2 done  factory/w3 · waits for: 3f2a91c0` |
 | `waves.add` | `{id, tasks}` | `{wave: WaveView}` | `wave 3f2a91c0  building  4/6 done  factory/w1 · added: fix running` |
 | `waves.get` | `{id}` | `{wave: WaveView}` | the wave block above |
-| `waves.list` | `{repo?, tag?, origin?, open?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count |
+| `waves.list` | `{repo?, tag?, origin?, open?, archived?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count; `archived: true` appends the removed waves (`archived: true` in the view, `actions: []`) |
 | `waves.timeline` | `{id, since?}` | `{events: WaveEvent[], next: number}` | none: not offered to agents; the CLI prints JSON |
 | `waves.retry` | `{id}` | `{wave: WaveView, retried: string[], refused: {id, why}[]}` | the wave line, `retried tasks: 3f2a, 9c4d` · `refused task 3f2a: <why>`; the card lists them |
 | `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  merging  5/5 done  factory/w1` · `... cancelled ...` |
 | `waves.update` | `{id, title?, request?}` | `{wave: WaveView, changed: boolean}` | the wave line, `updated, the next review reads it` · `nothing changed` |
 | `tasks.update` | `{id, title?, request?, after?, model?}` | `{wave: WaveView, key, changed: boolean, delivery: "pending"\|"sent"\|"kept"\|"starting"}` | the wave line, `task docs updated, <starts with it \| its coder was told \| its coder is told at its next turn \| its coder is told as it starts>` · `task docs: nothing changed` |
 | `contracts.apply` | `{store, name, op}` | `{store, name, changed: string[], notified, kept, done: {wave, tag, key, task}[]}` | `contract core: 1 fact changed · told: factory/w1:docs · next turn: ... · done, may need a follow-up task: ...` · `contract core: nothing changed` |
-| `waves.remove` | `{id, force?}` | `{removed: string}` | `removed wave 3f2a91c0` |
+| `waves.remove` | `{id, force?}` | `{removed: string, archive?: string}` | `removed wave 3f2a91c0` (+ `archive: failed: <why>` when `force` removed it though its archive failed) |
 
 ```
 waves.list {repo}
