@@ -1,4 +1,5 @@
 /** `contracts.apply`: one fact of a contract changed, the tasks of the waves listing it told (`core-contracts.ts`). */
+import { card, decision } from "./cards.ts";
 import { plural } from "./agent-view.ts";
 import { CONTRACT_HANDLERS } from "./core-contracts.ts";
 import { feature, spec } from "./feature.ts";
@@ -36,6 +37,21 @@ export const CONTRACTS = feature({
         ...(result.kept.length > 0 ? [`next turn: ${keys(result.kept)}`] : []),
         ...(result.done.length > 0 ? [`done, may need a follow-up task: ${keys(result.done)}`] : []),
       ].join(" · ");
+    },
+  },
+  cards: {
+    "contracts.apply": (params, result: { name: string; changed: string[]; notified: ContractTask[]; kept: ContractTask[]; done: ContractTask[] }) => {
+      const keys = (tasks: ContractTask[]) => tasks.map((task) => `${task.tag}:${task.key}`).join(", ");
+      const op = (params.op ?? {}) as Record<string, unknown>;
+      const body = [op.text, op.content, op.body].find((value): value is string => typeof value === "string");
+      const title = result.changed.length === 0 ? `contract ${result.name}: nothing changed` : `contract ${result.name}: ${plural(result.changed.length, "fact")} changed`;
+      return decision(card("contract", "quiet", ""), title, body, [
+        ...(typeof op.op === "string" ? [{ label: op.op, text: typeof op.path === "string" ? op.path : result.name }] : []),
+        ...result.changed.map((path) => ({ label: "changed", text: path })),
+        ...(result.notified.length > 0 ? [{ label: "told", text: keys(result.notified) }] : []),
+        ...(result.kept.length > 0 ? [{ label: "next turn", text: keys(result.kept) }] : []),
+        ...(result.done.length > 0 ? [{ label: "done, may need a follow-up task", text: keys(result.done) }] : []),
+      ]);
     },
   },
   toolBlurb: '"contracts.apply" changes one fact of a contract the waves list and tells their tasks.',

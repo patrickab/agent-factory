@@ -8,11 +8,14 @@
  *   log, programs replay it through the core or the CLI); in a task session only those with `mutates: false`
  * - `factoryToolParameters`: `action` (one of them) plus the union of their params
  * - `callFactoryTool`: one tool call, `{action, ...params}`, refusing an action the agent is not offered. Answers the
- *   agent view as `text` and the full view as `result`; a failure throws (`factoryToolError` renders it). A view that
- *   fails to render after the action succeeded is a one-line receipt (`renderFailed`), never a failure: the agent must
- *   not retry what already happened
+ *   agent view as `text`, the full view as `result` and its readable form as `card` (`cards.ts`); a failure throws
+ *   (`factoryToolError` renders it). A view that fails to render after the action succeeded is a one-line receipt
+ *   (`renderFailed`), never a failure: the agent must not retry what already happened; a card that fails is the
+ *   action's name (`fallbackCard`)
+ * - `factoryCard(name, params, result)`: the card of a result, never throwing
  */
 import { agentError, agentView } from "./agent-view.ts";
+import { actionCard, fallbackCard, type FactoryCard } from "./cards.ts";
 import { ACTIONS, callAction, FactoryError, type ActionName, type CallOptions } from "./core.ts";
 import { FEATURES } from "./features.ts";
 import { errorText, isRecord } from "./util.ts";
@@ -83,7 +86,7 @@ function renderFailed(name: string, result: unknown, error: unknown): string {
  * (host-only, a timeline, a mutating one in a task session) is as unknown as a made-up one. `render` is the agent view
  * (tests swap it).
  */
-export async function callFactoryTool(params: unknown, taskSession: boolean, options: CallOptions, render = agentView): Promise<{ text: string; result: unknown }> {
+export async function callFactoryTool(params: unknown, taskSession: boolean, options: CallOptions, render = agentView): Promise<{ text: string; result: unknown; card: FactoryCard }> {
   const { action, ...rest } = isRecord(params) ? params : {};
   const name = String(action);
   if (!(agentActions(taskSession) as string[]).includes(name)) throw new FactoryError("invalid", `unknown action "${name}"`);
@@ -94,7 +97,16 @@ export async function callFactoryTool(params: unknown, taskSession: boolean, opt
   } catch (error) {
     text = renderFailed(name, result, error);
   }
-  return { text, result };
+  return { text, result, card: factoryCard(name, rest, result) };
+}
+
+/** The card of `name`'s result (`actionCard`); the action's name when it cannot be built. */
+export function factoryCard(name: string, params: unknown, result: unknown): FactoryCard {
+  try {
+    return actionCard(name, params, result);
+  } catch {
+    return fallbackCard(name);
+  }
 }
 
 /** A failed tool call as the agent's one line (`agentError`); an error that is not a `FactoryError` is `failed`. */

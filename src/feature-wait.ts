@@ -1,4 +1,6 @@
 /** `tasks.wait`: a supervisor's completion signal (`core-wait.ts`). */
+import { card, shortId, taskCardState, waveCardState } from "./cards.ts";
+import { plural } from "./agent-view.ts";
 import { waitView, type WaitResult } from "./agent-view.ts";
 import { WAIT_TIMEOUT_MS } from "./core-shared.ts";
 import { WAIT_HANDLERS } from "./core-wait.ts";
@@ -29,5 +31,18 @@ export const WAIT = feature({
   },
   renderers: {
     "tasks.wait": (params, result: WaitResult) => waitView(params, result),
+  },
+  cards: {
+    "tasks.wait": (_params, result: WaitResult) => {
+      const attention = new Set(result.attention);
+      const rows = [
+        ...result.waves.filter((wave) => attention.has(wave.id)).map((wave) => ({ label: `wave ${wave.tag}`, text: waveCardState(wave) })),
+        ...result.tasks.filter((task) => attention.has(task.id)).map((task) => ({ label: `task ${shortId(task.id)}`, text: taskCardState(task) })),
+        ...(result.proofs ?? []).filter((proof) => attention.has(proof.id)).map((proof) => ({ label: `proof ${shortId(proof.id)}`, text: proof.interrupted ? "interrupted" : proof.state })),
+        { label: "watched", text: [plural(result.waves.length, "wave"), plural(result.tasks.length, "task"), ...(result.proofs?.length ? [plural(result.proofs.length, "proof")] : [])].join(", ") },
+      ];
+      const title = result.timedOut ? "the wait timed out" : rows.length > 1 ? `${rows.length - 1} need${rows.length === 2 ? "s" : ""} a ruling` : "everything rests";
+      return card("action", rows.length > 1 ? "attention" : "quiet", title, { rows });
+    },
   },
 });

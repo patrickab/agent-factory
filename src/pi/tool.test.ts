@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { agentError, agentView } from "../agent-view.ts";
+import { actionCard } from "../cards.ts";
 import { ACTIONS } from "../core.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { agentActions, factoryToolParameters } from "../factory-tool.ts";
@@ -98,10 +99,14 @@ describe("registerFactoryTool", () => {
     expect(tool.executionMode).toBe("sequential");
   });
 
-  test("a result is the agent view as text, the full view as details", async () => {
+  test("a result is the agent view as text, {result: the full view, card} as details", async () => {
     const result = await registered().execute("call-1", { action: "repos.list" }, undefined, undefined, ctx());
-    expect(result).toEqual({ content: [{ type: "text", text: agentView("repos.list", {}, { repos: [] }) }], details: { repos: [] } });
+    expect(result).toEqual({
+      content: [{ type: "text", text: agentView("repos.list", {}, { repos: [] }) }],
+      details: { result: { repos: [] }, card: actionCard("repos.list", {}, { repos: [] }) },
+    });
     expect(result.content[0].text).toBe("no repositories registered (repos.add)");
+    expect(result.details.card).toEqual({ v: 1, kind: "action", tone: "quiet", title: "no repositories registered" });
   });
 
   test("a caller error is an isError result, the agent view's one line, not a throw", async () => {
@@ -125,9 +130,10 @@ describe("registerFactoryTool", () => {
     const tool = registered();
     expect(tool.parameters.properties.models.type).toBe("array");
     const set = await tool.execute("call-5", { action: "models.set", models: ["a/b", "a/b"] }, undefined, undefined, ctx());
-    expect(set.details).toEqual({ models: ["a/b"] });
+    expect(set.details.result).toEqual({ models: ["a/b"] });
     const get = await tool.execute("call-6", { action: "models.get" }, undefined, undefined, ctx());
-    expect(get.details).toEqual({ models: ["a/b"] });
+    expect(get.details.result).toEqual({ models: ["a/b"] });
+    expect(get.details.card).toEqual({ v: 1, kind: "action", tone: "quiet", title: "models", rows: [{ label: "model", text: "a/b" }] });
     expect(get.content[0].text).toBe("a/b");
     const bad = await tool.execute("call-7", { action: "models.set", models: ["bare"] }, undefined, undefined, ctx());
     expect(bad).toEqual({ content: [{ type: "text", text: agentError({ code: "invalid", message: 'models.set: "bare" is not a provider/model id' }) }], details: undefined, isError: true });

@@ -1,9 +1,13 @@
 /** `tasks.update`, `waves.update`: a declared plan adjusted (`core-plan.ts`). */
+import { decision, waveCard } from "./cards.ts";
 import { waveReceipt } from "./agent-view.ts";
 import { PLAN_HANDLERS } from "./core-plan.ts";
 import { feature, ID, spec, WAVE_ID } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 import type { WaveView } from "./waves.ts";
+
+/** How a changed task learns of it, by `delivery`. */
+const TOLD: Record<string, string> = { pending: "starts with it", sent: "its coder was told", kept: "its coder is told at its next turn", starting: "its coder is told as it starts" };
 
 export const PLAN = feature({
   name: "plan",
@@ -33,10 +37,28 @@ export const PLAN = feature({
   renderers: {
     "tasks.update": (_params, result: { wave: WaveView; key: string; changed: boolean; delivery: string }) => {
       if (!result.changed) return waveReceipt("", result.wave, [`task ${result.key}: nothing changed`]);
-      const told: Record<string, string> = { pending: "starts with it", sent: "its coder was told", kept: "its coder is told at its next turn", starting: "its coder is told as it starts" };
-      return waveReceipt("", result.wave, [`task ${result.key} updated, ${told[result.delivery] ?? result.delivery}`]);
+      return waveReceipt("", result.wave, [`task ${result.key} updated, ${TOLD[result.delivery] ?? result.delivery}`]);
     },
     "waves.update": (_params, result: { wave: WaveView; changed: boolean }) => waveReceipt("", result.wave, [result.changed ? "updated, the next review reads it" : "nothing changed"]),
+  },
+  cards: {
+    "tasks.update": (params, result: { wave: WaveView; key: string; changed: boolean; delivery: string }) => {
+      if (!result.changed) return decision(waveCard(result.wave, ""), `task ${result.key}: nothing changed`, undefined, []);
+      const rows = [
+        ...(typeof params.title === "string" ? [{ label: "title", text: params.title }] : []),
+        ...(Array.isArray(params.after) ? [{ label: "after", text: params.after.join(", ") || "none" }] : []),
+        ...(typeof params.model === "string" ? [{ label: "model", text: params.model }] : []),
+        { label: "delivery", text: TOLD[result.delivery] ?? result.delivery },
+      ];
+      return decision(waveCard(result.wave, ""), `updated task ${result.key} of wave ${result.wave.tag}`, typeof params.request === "string" ? params.request : undefined, rows);
+    },
+    "waves.update": (params, result: { wave: WaveView; changed: boolean }) =>
+      decision(
+        waveCard(result.wave, ""),
+        result.changed ? `updated wave ${result.wave.tag}` : `wave ${result.wave.tag}: nothing changed`,
+        typeof params.request === "string" ? params.request : undefined,
+        typeof params.title === "string" ? [{ label: "title", text: params.title }] : [],
+      ),
   },
   toolBlurb:
     '"tasks.update" and "waves.update" adjust a declared plan (a pending task fully, a started one its title and request); coders report what cost runtime or context with their feedback tool, "waves.get" lists it.',

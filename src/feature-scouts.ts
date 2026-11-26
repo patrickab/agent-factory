@@ -1,4 +1,6 @@
 /** Scouts: read-only pi children that answer a concern from a memory store's map (`core-scouts.ts`). */
+import { card, safeCard, scoutCard, scoutCardState, shortId } from "./cards.ts";
+import { plural } from "./agent-view.ts";
 import { SCOUT_HANDLERS } from "./core-scouts.ts";
 import { feature, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
@@ -13,7 +15,8 @@ function scoutNotice(scout: ScoutView): Notice | null {
   let what: string = scout.state === "done" ? "reported" : scout.state;
   if (scout.interrupted) what = "was interrupted";
   const path = scout.reportPath === null ? "" : `\nreport: ${scout.reportPath}`;
-  return { key: scoutNoticeKey(scout.id), origin: scout.caller.id, text: `factory: scout ${scout.id.slice(0, 8)} ${what}\n${scoutBlock(scout)}${path}` };
+  const title = `scout ${scout.id.slice(0, 8)} ${what}`;
+  return { key: scoutNoticeKey(scout.id), origin: scout.caller.id, text: `factory: ${title}\n${scoutBlock(scout)}${path}`, card: safeCard("scout", title, () => scoutCard(scout, title)) };
 }
 
 export const SCOUTS = feature({
@@ -43,6 +46,15 @@ export const SCOUTS = feature({
     return SCOUT_HANDLERS;
   },
   renderers: SCOUT_RENDERERS,
+  cards: {
+    "scouts.start": (_params, result: { scout: ScoutView; timedOut: boolean }) =>
+      scoutCard(result.scout, result.scout.report !== null ? `scout ${shortId(result.scout.id)} reported` : result.timedOut ? `scout ${shortId(result.scout.id)}: the wait ended before the report` : `started scout ${shortId(result.scout.id)}`),
+    "scouts.get": (_params, result: { scout: ScoutView }) => scoutCard(result.scout, `scout ${shortId(result.scout.id)}`),
+    "scouts.list": (_params, result: { scouts: ScoutView[] }) =>
+      card("action", "quiet", result.scouts.length === 0 ? "no scouts" : plural(result.scouts.length, "scout"), {
+        rows: result.scouts.map((scout) => ({ label: shortId(scout.id), text: `${scoutCardState(scout)}  ${scout.concern}` })),
+      }),
+  },
   notices: (items) => (items as readonly ScoutView[]).flatMap((scout) => scoutNotice(scout) ?? []),
   toolBlurb: '"scouts.start" sends a read-only scout that answers a concern from the map of a memory store (wait: true for its report, else it reports back).',
 });

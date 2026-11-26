@@ -1,4 +1,5 @@
 /** Gate proofs: a branch's merge_gates proven in the background (`gates-prove.ts`). */
+import { proofCard, safeCard } from "./cards.ts";
 import { proofBlock, proofHeader } from "./agent-view.ts";
 import { feature, REPO, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
@@ -12,7 +13,9 @@ function proofNotices(proofs: readonly ProofView[]): Notice[] {
     if (proof.origin === null || (proof.state === "running" && !proof.interrupted)) continue;
     const event = proof.interrupted ? "interrupted" : proof.state;
     const what = event === "passed" ? "pass" : event === "flaky" ? "pass, flaky" : event === "failing" ? "fail" : "were interrupted";
-    notices.push({ key: `proof:${proof.id}:${event}`, origin: proof.origin, text: `factory: the gates of ${proof.branch} ${what}\n${proofBlock(proof)}` });
+    const title = `the gates of ${proof.branch} ${what}`;
+    const tone = event === "failing" || event === "interrupted" ? "attention" : "quiet";
+    notices.push({ key: `proof:${proof.id}:${event}`, origin: proof.origin, text: `factory: ${title}\n${proofBlock(proof)}`, card: safeCard("proof", title, () => proofCard(proof, title, tone)) });
   }
   return notices;
 }
@@ -34,6 +37,10 @@ export const GATES = feature({
   renderers: {
     "gates.prove": (_params, result: { proof: ProofView }) => `started ${proofHeader(result.proof)}`,
     "gates.get": (_params, result: { proof: ProofView }) => proofBlock(result.proof),
+  },
+  cards: {
+    "gates.prove": (_params, result: { proof: ProofView }) => proofCard(result.proof, `proving the gates of ${result.proof.branch}`),
+    "gates.get": (_params, result: { proof: ProofView }) => proofCard(result.proof, `the gates of ${result.proof.branch}`, result.proof.state === "failing" ? "attention" : "quiet"),
   },
   notices: (items) => proofNotices(items as readonly ProofView[]),
   toolBlurb: '"gates.prove" runs a branch\'s merge_gates in the background before a wave is declared on it: passed, flaky or failing.',

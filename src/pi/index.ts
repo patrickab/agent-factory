@@ -271,7 +271,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
       if (ctx.mode === "tui") widget.ctx = ctx;
       notifier = startNotifier({
         origin: ctx.sessionManager.getSessionId(),
-        send: (text) => pi.sendMessage({ customType: "factory-notice", content: text, display: true }, { triggerTurn: true }),
+        send: (text, notice) => pi.sendMessage({ customType: "factory-notice", content: text, display: true, details: { key: notice.key, card: notice.card } }, { triggerTurn: true }),
         skipScout: (id) => scouts.waiting.has(id),
         isTaskSession: () => {
           const task = taskSession();

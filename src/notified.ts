@@ -64,7 +64,7 @@ async function withLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 /** Marks the notices of `notices` that nobody delivered yet as delivered and answers them, in order. */
-export async function claimNotices(notices: readonly Notice[]): Promise<Notice[]> {
+export async function claimNotices<N extends Pick<Notice, "key">>(notices: readonly N[]): Promise<N[]> {
   if (notices.length === 0) return [];
   return withLock(async () => {
     const delivered = await readDelivered();

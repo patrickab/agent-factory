@@ -5,10 +5,12 @@
  *
  * - `handlers` is a getter: read on the first call, never on load (a handler module may import a module that imports
  *   the registry)
- * - `renderers`: one per action, `(params, result) => text` (`agent-view.ts` scrubs it)
+ * - `renderers`: one per action, `(params, result) => text` (`agent-view.ts` scrubs it); `cards`: one per action,
+ *   `(params, result) => FactoryCard` (`cards.ts`)
  * - `notices`: the feature's notices from the items the notifier looked up under the feature's `name`
  * - Also the schema helpers the features' action specs share
  */
+import type { CardBuilder } from "./cards.ts";
 import type { Handler, Params } from "./core-shared.ts";
 import type { Notice } from "./notify.ts";
 
@@ -33,6 +35,8 @@ export interface Feature<A extends string = string> {
   /** Typed loosely: a handler module's types reach `ActionName`. `features.test.ts` checks they match `actions`. */
   readonly handlers: Handlers;
   renderers: Record<NoInfer<A>, Renderer>;
+  /** One card per action (`cards.ts`): the readable form of its result next to the agent's text. */
+  cards: Record<NoInfer<A>, CardBuilder>;
   notices?: (items: readonly unknown[]) => Notice[];
   /** Its sentences of the `factory` tool's description. */
   toolBlurb?: string;

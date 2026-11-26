@@ -1,5 +1,6 @@
 /** The waves: a planned set of tasks on one branch, reviewed and merged once (`core-waves.ts`). */
-import { afterNames, short, timelineView, waveBlock, waveList, waveReceipt } from "./agent-view.ts";
+import { card, decision, shortId, timelineCard, waveCard, waveCardState } from "./cards.ts";
+import { afterNames, plural, short, timelineView, waveBlock, waveList, waveReceipt } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
 import { feature, REMOTE, REPO, SETTINGS_PROPERTIES, spec, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
@@ -102,6 +103,25 @@ export const WAVES = feature({
     "waves.approve": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
     "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
     "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
+  },
+  cards: {
+    "waves.start": (_params, result: { wave: WaveView }) => waveCard(result.wave, `${result.wave.stage === "queued" ? "declared" : "started"} wave ${result.wave.tag}`),
+    // A decision only when it answers a rejection or a block: `actionCard` makes it one with the key it answers.
+    "waves.add": (params, result: { wave: WaveView }) => {
+      const added = Array.isArray(params.tasks) ? params.tasks.map((task) => task as Params) : [];
+      const text = added.map((task) => `- **${String(task.key)}**: ${String(task.title)}`).join("\n");
+      return { ...decision(waveCard(result.wave, ""), `added ${plural(added.length, "task")} to wave ${result.wave.tag}`, text), kind: "action" };
+    },
+    "waves.get": (_params, result: { wave: WaveView }) => waveCard(result.wave, `wave ${result.wave.tag}`),
+    "waves.list": (_params, result: { waves: WaveView[] }) =>
+      card("action", "quiet", result.waves.length === 0 ? "no waves" : plural(result.waves.length, "wave"), {
+        rows: result.waves.map((wave) => ({ label: wave.tag, text: `${waveCardState(wave)}  ${wave.counts.done}/${wave.counts.total}  ${shortId(wave.id)}` })),
+      }),
+    "waves.timeline": (params, result: { events: { kind: string; at?: unknown }[]; next: number }) => timelineCard(`timeline of wave ${String(params.id)}`, result.events, result.next),
+    "waves.retry": (_params, result: { wave: WaveView }) => decision(waveCard(result.wave, ""), `retried wave ${result.wave.tag}`),
+    "waves.approve": (_params, result: { wave: WaveView }) => waveCard(result.wave, `approved wave ${result.wave.tag}`),
+    "waves.cancel": (_params, result: { wave: WaveView }) => decision(waveCard(result.wave, ""), `cancelled wave ${result.wave.tag}`),
+    "waves.remove": (_params, result: { removed: string }) => card("action", "quiet", `removed wave ${shortId(result.removed)}`, { id: shortId(result.removed) }),
   },
   toolBlurb:
     '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, reviewed as a whole and merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',

@@ -1,11 +1,22 @@
 /** Models, repositories, branches, settings and factory.yaml (`core-settings.ts`). */
 import { SETTINGS_HANDLERS } from "./core-settings.ts";
+import { card, type CardRow } from "./cards.ts";
 import { plural } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
 import { feature, REMOTE, REPO, SETTINGS_PROPERTIES, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 
 type SettingsAnswer = { stored: Record<string, unknown>; resolved: Record<string, unknown>; defaults: Record<string, unknown> };
+
+/** The lines of `settingsLines` as card rows: `key: value` split at the first `: `. */
+function settingsRows(lines: string[]): CardRow[] {
+  return lines.map((line) => {
+    const at = line.indexOf(": ");
+    return at < 0 ? { label: line, text: "" } : { label: line.slice(0, at), text: line.slice(at + 2) };
+  });
+}
+
+const fencedYaml = (text: string | null): string | undefined => (text === null || text.trim() === "" ? undefined : `\`\`\`yaml\n${text.trimEnd()}\n\`\`\``);
 
 /** `key: value`, `models.coder: x`; `(default)` after a value not stored. */
 function settingsLines(answer: SettingsAnswer, only?: Set<string>): string[] {
@@ -101,5 +112,27 @@ export const SETTINGS = feature({
       return `no factory.yaml${from}:\n${(result.draft ?? "").trimEnd()}`;
     },
     "config.write": () => "wrote factory.yaml (not committed)",
+  },
+  cards: {
+    "models.get": (_params, result: { models: string[] }) => card("action", "quiet", result.models.length === 0 ? "no models set" : "models", { rows: result.models.map((model) => ({ label: "model", text: model })) }),
+    "models.set": (_params, result: { models: string[] }) => card("action", "quiet", `${plural(result.models.length, "model")} set`, { rows: result.models.map((model) => ({ label: "model", text: model })) }),
+    "repos.list": (_params, result: { repos: string[] }) =>
+      card("action", "quiet", result.repos.length === 0 ? "no repositories registered" : (result.repos.length === 1 ? "1 repository" : `${result.repos.length} repositories`), { rows: result.repos.map((repo) => ({ label: "repository", text: repo })) }),
+    "repos.add": (_params, result: { repo: string }) => card("action", "quiet", `registered ${result.repo}`),
+    "repos.remove": (params) => card("action", "quiet", `unregistered ${String(params.repo)}`),
+    "branches.list": (_params, result: { branches: { name: string; default: boolean; hasConfig: boolean }[] }) =>
+      card("action", "quiet", result.branches.length === 0 ? "no branches" : (result.branches.length === 1 ? "1 branch" : `${result.branches.length} branches`), {
+        rows: result.branches.map((branch) => ({ label: branch.name, text: [branch.default ? "default" : null, branch.hasConfig ? "factory.yaml" : null].filter((mark) => mark !== null).join(", ") || "-" })),
+      }),
+    "settings.get": (_params, result: SettingsAnswer) => card("action", "quiet", "settings", { rows: settingsRows(settingsLines(result)) }),
+    "settings.set": (params, result: SettingsAnswer) => {
+      const rows = settingsRows(settingsLines(result, new Set(Object.keys((params.settings ?? {}) as Params))));
+      return card("action", "quiet", rows.length === 0 ? "settings set: every value is the default" : "settings set", { rows });
+    },
+    "config.get": (params, result: { exists: boolean; text: string | null; draft: string | null; source: string[] }) =>
+      result.exists
+        ? card("action", "quiet", "factory.yaml", { rows: [{ label: "from", text: typeof params.branch === "string" ? `committed on ${params.branch}` : "working copy" }], text: fencedYaml(result.text) })
+        : card("action", "quiet", "no factory.yaml: a draft", { rows: result.source.length > 0 ? [{ label: "from", text: result.source.join(", ") }] : [], text: fencedYaml(result.draft) }),
+    "config.write": () => card("action", "quiet", "wrote factory.yaml (not committed)"),
   },
 });

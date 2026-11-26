@@ -66,14 +66,14 @@ async function taskOf(n: number, origin: string | null, state: string): Promise<
 function piSession(sessionId: string, branch: { type: string; customType?: string; data?: unknown }[] = [], mode?: string) {
   const widgets: (string[] | undefined)[] = [];
   const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-  const sent: { message: { customType: string; content: string }; options: unknown }[] = [];
+  const sent: { message: { customType: string; content: string; details?: unknown }; options: unknown }[] = [];
   const pi = {
     registerCommand: () => undefined,
     registerTool: () => undefined,
     on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
     appendEntry: () => undefined,
     sendUserMessage: () => undefined,
-    sendMessage: (message: { customType: string; content: string }, options: unknown) => sent.push({ message, options }),
+    sendMessage: (message: { customType: string; content: string; details?: unknown }, options: unknown) => sent.push({ message, options }),
     setModel: async () => true,
   };
   const ctx = {
@@ -131,6 +131,7 @@ describe("scout reports to the session that started them", () => {
     expect(a.sent[0].message.content).toStartWith(`factory: scout ${ID(1).slice(0, 8)} reported`);
     expect(a.sent[0].message.content).toContain("MISSING\n1. nothing");
     expect(a.sent[0].message.content).toContain(`report: ${join(dir, "report.md")}`);
+    expect(a.sent[0].message.details).toEqual({ key: `scout:${ID(1)}:report`, card: expect.objectContaining({ v: 1, kind: "scout", tone: "quiet", title: `scout ${ID(1).slice(0, 8)} reported`, text: "MISSING\n1. nothing" }) });
     await a.emit("session_shutdown");
     const again = piSession("sess-A");
     await again.emit("session_start");

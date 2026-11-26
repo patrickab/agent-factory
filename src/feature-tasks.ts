@@ -1,6 +1,7 @@
 /** The tasks: start, look at, steer and remove them (`core-tasks.ts`). */
 import { asTask, fields, plural, short, taskBlock, taskHeader, taskList, taskState, timelineView } from "./agent-view.ts";
 import type { TaskView } from "./core-tasks.ts";
+import { card, decision, shortId, taskCard, taskCardState, timelineCard } from "./cards.ts";
 import { TASK_HANDLERS } from "./core-tasks.ts";
 import { feature, ID, REPO, SETTINGS_PROPERTIES, spec, TAG, TAG_FILTER } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
@@ -86,5 +87,28 @@ export const TASKS = feature({
       const task = asTask(result);
       return fields(`sent to task ${short(task.id)}`, taskState(task), task.round === null ? null : `round ${task.round}`);
     },
+  },
+  cards: {
+    "tasks.list": (_params, result: { tasks: TaskView[] }) =>
+      card("action", "quiet", result.tasks.length === 0 ? "no tasks" : plural(result.tasks.length, "task"), {
+        rows: result.tasks.map((task) => ({ label: shortId(task.id), text: `${taskCardState(task)}  ${task.tag}  ${task.title}` })),
+      }),
+    "tasks.get": (_params, result: unknown) => taskCard(asTask(result), `task ${shortId(asTask(result).id)}`),
+    "tasks.import": (_params, result: unknown) => taskCard(asTask(result), `imported task ${shortId(asTask(result).id)}`),
+    "tasks.timeline": (params, result: { entries: { kind: string; at?: unknown }[]; next: number }) => timelineCard(`timeline of task ${String(params.id)}`, result.entries, result.next),
+    "tasks.diff": (_params, result: { files: { path: string; added: number; removed: number }[] }) => {
+      if (result.files.length === 0) return card("action", "quiet", "no changes");
+      const added = result.files.reduce((sum, file) => sum + file.added, 0);
+      const removed = result.files.reduce((sum, file) => sum + file.removed, 0);
+      return card("action", "quiet", `${plural(result.files.length, "file")}  +${added} -${removed}`, { rows: result.files.map((file) => ({ label: `+${file.added} -${file.removed}`, text: file.path })) });
+    },
+    "tasks.start": (_params, result: unknown) => taskCard(asTask(result), `started task ${shortId(asTask(result).id)}`),
+    "tasks.approve": (_params, result: unknown) => taskCard(asTask(result), `approved task ${shortId(asTask(result).id)}`),
+    "tasks.retry": (_params, result: unknown) => decision(taskCard(asTask(result), ""), `retried task ${shortId(asTask(result).id)}`),
+    "tasks.cancel": (_params, result: unknown) => decision(taskCard(asTask(result), ""), `cancelled task ${shortId(asTask(result).id)}`),
+    "tasks.remove": (_params, result: { removed: string; dropped: string | null }) =>
+      card("action", "quiet", `removed task ${shortId(result.removed)}`, { id: shortId(result.removed), rows: result.dropped ? [{ label: "dropped", text: result.dropped }] : [] }),
+    // A decision only when it answers a question or a block: `actionCard` makes it one with the key it answers.
+    "tasks.message": (params, result: unknown) => ({ ...decision(taskCard(asTask(result), ""), `sent to task ${shortId(asTask(result).id)}`, String(params.text ?? "")), kind: "action" }),
   },
 });

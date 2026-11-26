@@ -12,7 +12,8 @@
  *   finished and delivered is not read again: a `done`/`cancelled` task while its session file is unchanged (a
  *   follow-up changes it), a `merged`/`cancelled` wave never (both final; its last view is kept for `onWaves`, until
  *   its file is gone)
- * - `send` is `pi.sendMessage` with `triggerTurn` (public Pi API): the message starts a turn
+ * - `send` is `pi.sendMessage` with `triggerTurn` (public Pi API): the message starts a turn; its `content` is the
+ *   notice's text, its `details` `{key, card}` (contract `cards`)
  * - Scouts this session started (caller `session` = origin): their directories are watched while they run; one that
  *   ended reports once (`notify.ts`); a delivered one is not read again. `skipScout`: scouts a tool call waits for
  * - `onWaves`: after every look, the views of every wave this origin declared (the session's widget, `session-widget.ts`)
@@ -21,7 +22,7 @@ import { mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { noticeInputs } from "../core.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
-import { pendingNotices, scoutNoticeKey } from "../notify.ts";
+import { pendingNotices, scoutNoticeKey, type Notice } from "../notify.ts";
 import { callerKey, scoutDirs, scoutsDir, scoutView, type ScoutView } from "../scouts.ts";
 import { proofRests, proofsDir, proofsOf } from "../gates-prove.ts";
 import { tasksDir } from "../tasks.ts";
@@ -30,7 +31,8 @@ import { wavesDir, type WaveView } from "../waves.ts";
 export interface NotifierOptions {
   /** This Pi session's id: notices of this origin only. */
   origin: string;
-  send: (text: string) => void;
+  /** `text` is the agent's; `notice` holds its key and card (`details` of the message). */
+  send: (text: string, notice: Notice) => void;
   /** Checked on every look: a session that became a task's own delivers nothing. */
   isTaskSession: () => boolean;
   debounceMs?: number;
@@ -155,7 +157,7 @@ export function startNotifier(options: NotifierOptions): Notifier {
     const scouts = await openScouts(delivered);
     const pending = pendingNotices(tasks, waves, delivered, { scouts, gates: proofs }).filter((notice) => !scouts.some((scout) => notice.key === scoutNoticeKey(scout.id) && options.skipScout?.(scout.id)));
     if (stopped) return;
-    if (pending.length > 0) for (const notice of await claimNotices(pending)) send(notice.text);
+    if (pending.length > 0) for (const notice of await claimNotices(pending)) send(notice.text, notice);
     // Claimed here or by a racing session: delivered either way.
     for (const scout of scouts) if (pending.some((notice) => notice.key === scoutNoticeKey(scout.id))) reported(scout.id);
     // Every notice of this look is delivered now (by this session or a racing one): the final ones need no look again.
