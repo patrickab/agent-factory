@@ -258,7 +258,7 @@ export function rawScoutingCost(view: TaskView): number {
 export { cents };
 
 /** What a task's session file says (`sessionSummary`): a function of its content only. `usage` unrounded. */
-interface SessionSummary extends Pick<TaskView, "settings" | "question" | "lastMessage" | "failure" | "review" | "merged" | "flaky"> {
+interface SessionSummary extends Pick<TaskView, "settings" | "question" | "lastMessage" | "failure" | "review" | "merged" | "minors" | "flaky"> {
   last: { state: State; round: number; reason: string; at: string } | null;
   usage: TaskView["usage"];
 }
@@ -370,6 +370,7 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage, s
     failure: outcome.failure,
     review: outcome.review,
     merged: outcome.merged,
+    minors: outcome.minors,
     flaky: outcome.flaky,
     ...(waitingForSlot ? { waitingForSlot } : {}),
   };
