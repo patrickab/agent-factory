@@ -174,11 +174,15 @@ async function markTasks(tasks: TaskRecord[], mark: DueMark): Promise<void> {
 }
 
 /** The open waves of the repository at `primary`, folded. */
-async function openWaves(primary: string): Promise<{ file: WaveFile; stage: string }[]> {
-  return (await listWaves())
-    .filter((file) => samePath(file.declaration.repo, primary))
-    .map((file) => ({ file, stage: foldWave(file.declaration, file.events).stage }))
-    .filter(({ stage }) => stage !== "merged" && stage !== "cancelled");
+async function openWaves(primary: string): Promise<{ file: WaveFile; stage: string; branch: string }[]> {
+  const open: { file: WaveFile; stage: string; branch: string }[] = [];
+  for (const file of await listWaves()) {
+    if (!samePath(file.declaration.repo, primary)) continue;
+    const { stage, branch } = foldWave(file.declaration, file.events);
+    // A queued wave has no branch yet: no tasks running, nothing to rebase.
+    if (branch !== null && stage !== "merged" && stage !== "cancelled") open.push({ file, stage, branch });
+  }
+  return open;
 }
 
 /**
@@ -187,7 +191,7 @@ async function openWaves(primary: string): Promise<{ file: WaveFile; stage: stri
  */
 export async function taskLanded(exec: Exec, root: string, taskBranch: string, target: string, before: string, after: string): Promise<void> {
   const { primary, gitDir } = await primaryCheckout(exec, root);
-  const waves = (await openWaves(primary)).filter(({ file }) => file.declaration.branch === target);
+  const waves = (await openWaves(primary)).filter(({ branch }) => branch === target);
   if (waves.length === 0) return;
   const tasks = (await Promise.all(waves.map(({ file }) => runningTasks(file.declaration.id, taskBranch)))).flat();
   if (tasks.length === 0) return;
@@ -245,8 +249,8 @@ export async function waveLanded(exec: Exec, repo: string, waveId: string, targe
   if (waves.length === 0) return [];
   const commits = await landedCommits(exec, primary, before, after);
   const done: string[] = [];
-  for (const { file } of waves) {
-    const { id, branch } = file.declaration;
+  for (const { file, branch } of waves) {
+    const { id } = file.declaration;
     try {
       const rebased = await rebaseBranch(exec, primary, branch, target);
       if ("skip" in rebased) {

@@ -16,7 +16,7 @@ import { runCommand, type Exec } from "./run.ts";
 import type { Settings, Task } from "./state.ts";
 import { pendingMarks, roundPassedGates, snapshotRef, SYNC_TYPE, syncAtTurnEnd, syncLeftOf, waveLanded, type SyncDraft } from "./sync.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
-import { createWave } from "./waves.ts";
+import { appendWaveEvent, createWave } from "./waves.ts";
 
 const savedEnv = { ...process.env };
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-sync-test-")));
@@ -295,6 +295,32 @@ test("a wave's merge rebases the other building wave's branch, then syncs its ta
   expect(git(t.worktree, "rev-parse", "HEAD")).toBe(newTip);
   // Its own change only: not the old copy of `two.ts`, not wave one's file.
   expect((await taskDiff(runCommand, t.worktree, newTip)).paths).toEqual(["task.ts"]);
+});
+
+test("a queued wave is left alone when another wave lands, and is synced once it started", async () => {
+  const one = await waveRepo(1, "main-factory-w1");
+  const { repo } = one;
+  const queued = waveId(2);
+  await createWave({ id: queued, repo, tag: "factory/w2", plan: null, title: "Wave 2", request: "r", branch: null, target: "main", origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {}, after: [one.wave] } as never);
+  const land = async (file: string) => {
+    const work = join(caseDir, `work-${file}`);
+    const before = git(repo, "rev-parse", "main");
+    git(repo, "worktree", "add", "--quiet", "--detach", work, "main");
+    commit(work, file, "x\n", `feat: ${file}`);
+    git(repo, "update-ref", "refs/heads/main", git(work, "rev-parse", "HEAD"));
+    git(repo, "worktree", "remove", "--force", work);
+    return [before, git(repo, "rev-parse", "main")] as const;
+  };
+  const [b1, a1] = await land("landed1.ts");
+  expect(await waveLanded(runCommand, repo, one.wave, "main", b1, a1)).toEqual([]);
+
+  git(repo, "branch", "main-factory-w2", a1);
+  await appendWaveEvent(queued, { kind: "start", branch: "main-factory-w2", base: a1 });
+  const t = await runningTask(repo, queued, "main-factory-w2", []);
+  const [b2, a2] = await land("landed2.ts");
+  const done = await waveLanded(runCommand, repo, one.wave, "main", b2, a2);
+  expect(done[0]).toContain("rebased onto main, 1 running task to sync");
+  expect(t.wave).toBe(queued);
 });
 
 test("a round passed its gates once a later step judged it", () => {
