@@ -10,6 +10,7 @@
  * - Wave events: `rejected`, `blocked`, `waiting_approve`, `interrupted`, `unreachable` (building with tasks that can
  *   never start, nothing else moving it), `never` (queued after a wave that was cancelled), `merged`. A queued wave
  *   that can still start says nothing
+ * - Gate proof events (`gates-prove.ts`): `passed`, `flaky`, `failing`, `interrupted`; key `proof:<id>:<event>`
  * - `key` = `<task|wave>:<id>:<event>:<n>`. A task's n is its round, with the state entry's time after `@`: a coder may
  *   ask twice in one round. A wave's n is the index of its last `stage` event in the log for a stage; for
  *   `interrupted`, which no stage event marks, the length of its log; for `unreachable` the keys of the tasks that can
@@ -21,7 +22,8 @@
  *   interrupted), key `scout:<id>:report` (`scoutNoticeKey`), text the scout's block with its report and the report's
  *   path. A call that waited for the report claims the same key
  */
-import { neverStarts, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
+import { neverStarts, proofBlock, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
+import type { ProofView } from "./gates-prove.ts";
 import type { TaskView } from "./core.ts";
 import { scoutBlock } from "./scout-view.ts";
 import type { ScoutView } from "./scouts.ts";
@@ -95,8 +97,8 @@ function scoutNotice(scout: ScoutView): Notice | null {
   return { key: scoutNoticeKey(scout.id), origin: scout.caller.id, text: `factory: scout ${scout.id.slice(0, 8)} ${what}\n${scoutBlock(scout)}${path}` };
 }
 
-/** The notices of the events in `tasks`, `waves` and `scouts` whose key is not in `delivered`, waves first, scouts last. */
-export function pendingNotices(tasks: readonly TaskView[], waves: readonly NoticeWave[], delivered: ReadonlySet<string>, scouts: readonly ScoutView[] = []): Notice[] {
+/** The notices of the events in `tasks`, `waves`, `scouts` and gate `proofs` whose key is not in `delivered`, waves first, scouts and proofs last. */
+export function pendingNotices(tasks: readonly TaskView[], waves: readonly NoticeWave[], delivered: ReadonlySet<string>, scouts: readonly ScoutView[] = [], proofs: readonly ProofView[] = []): Notice[] {
   const notices: Notice[] = [];
   const stages = new Map(waves.map((wave) => [wave.view.id, wave.view.stage]));
   for (const wave of waves) {
@@ -113,6 +115,12 @@ export function pendingNotices(tasks: readonly TaskView[], waves: readonly Notic
   for (const scout of scouts) {
     const notice = scoutNotice(scout);
     if (notice !== null) notices.push(notice);
+  }
+  for (const proof of proofs) {
+    if (proof.origin === null || (proof.state === "running" && !proof.interrupted)) continue;
+    const event = proof.interrupted ? "interrupted" : proof.state;
+    const what = event === "passed" ? "pass" : event === "flaky" ? "pass, flaky" : event === "failing" ? "fail" : "were interrupted";
+    notices.push({ key: `proof:${proof.id}:${event}`, origin: proof.origin, text: `factory: the gates of ${proof.branch} ${what}\n${proofBlock(proof)}` });
   }
   return notices.filter((notice) => !delivered.has(notice.key));
 }

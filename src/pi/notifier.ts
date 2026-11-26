@@ -2,9 +2,10 @@
  * Delivery of notifications (invariant 9, 12) into the Pi session that started a task or declared a wave.
  *
  * - `startNotifier`: in a session that is not a factory task's own, looks at the factory's records on start and whenever
- *   they change: the task and wave dirs and the session files of this origin's tasks are watched (`fs.watch`), changes
+ *   they change: the task, wave and gate proof dirs and the session files of this origin's tasks are watched (`fs.watch`), changes
  *   debounced. A runner that dies changes no file, so a slow look (`fallbackMs`) catches an interruption
- * - One look: `noticeInputs(origin)` (only this session's tasks and waves), `pendingNotices`, then `claimNotices` marks
+ * - One look: `noticeInputs(origin)` (only this session's tasks and waves) and `proofsOf(origin)` (its gate proofs, an
+ *   ended and delivered one not read again), `pendingNotices`, then `claimNotices` marks
  *   them delivered under the lock before `send` hands each to Pi: a notice reaches one session once, also after a
  *   restart and when two sessions race. Looks never overlap: a change during one makes another follow. What is
  *   finished and delivered is not read again: a `done`/`cancelled` task while its session file is unchanged (a
@@ -21,6 +22,7 @@ import { noticeInputs } from "../core.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
 import { pendingNotices, scoutNoticeKey } from "../notify.ts";
 import { callerKey, scoutDirs, scoutsDir, scoutView, type ScoutView } from "../scouts.ts";
+import { proofsDir, proofsOf } from "../gates-prove.ts";
 import { tasksDir } from "../tasks.ts";
 import { wavesDir, type WaveView } from "../waves.ts";
 
@@ -104,6 +106,8 @@ export function startNotifier(options: NotifierOptions): Notifier {
     }
     return scouts;
   };
+  /** This origin's ended gate proofs whose notices are delivered: never read again. */
+  const finishedProofs = new Set<string>();
 
   const watchDir = (dir: string, filter: (name: string | Buffer | null) => boolean) => {
     if (stopped || watchers.has(dir)) return;
@@ -133,9 +137,10 @@ export function startNotifier(options: NotifierOptions): Notifier {
     for (const task of tasks) {
       if (task.sessionPath !== null) watchDir(dirname(task.sessionPath), (name) => name === null || [...sessionIds].some((id) => basename(String(name)).includes(id)));
     }
+    const proofs = await proofsOf(origin, finishedProofs);
     const delivered = await readDelivered();
     const scouts = await openScouts(delivered);
-    const pending = pendingNotices(tasks, waves, delivered, scouts).filter((notice) => !scouts.some((scout) => notice.key === scoutNoticeKey(scout.id) && options.skipScout?.(scout.id)));
+    const pending = pendingNotices(tasks, waves, delivered, scouts, proofs).filter((notice) => !scouts.some((scout) => notice.key === scoutNoticeKey(scout.id) && options.skipScout?.(scout.id)));
     if (stopped) return;
     if (pending.length > 0) for (const notice of await claimNotices(pending)) send(notice.text);
     // Claimed here or by a racing session: delivered either way.
@@ -147,6 +152,7 @@ export function startNotifier(options: NotifierOptions): Notifier {
       }
     }
     for (const wave of waves) if (FINAL_WAVE_STAGES.includes(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);
+    for (const proof of proofs) if (proof.state !== "running") finishedProofs.add(proof.id);
     if (!stopped) options.onWaves?.([...waves.map((wave) => wave.view).filter((view) => !finishedWaves.has(view.id)), ...finishedWaves.values()]);
   };
 
@@ -176,6 +182,7 @@ export function startNotifier(options: NotifierOptions): Notifier {
   watchDir(tasksDir(), relevant);
   watchDir(wavesDir(), relevant);
   watchDir(join(scoutsDir(), callerKey(scoutCaller)), relevant);
+  watchDir(proofsDir(), relevant);
   const fallback = setInterval(() => void look(), options.fallbackMs ?? FALLBACK_MS);
   fallback.unref?.();
   void look();

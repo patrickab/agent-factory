@@ -14,6 +14,7 @@ import type { ActionSpec, TaskView } from "./core.ts";
 import type { Finding } from "./state.ts";
 import type { WaveView } from "./waves.ts";
 import { SCOUT_RENDERERS } from "./scout-view.ts";
+import type { ProofView } from "./gates-prove.ts";
 
 const SHORT = 8;
 /** Lines of a failed gate's output shown under a blocked wave. */
@@ -327,18 +328,45 @@ function waveReceipt(prefix: string, view: WaveView, extra: string[] = []): stri
   return [fields(`${prefix}wave ${short(view.id)}`, waveState(view), `${view.counts.done}/${view.counts.total} done`, view.tag), ...extra].join(" · ");
 }
 
+// ---- gate proofs ----
+
+function proofState(view: ProofView): string {
+  return view.interrupted ? "interrupted" : view.state;
+}
+
+/** `proof 1a2b3c4d  failing  main 0ab12cd` */
+function proofHeader(view: ProofView): string {
+  return fields(`proof ${short(view.id)}`, proofState(view), `${view.branch} ${view.commit.slice(0, 7)}`);
+}
+
+/** One gate proof: header, its steps or the failing one with its last lines, flaky names, `next:`. Exported for notifications. */
+export function proofBlock(view: ProofView): string {
+  const lines = [proofHeader(view)];
+  if (view.interrupted) lines.push("  interrupted: its runner ended before the proof did");
+  if (view.failing !== null) {
+    const tail = view.failing.tail.trimEnd().split("\n").slice(-GATE_TAIL_LINES);
+    const empty = tail.join("").trim() === "";
+    lines.push(`  failing: ${view.failing.step}${empty ? ", no output" : ", last lines:"}`, ...(empty ? [] : tail.map((line) => `    ${line}`)));
+  } else lines.push(`  steps passed: ${view.steps.filter((step) => step.passed).length}`);
+  lines.push(...flakyLine(view.flaky));
+  const runs = view.state === "running" && !view.interrupted;
+  lines.push(runs ? "  next: none, it runs (tasks.wait {ids})" : view.state === "failing" || view.interrupted ? "  next: fix the branch, then gates.prove again" : "  next: waves.start on it");
+  return scrub(lines.join("\n"));
+}
+
 // ---- tasks.wait ----
 
-type WaitResult = { tasks: TaskView[]; waves: WaveView[]; attention: string[]; timedOut: boolean };
+type WaitResult = { tasks: TaskView[]; waves: WaveView[]; proofs?: ProofView[]; attention: string[]; timedOut: boolean };
 
 function duration(ms: number): string {
   return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`;
 }
 
-function stillWorking(tasks: TaskView[], waves: WaveView[]): string | null {
+function stillWorking(tasks: TaskView[], waves: WaveView[], proofs: ProofView[] = []): string | null {
   const parts: string[] = [];
   if (tasks.length > 0) parts.push(plural(tasks.length, "task"));
   for (const wave of waves) parts.push(`wave ${short(wave.id)} ${wave.stage} ${wave.counts.done}/${wave.counts.total}`);
+  for (const proof of proofs) parts.push(`proof ${short(proof.id)} running`);
   return parts.length === 0 ? null : `still working: ${parts.join(" · ")}`;
 }
 
@@ -360,8 +388,9 @@ function waitView(params: Record<string, unknown>, result: WaitResult): string {
     lines.push("attention:");
     for (const wave of result.waves.filter((view) => wanted(view.id))) lines.push(...indentBlock(waveBlock(wave)));
     for (const task of result.tasks.filter((view) => wanted(view.id))) lines.push(...indentBlock(taskBlock(task)));
+    for (const proof of (result.proofs ?? []).filter((view) => wanted(view.id))) lines.push(...indentBlock(proofBlock(proof)));
   }
-  const working = stillWorking(busyTasks, busyWaves);
+  const working = stillWorking(busyTasks, busyWaves, (result.proofs ?? []).filter((proof) => !wanted(proof.id) && proof.state === "running" && !proof.interrupted));
   if (working !== null) lines.push(working);
   if (attention.size === 0 && !result.timedOut) {
     // Everything rests: one line each, the tasks of a shown wave inside its line.
@@ -370,6 +399,7 @@ function waitView(params: Record<string, unknown>, result: WaitResult): string {
       lines.push(fields(waveHeader(wave), wave.merge ? `${short(wave.merge.from)}..${short(wave.merge.to)}` : null));
     }
     for (const task of result.tasks.filter((view) => view.wave === null || !shownWaves.has(view.wave))) lines.push(taskLine(task));
+    for (const proof of result.proofs ?? []) lines.push(fields(proofHeader(proof), proof.flaky.length > 0 ? `flaky: ${proof.flaky.join(", ")}` : null));
     if (lines.length === 0) lines.push("nothing to wait for");
   }
   return lines.join("\n");
@@ -508,6 +538,8 @@ const RENDERERS: Record<string, Renderer> = {
   "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
   "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
   ...SCOUT_RENDERERS,
+  "gates.prove": (_params, result: { proof: ProofView }) => `started ${proofHeader(result.proof)}`,
+  "gates.get": (_params, result: { proof: ProofView }) => proofBlock(result.proof),
 };
 
 /** Whether `agentView` renders `action`. */

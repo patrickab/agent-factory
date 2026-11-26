@@ -5,8 +5,13 @@
 #
 # Commands run in the task's worktree: after_create once it exists, after_code after every coder turn, and
 # after_merge in the main checkout after a merge that changed a lockfile.
+#
+# The factory makes some worktrees itself, not with agent-worktree: a wave's review worktree and the worktree of
+# gates.prove. Nothing copies packages into them: they get them only from after_create, so install them there.
 hooks:
   after_create: []
+  # after_create:
+  #   - [bun, install, --frozen-lockfile]   # or [npm, ci], [uv, sync, --frozen]
   after_code: []
   after_merge: []
 # Fast checks (lint, types, format) after every coder turn.

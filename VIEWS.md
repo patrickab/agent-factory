@@ -195,6 +195,23 @@ concern: how pi-host restarts a session child
 
 MISSING
 1. ...
+## Gate proofs
+
+| Action | Params | Full view | Agent view |
+|---|---|---|---|
+| `gates.prove` | `{repo, branch?}` | `{proof: ProofView}` | `started proof 9c1d2e3f  running  master 0ab12cd` |
+| `gates.get` | `{id}` | `{proof: ProofView}` | the proof block below |
+
+`ProofView`: `{id, repo, branch, commit, origin, createdAt, state: running \| passed \| flaky \| failing, steps: {command, passed, wallMs, flaky}[], flaky, failing: {step, tail, log} \| null, endedAt, running, interrupted}`.
+`tasks.wait {ids}` takes proof ids: `proofs` in its answer, a `failing` or interrupted proof in `attention`.
+
+```
+gates.get {id: "9c1d"}
+  proof 9c1d2e3f  failing  master 0ab12cd
+    failing: bun scripts/changed-tests.ts, last lines:
+      (fail) the wave merges
+      changed-tests: 41 passed, 1 failed in 80s: src/waves.test.ts
+    next: fix the branch, then gates.prove again
 ```
 
 ## Repositories, settings, models, config
@@ -254,6 +271,12 @@ concern: how pi-host restarts a session child
 MISSING
 ...
 report: ~/.pi/agent/factory/scouts/session-.../5c0a7d21-.../report.md
+```
+factory: the gates of master pass, flaky
+proof 9c1d2e3f  flaky  master 0ab12cd
+  steps passed: 3
+  flaky: the wave merges
+  next: waves.start on it
 ```
 
 ## The action list itself

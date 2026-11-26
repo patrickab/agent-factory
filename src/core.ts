@@ -33,6 +33,7 @@ import { TASK_HANDLERS } from "./core-tasks.ts";
 import { WAIT_HANDLERS } from "./core-wait.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
 import { SCOUT_HANDLERS } from "./core-scouts.ts";
+import { PROOF_HANDLERS } from "./gates-prove.ts";
 import { TaskBusyError } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 
@@ -268,6 +269,13 @@ export const ACTIONS = {
     [],
     false,
   ),
+  "gates.prove": spec(
+    "Prove a branch's merge_gates in the background: a fresh worktree of its tip (hooks.after_create run), every step once more when it fails; passed, flaky (passed on the rerun, with the failing test names) or failing. Reported to the declaring Pi session; tasks.wait {ids} watches it. Answers {proof}",
+    { repo: REPO, branch: { type: "string", description: "The branch whose tip is proven. Default: the repository's branch" } },
+    ["repo"],
+    true,
+  ),
+  "gates.get": spec("One gate proof: state (running, passed, flaky, failing), steps, flaky names, the failing step. Answers {proof}", { id: { type: "string", description: "The proof id or a unique prefix of it" } }, ["id"], false),
 } satisfies Record<string, ActionSpec>;
 
 export type ActionName = keyof typeof ACTIONS;
@@ -325,7 +333,7 @@ let handlers: Record<ActionName, Handler> | undefined;
  * module, so an area module loaded first may not have finished when this one runs.
  */
 function handlersByName(): Record<ActionName, Handler> {
-  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS, ...SCOUT_HANDLERS };
+  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS, ...SCOUT_HANDLERS, ...PROOF_HANDLERS };
   return handlers;
 }
 

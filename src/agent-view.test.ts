@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { agentActions, agentError, agentView, taskBlock, unreachableTasks, waveBlock, withoutPaths } from "./agent-view.ts";
 import { ACTIONS, type TaskView } from "./core.ts";
 import type { WaveView } from "./waves.ts";
+import type { ProofView } from "./gates-prove.ts";
 
 const TASK_ID = "4ae7325b-1111-4222-8333-944445555666";
 const WAVE_ID = "3f2a91c0-aaaa-4bbb-8ccc-dddddddddddd";
@@ -100,6 +101,30 @@ const FINDINGS: WaveView["reviews"][number]["findings"] = [
   { severity: "major", file: "src/wave-runner.ts", line: 309, text: "A wave whose tasks can never start\nstays building forever." },
   { severity: "minor", file: "src/tasks.ts", line: null, text: "tasks.import can put a task into a wave." },
 ];
+
+const PROOF_ID = "9c1d2e3f-aaaa-4bbb-8ccc-dddddddddddd";
+
+function proof(over: Partial<ProofView> = {}): ProofView {
+  return {
+    id: PROOF_ID,
+    repo: "/home/me/git/app",
+    branch: "master",
+    commit: "0ab12cd0ab12cd0ab12cd0ab12cd0ab12cd0ab12",
+    origin: SESSION,
+    createdAt: "2025-01-02T10:00:00.000Z",
+    state: "failing",
+    steps: [
+      { command: "bun run types", passed: true, wallMs: 4000, flaky: [] },
+      { command: "bun test", passed: false, wallMs: 60_000, flaky: [] },
+    ],
+    flaky: [],
+    failing: { step: "bun test", tail: "(fail) the wave merges\n1 fail", log: "/home/me/.pi/agent/factory/proofs/x.failing.log" },
+    endedAt: "2025-01-02T10:01:00.000Z",
+    running: false,
+    interrupted: false,
+    ...over,
+  };
+}
 
 /** One full view per action, as `callAction` answers it. */
 const SCOUT = {
@@ -217,6 +242,8 @@ const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "scouts.start": { params: { concern: "how a.txt is made", wait: true }, result: { scout: SCOUT, timedOut: false } },
   "scouts.get": { params: { id: "5c0a" }, result: { scout: { ...SCOUT, state: "running", report: null, reportPath: null, written: ["map/a"] } } },
   "scouts.list": { params: {}, result: { scouts: [SCOUT] } },
+  "gates.prove": { params: { repo: "." }, result: { proof: proof({ state: "running", running: true, failing: null, steps: [], flaky: [], endedAt: null }) } },
+  "gates.get": { params: { id: "9c1d" }, result: { proof: proof() } },
 };
 
 const FORBIDDEN = [/\/home/, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, new RegExp(SESSION.slice(0, 13)), /SECRET-REQUEST/, /secret patch/];
@@ -670,6 +697,28 @@ describe("tasks.wait", () => {
     expect(agentView("tasks.wait", { ids: ["4ae7"], timeoutMs: 600_000 }, { tasks: [task(), task(), task()], waves: [], attention: [], timedOut: true })).toBe(
       "timed out after 10 min\nstill working: 3 tasks",
     );
+  });
+
+  test("a failing proof needs attention with its last lines, a running one still works, a flaky one at rest names its tests", () => {
+    expect(agentView("tasks.wait", { ids: ["9c1d"] }, { tasks: [], waves: [], proofs: [proof()], attention: [PROOF_ID], timedOut: false })).toBe(
+      [
+        "attention:",
+        "  proof 9c1d2e3f  failing  master 0ab12cd",
+        "    failing: bun test, last lines:",
+        "      (fail) the wave merges",
+        "      1 fail",
+        "    next: fix the branch, then gates.prove again",
+      ].join("\n"),
+    );
+    const running = proof({ state: "running", running: true, failing: null, endedAt: null });
+    expect(agentView("tasks.wait", { ids: ["9c1d"] }, { tasks: [], waves: [], proofs: [running], attention: [], timedOut: true })).toBe(
+      "timed out after 10 min\nstill working: proof 9c1d2e3f running",
+    );
+    const flaky = proof({ state: "flaky", failing: null, flaky: ["the wave merges"] });
+    expect(agentView("tasks.wait", { ids: ["9c1d"] }, { tasks: [], waves: [], proofs: [flaky], attention: [], timedOut: false })).toBe(
+      "proof 9c1d2e3f  flaky  master 0ab12cd  flaky: the wave merges",
+    );
+    expect(agentView("gates.get", {}, { proof: flaky })).toBe("proof 9c1d2e3f  flaky  master 0ab12cd\n  steps passed: 1\n  flaky: the wave merges\n  next: waves.start on it");
   });
 });
 

@@ -74,7 +74,9 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 
 ## `factory.yaml` (read from the task's base commit, never from the coder's tree)
 
-- `hooks.after_create`: argv lists, run once in a new task worktree
+- `hooks.after_create`: argv lists, run once in a new task worktree, and in the worktrees the factory makes itself (a
+  wave's review worktree, a `gates.prove` worktree). Those are not made by `agent-worktree`: nothing copies packages
+  into them, so the repository installs them here, e.g. `after_create: [[bun, install, --frozen-lockfile]]`
 - `hooks.after_code`: run after every coder turn, before the gates
 - `hooks.after_merge`: run in the main checkout after a merge that changed a lockfile
 - Gates, three argv lists. Exit 0 passes, 75 = broken environment (the task blocks), else fails. A failed step runs
@@ -131,10 +133,11 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `since`/`next` = a byte cursor, read from `since` on), `tasks.diff` (base, patch, per-file added/removed lines),
   `tasks.start|approve|retry|cancel|remove|message`, `tasks.wait`,
   `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below), `scouts.start|get|list` (below)
+  `waves.start|add|get|list|timeline|retry|approve|cancel|remove` (below), `gates.prove|get` (below)
 - `tasks.list {repo?, tag?}`: `tag` keeps the tasks whose tag is it or starts with `tag + "/"` (`a` holds `a/b`, not
   `ab`)
 - `tasks.wait {ids? | tag? | wave?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique
-  prefixes, resolved once), `tag` (the tasks and the waves under it as in `tasks.list`, re-listed on every poll, so
+  prefixes of tasks or gate proofs, resolved once), `tag` (the tasks and the waves under it as in `tasks.list`, re-listed on every poll, so
   tasks and waves started later count) and `wave` (that wave, id or unique prefix, and its tasks); `ignore` leaves task
   or wave ids out; `timeoutMs` 1000..3600000, default 600000. A task rests when no runner lives and its state is
   `waiting_approve`, `waiting_answer`, `blocked`, `done` or `cancelled`, or it is interrupted; it needs attention when
@@ -143,7 +146,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `building` with tasks that can never start (a task they wait for was cancelled or removed) while none of its started
   tasks is active (its runner rests then; the wave is not interrupted), or `queued` after a wave that was cancelled. A
   `queued` wave that can still start neither rests nor needs attention: the wait goes on. Answers
-  `{tasks, waves, attention: task and wave ids, timedOut}` once everything watched rests, one needs attention, the
+  `{tasks, waves, proofs, attention: task, wave and proof ids, timedOut}` once everything watched rests, one needs attention, the
   timeout passes or nothing is watched; an abort fails it. A wave's tasks all resting while the wave builds, reviews
   or merges is not the end. A poll re-reads a session file only when it changed and looks for runners only where that
   decides the answer
@@ -307,6 +310,21 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   the due syncs and blocks nothing: the task meets the change at its merge
 - Marks, branch rebases and syncs hold the merge lock; a running turn, a gate run or a merge is never interrupted
 
+### Gate proofs (`src/gates-prove.ts`)
+
+- `gates.prove {repo, branch?}` (`mutates: true`): runs `merge_gates` of the branch's committed `factory.yaml` on its
+  tip, in the background: a detached worktree of the tip, `hooks.after_create`, then every step, a failed one once
+  more (as every gate run). Branch: the given one, else the repo's stored branch, else its default; refused without a
+  committed `factory.yaml`. Env `FACTORY_BASE` = the empty tree: the whole tree is the change. `origin` is the
+  declaring Pi session. Answers `{proof}` at once
+- States: `running`, `passed`, `flaky` (a step passed on its rerun; `flaky` holds the failing test names, else the
+  command), `failing` (`failing`: the step, `hooks.after_create` for a hook, its output's tail and `log`, the path of
+  its full output). `interrupted`: `running` and its runner no longer lives. The worktree is removed (forced) before
+  the end is recorded
+- `gates.get {id}`: `{proof: ProofView}` (declaration, `state`, `steps` with `flaky`, `flaky`, `failing`, `endedAt`,
+  `running`, `interrupted`). `tasks.wait {ids}` watches a proof; it needs attention `failing` or interrupted
+- The declaring Pi session gets one notice when it ends: `passed`, `flaky`, `failing` or `interrupted`
+
 ### CLI (`factory`)
 
 ```bash
@@ -458,6 +476,9 @@ Commands (inside a task's own Pi session):
 - `sync/<task id>.jsonl`: a task's due syncs, append-only (`due` lines, `done` lines consume them). The worktree before
   its last sync: the ref `refs/factory/sync/<task id>` in the repo
 - `scouts/<caller kind>-<caller id>/<id>/`: a scout (`scout.json`, `events.jsonl`, `report.md`, `written.jsonl`)
+- `proofs/<id>.jsonl`: a gate proof, append-only, written by its runner: line 1 its declaration, then one `step` per
+  gate step and one `end`; `.pid` its runner (pid and start time), `.log` the runner's output, `.failing.log` the
+  output of the step that failed
 - Reviews: `<agent dir>/factory-reviews/<session id>/`. Merge lock and queue: in the repo's git common dir
 
 ## Entry protocol

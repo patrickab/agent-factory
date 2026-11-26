@@ -25,6 +25,7 @@ const NOT_FOR_AGENTS: readonly string[] = ["tasks.timeline", "waves.timeline"];
 export const FACTORY_TOOL_DESCRIPTION = [
   "Run coding work in the background: a task codes in its own git worktree of a repository with a committed factory.yaml, passes its gates and merges into its target.",
   '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, reviewed as a whole and merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',
+  '"gates.prove" runs a branch\'s merge_gates in the background before a wave is declared on it: passed, flaky or failing.',
   'Answers are short text: an id (8 chars are enough), the state, what matters in it, and "next:" with the actions valid now.',
   'Tasks and waves started from a Pi session report back to it when they need you; elsewhere block on "tasks.wait" (ids, tag or wave) instead of polling.',
   "A tag (path segments like plugin/m1/w1) groups related work for tasks.list, waves.list and tasks.wait.",

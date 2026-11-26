@@ -12,6 +12,7 @@ import { stat } from "node:fs/promises";
 import type { ActionName } from "./core.ts";
 import { FactoryError, stringsParam, tagParam, WAIT_TIMEOUT_MS, type Handler } from "./core-shared.ts";
 import { findTask, needsAttention, rests, tasksIn, taskView, type TaskView } from "./core-tasks.ts";
+import { findProof, proofNeedsAttention, proofRests, proofView, type ProofView } from "./gates-prove.ts";
 import { findWave, queueLook, waveLook, type WaveLook } from "./core-waves.ts";
 import { liveRunners } from "./launch.ts";
 import { readFactoryStates, sessionFilePath } from "./runner.ts";
@@ -117,9 +118,10 @@ async function pollWaves(
 }
 
 /** What a `tasks.wait` watches, read again on every poll: new tasks and waves of a tag count as they appear. */
-type Watched = () => Promise<{ records: TaskRecord[]; waves: WaveFile[] }>;
+type Watched = () => Promise<{ records: TaskRecord[]; waves: WaveFile[]; proofs?: string[] }>;
 
-type WaitAnswer = { tasks: TaskView[]; waves: WaveView[]; attention: string[]; timedOut: boolean };
+/** `proofs` only when the wait watches gate proofs: the answer of every other wait is as before. */
+type WaitAnswer = { tasks: TaskView[]; waves: WaveView[]; proofs?: ProofView[]; attention: string[]; timedOut: boolean };
 
 /**
  * `tasks.wait`: polls the watched tasks and waves until all rest, one needs attention, the deadline passes or nothing
@@ -140,6 +142,9 @@ async function waitForTasks(watched: Watched, ignore: string[], timeoutMs: numbe
     const leftWave = (record: TaskRecord, state: State | null) => state === "cancelled" && record.wave !== null && waveIds.has(record.wave);
     const timedOut = Date.now() >= deadline;
     const byId = new Map(all.records.map((record) => [record.id, record]));
+    const proofs = await Promise.all((all.proofs ?? []).filter((id) => !ignored(id)).map(proofView));
+    const proofsBusy = proofs.some((proof) => !proofRests(proof));
+    const proofsAttention = proofs.some(proofNeedsAttention);
     let everyWave: Promise<WaveFile[]> | undefined;
     const waves = await pollWaves(
       files,
@@ -150,17 +155,19 @@ async function waitForTasks(watched: Watched, ignore: string[], timeoutMs: numbe
       () => (everyWave ??= listWaves()),
     );
     const states = (await Promise.all(records.map((record) => polledState(record, cache)))).map((state, index) => (leftWave(records[index], state) ? "done" : state));
-    if (timedOut || waves.attention || (await waitMayEnd(records, states, waves.busy))) {
+    if (timedOut || waves.attention || proofsAttention || (await waitMayEnd(records, states, waves.busy || proofsBusy))) {
       const tasks = await Promise.all(records.map((record) => taskView(record)));
       const looks = await Promise.all(files.map(waveLook));
       const waveViews = looks.map((look) => look.view);
       const attention = [
         ...tasks.filter((view) => needsAttention(view) && !(view.state === "cancelled" && view.wave !== null && waveIds.has(view.wave))).map((view) => view.id),
         ...looks.filter(waveNeedsAttention).map((look) => look.view.id),
+        ...proofs.filter(proofNeedsAttention).map((proof) => proof.id),
       ];
-      // The views are read after the poll: a task or wave that moved on in between is polled again.
-      if ((tasks.every(rests) && looks.every(waveRests)) || attention.length > 0) return { tasks, waves: waveViews, attention, timedOut: false };
-      if (timedOut) return { tasks, waves: waveViews, attention, timedOut: true };
+      // The views are read after the poll: a task or wave that moved on in between is polled again. `proofs` only when it watches some.
+      const shown = proofs.length === 0 ? {} : { proofs };
+      if ((tasks.every(rests) && looks.every(waveRests) && proofs.every(proofRests)) || attention.length > 0) return { tasks, waves: waveViews, ...shown, attention, timedOut: false };
+      if (timedOut) return { tasks, waves: waveViews, ...shown, attention, timedOut: true };
     }
     await abortableSleep(Math.min(WAIT_POLL_MS, deadline - Date.now()), signal);
   }
@@ -190,9 +197,18 @@ export const WAIT_HANDLERS = {
     const ignore = stringsParam("tasks.wait", "ignore", params.ignore) ?? [];
     const timeoutMs = (params.timeoutMs as number | undefined) ?? WAIT_TIMEOUT_MS.default;
     if (ids !== undefined) {
-      // Ids are resolved once: a prefix that turns ambiguous later must not end the wait.
-      const records = await Promise.all(ids.map(findTask));
-      return waitForTasks(async () => ({ records, waves: [] }), ignore, timeoutMs, signal);
+      // Ids are resolved once: a prefix that turns ambiguous later must not end the wait. One no task has may be a proof's.
+      const records: TaskRecord[] = [];
+      const proofs: string[] = [];
+      for (const id of ids) {
+        const record = await findTask(id).catch(async (error: unknown) => {
+          if (!(error instanceof FactoryError && error.code === "not_found")) throw error;
+          proofs.push(await findProof(id).catch(() => Promise.reject(error)));
+          return undefined;
+        });
+        if (record !== undefined) records.push(record);
+      }
+      return waitForTasks(async () => ({ records, waves: [], proofs }), ignore, timeoutMs, signal);
     }
     if (wave !== undefined) {
       const id = (await findWave(wave)).declaration.id;
