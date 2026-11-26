@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadTaskFiles } from "./config.ts";
 import {
+  applyReviewed,
   approveTask,
   askSupervisor,
   cancelTask,
@@ -404,5 +405,48 @@ describe("an old merge request in its own session (invariant 7)", () => {
     expect(await retryTask(pi.deps)).toEqual({ ok: false, error: "this task is an old merge request: retry is refused, it can only be removed" });
     expect(pi.states()).toEqual(["waiting_approve/test", "blocked/test"]);
     expect([pi.userMessages, pi.coderMessages]).toEqual([[], []]);
+  });
+});
+
+describe("applyReviewed", () => {
+  const review = (severities: ("blocker" | "major" | "minor")[]) => {
+    const findings = severities.map((severity) => ({ file: "task.txt", line: 1, severity, text: `${severity} problem` }));
+    return { round: 1, status: "ok", approved: severities.every((severity) => severity === "minor"), findings, model: null, sessionFile: null, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.1 }, wallMs: 1 };
+  };
+  const command = (severities: ("blocker" | "major" | "minor")[], round = 1) => JSON.stringify({ round, review: review(severities) });
+
+  test("approved: the review is recorded and the task merges into its target", async () => {
+    const worktree = addTaskWorktree();
+    writeFileSync(join(worktree, "task.txt"), "t\n");
+    const pi = fake(worktree);
+    pi.holdTask("reviewing");
+    record(pi.deps, "factory-round", { round: 1, trigger: "start" });
+    expect(await applyReviewed(pi.deps, command(["minor"]))).toEqual({ ok: true });
+    expect(pi.entries.map((entry) => entry.customType)).toContain("factory-review");
+    while (pi.states().length < 3) await Bun.sleep(10);
+    expect(pi.states()).toEqual(["reviewing/test", "merging/approved", "done/merged"]);
+    expect(gitIn(repo, "show", "main:task.txt")).toBe("t");
+  });
+
+  test("a major finding: the next round starts the coder with it", async () => {
+    const pi = fake(dir);
+    pi.holdTask("reviewing");
+    record(pi.deps, "factory-round", { round: 1, trigger: "start" });
+    expect(await applyReviewed(pi.deps, command(["major"]))).toEqual({ ok: true });
+    expect(pi.states()).toEqual(["reviewing/test", "running/review"]);
+    expect(pi.coderMessages).toHaveLength(1);
+    expect(pi.coderMessages[0]!.triggerTurn).toBe(true);
+    expect(String(pi.coderMessages[0]!.message.content)).toContain("[major] task.txt:1: major problem");
+  });
+
+  test("a verdict for another round, or a task not reviewing, changes nothing: delivered twice is applied once", async () => {
+    const pi = fake(dir);
+    pi.holdTask("reviewing");
+    record(pi.deps, "factory-round", { round: 1, trigger: "start" });
+    expect(await applyReviewed(pi.deps, command(["major"], 2))).toEqual({ ok: false, error: "the task is not reviewing round 2" });
+    expect(await applyReviewed(pi.deps, command(["major"]))).toEqual({ ok: true });
+    expect(await applyReviewed(pi.deps, command(["major"]))).toEqual({ ok: false, error: "the task is not reviewing round 1" });
+    expect(pi.states()).toEqual(["reviewing/test", "running/review"]);
+    expect(await applyReviewed(pi.deps, "{bad")).toMatchObject({ ok: false });
   });
 });

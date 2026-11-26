@@ -37,7 +37,7 @@ import { errorText, isRecord } from "./util.ts";
 export { FactoryError, oneLine, type FactoryErrorCode, type FactoryErrorDetail } from "./core-shared.ts";
 export type { ActionSpec } from "./feature.ts";
 export type { TaskActionName, TaskView, TimelineEntry, TimelineKind } from "./core-tasks.ts";
-export { noticeInputs, pokeQueuedAfter, queueLook, startQueuedWave, startWaveTasks, taskWave, waveBranchName, waveMergeRefusal, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
+export { noticeInputs, pokeQueuedAfter, queueLook, startQueuedWave, startWaveTasks, taskWave, waveBranchName, waveMergeRefusal, waveReviewsEach, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
 
 /** Every feature's actions (`features.ts`), in the features' order. Two features naming one action fail on load. */
 export const ACTIONS = Object.freeze(

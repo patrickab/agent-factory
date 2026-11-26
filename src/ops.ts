@@ -19,7 +19,7 @@ import {
   taskGit,
 } from "./git.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
-import { runMerge, type PipelineSteps } from "./pipeline.ts";
+import { reviewedDrafts, runMerge, type PipelineSteps } from "./pipeline.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner } from "./run.ts";
 import { agentDir } from "./settings.ts";
@@ -40,6 +40,7 @@ import {
   type FeedbackDraft,
   type MergeIntentData,
   type Snapshot,
+  type ReviewData,
   type State,
   type Task,
   type Trigger,
@@ -117,6 +118,8 @@ export interface OpsDeps {
    * `gates` and `task_gates` (env `FACTORY_BASE`), not `merge_gates`: the wave runs those. Absent: no wave.
    */
   wave?(): Promise<string | null>;
+  /** Whether this task's wave reviews each task (`reviewEach`): a passed round rests `reviewing`. Absent: never. */
+  reviewEach?(): Promise<boolean>;
 }
 
 export function newTaskSession(): TaskSession {
@@ -241,6 +244,7 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
     openRebase: () => rebaseInProgress(runner.run, root),
     // A follow-up on a merged task is a new commit of its own: the task title already named the first one.
     askCommitMessage: () => !isConventionalTitle(task.title) || session.snapshot?.mergedCommit != null,
+    reviewEach: async () => (await deps.reviewEach?.()) ?? false,
   };
 }
 
@@ -363,6 +367,43 @@ export async function approveTask(deps: OpsDeps): Promise<OpResult> {
     deps.session.runner.reset();
     record(deps, "factory-state", { state: "merging", round: current.round, reason: "approved" });
     void finishMerge(deps, deps.session.snapshot ?? current).catch(() => undefined);
+    return { ok: true };
+  });
+}
+
+/**
+ * The wave reviewer's verdict on this task (`/factory reviewed {round, review}`, `review-each.ts`): applied only while
+ * the task rests `reviewing` in that round, so a verdict delivered twice changes nothing. Approved: the merge starts
+ * (`task_gates`, commit, merge into the wave's branch); a blocker or major finding: the next round, its feedback
+ * starts the coder; out of rounds or no verdict: `blocked` (`reviewedDrafts`).
+ */
+export async function applyReviewed(deps: OpsDeps, json: string): Promise<OpResult> {
+  const current = deps.session.snapshot;
+  if (!current) return { ok: false, error: "this session holds no task" };
+  let payload: { round?: unknown; review?: unknown };
+  try {
+    payload = JSON.parse(json) as typeof payload;
+  } catch (error) {
+    return { ok: false, error: `reviewed: ${errorText(error)}` };
+  }
+  const review = payload.review as ReviewData | undefined;
+  if (typeof payload.round !== "number" || typeof review !== "object" || review === null || !Array.isArray(review.findings)) return { ok: false, error: "reviewed needs {round, review}" };
+  if (current.state !== "reviewing" || current.round !== payload.round) return { ok: false, error: `the task is not reviewing round ${payload.round}` };
+  if (!deps.isIdle()) return { ok: false, error: "the session is busy" };
+  return guarded(async () => {
+    deps.session.runner.reset();
+    const result = reviewedDrafts(current, review);
+    recordDrafts(deps, result.entries);
+    const now = deps.session.snapshot ?? current;
+    if (now.state === "merging") {
+      void finishMerge(deps, now).catch(() => undefined);
+      return { ok: true };
+    }
+    const feedback = result.entries.find((draft): draft is FeedbackDraft => draft.type === "custom_message" && draft.customType === FEEDBACK_TYPE);
+    if (feedback && result.continue) {
+      const { type: _type, ...message } = feedback;
+      deps.sendMessage(message, { triggerTurn: true });
+    }
     return { ok: true };
   });
 }

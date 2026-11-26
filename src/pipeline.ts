@@ -58,6 +58,11 @@ export interface PipelineSteps {
   openRebase(): Promise<string[] | null>;
   /** True when a passed round asks the coder for the commit message before it ends. Absent: never. */
   askCommitMessage?(): boolean;
+  /**
+   * True when the task's wave reviews each task (`reviewEach`): a passed round rests `reviewing` for the wave's
+   * reviewer instead of the task's own review, approve or merge. Absent: never.
+   */
+  reviewEach?(): Promise<boolean>;
 }
 
 export interface RoundResult {
@@ -182,7 +187,8 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
     const touched = protectedPaths(diff.paths, config.protected);
     if (touched.length > 0) return problem("protected", protectedFeedback(round, touched));
 
-    if (task.settings.review) {
+    const byWave = (await steps.reviewEach?.()) ?? false;
+    if (task.settings.review && !byWave) {
       steps.status(`round ${round}: review`);
       const review = await steps.review(round, diff);
       drafts.push(customDraft("factory-review", review));
@@ -193,7 +199,7 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
 
     // The message is about a change that is neither approved nor merged yet: it goes first.
     if (steps.pendingMessages()) return messageRound();
-    const passedInto: State = task.settings.merge === "review" ? "waiting_approve" : "merging";
+    const passedInto: State = byWave ? "reviewing" : task.settings.merge === "review" ? "waiting_approve" : "merging";
     if (steps.askCommitMessage?.()) {
       drafts.push(commitAskDraft(round));
       return { entries: drafts, continue: true, commitAsk: passedInto };
@@ -202,4 +208,21 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
   } catch (error) {
     return steps.cancelled() ? end("cancelled", "cancelled") : end("blocked", `pipeline_error: ${errorText(error)}`);
   }
+}
+
+/**
+ * The entries of the wave reviewer's verdict on a task resting `reviewing` in the snapshot's round (`/factory
+ * reviewed`): the `factory-review` entry, then `merging` when it approves; with a blocker or major finding the next
+ * round and its feedback (only those findings), or `blocked`, `max_rounds: review`, when the run's rounds are used up;
+ * `blocked`, `review_<status>`, when the reviewer gave no verdict.
+ */
+export function reviewedDrafts(snapshot: Snapshot, review: ReviewData): RoundResult {
+  const { round } = snapshot;
+  const entries: Draft[] = [customDraft("factory-review", review)];
+  if (review.status !== "ok") return { entries: [...entries, stateDraft("blocked", round, `review_${review.status}`)], continue: false };
+  if (review.approved) return { entries: [...entries, stateDraft("merging", round, "approved")], continue: false };
+  const rejecting = review.findings.filter((finding) => finding.severity !== "minor");
+  const next = nextRound(snapshot, "review", reviewFeedback(round, rejecting));
+  const state = next.continue ? stateDraft("running", round + 1, "review") : stateDraft("blocked", round, "max_rounds: review");
+  return { entries: [...entries, ...next.entries, state], continue: next.continue };
 }

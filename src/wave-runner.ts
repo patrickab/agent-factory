@@ -50,6 +50,7 @@ import { resolveAdditions } from "./additions-merge.ts";
 import { CONFLICT_TASKS, conflictTask, undoConflictBranch } from "./core-waves.ts";
 import { commentReview, mergePending, publishMerge, publishWave } from "./remote.ts";
 import { runReview } from "./review.ts";
+import { reviewNext, type ReviewEachDeps } from "./review-each.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
 import { INFRA_EXIT, passed, type GateData, type Task } from "./state.ts";
 import { lockFile, TaskBusyError } from "./tasks.ts";
@@ -591,6 +592,8 @@ async function build(fold: WaveFold): Promise<Next> {
   }
   // A stopping runner started what it could not stop; it judges nothing more.
   if (stopping) return "wait";
+  // `reviewEach`: the tasks resting `reviewing`, one review after another.
+  if (waveStarted(fold) && (await reviewNext(fold, states, { ...reviewEachDeps, env, log: (text) => log(id, text) }))) return "again";
   const stuck = stuckKeys(fold, states);
   if (stuck.length === 0) return "wait";
   const detail = `${stuck.length === 1 ? "task" : "tasks"} ${stuck.join(", ")} can never start (a task waited for was cancelled or removed) and no task runs: waves.add (which drops them) or waves.cancel`;
@@ -598,6 +601,13 @@ async function build(fold: WaveFold): Promise<Next> {
   log(id, `${detail}${written === null ? "" : " (recorded)"}; resting`);
   return "rest";
 }
+
+/** The review queue's process-wide part (`review-each.ts`); `deliver` stays `messageTask` but in tests. */
+export const reviewEachDeps: Omit<ReviewEachDeps, "log" | "env"> = {
+  exec: (argv, options) => runner.run(argv, options),
+  cancelled: () => stopping || runner.cancelled,
+  delivered: new Map(),
+};
 
 /** Waits until a poke marker appears, `POLL_MS` passes or the runner stops. */
 async function waitForPoke(id: string): Promise<void> {

@@ -91,6 +91,19 @@ export async function taskWave(sessionDir: string, sessionId: string): Promise<s
 }
 
 /**
+ * Whether the task in the Pi session `sessionId` belongs to a wave with `reviewEach`: its passed round then rests
+ * `reviewing` for the wave's reviewer. False outside a wave, or when the wave is gone.
+ */
+export async function waveReviewsEach(sessionDir: string, sessionId: string): Promise<boolean> {
+  const wave = await taskWave(sessionDir, sessionId);
+  if (wave === null) return false;
+  return readWave(wave).then(
+    (file) => file.declaration.reviewEach === true,
+    () => false,
+  );
+}
+
+/**
  * Why the merge of the task in the Pi session `sessionId` (files in `sessionDir`) must not land now, null when it may
  * (invariant 2): a task of a wave whose review began (`reviewBegan`) would bring commits onto the wave's branch that
  * its gates and reviewer never saw, or that are lost once it merged. The plugin asks right before a task merges, so
@@ -539,6 +552,7 @@ export const WAVE_HANDLERS = {
     if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "waves.start: plan must not be empty");
     const specs = withIds(validateTaskSpecs(params.tasks));
     const contracts = await waveContracts(params.plan as string | undefined, params.contracts);
+    if (params.reviewEach !== undefined && typeof params.reviewEach !== "boolean") throw new FactoryError("invalid", "waves.start: reviewEach must be a boolean");
     let target: string | undefined;
     let overrides: WaveOverrides;
     try {
@@ -587,6 +601,7 @@ export const WAVE_HANDLERS = {
       base,
       ...(queued ? { after } : {}),
       ...(contracts === undefined ? {} : { contracts }),
+      ...(params.reviewEach === true ? { reviewEach: true } : {}),
       origin: origin ?? null,
       createdAt: new Date().toISOString(),
       overrides,

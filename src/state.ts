@@ -11,10 +11,16 @@ import type { CommandResult } from "./run.ts";
 import { isRecord } from "./util.ts";
 import type { FeedbackEntry } from "./feedback.ts";
 
-/** `waiting_answer`: the coder asked the supervisor (`factory-question`); the next message answers it. */
-export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked" | "merging" | "done" | "cancelled";
+/**
+ * `waiting_answer`: the coder asked the supervisor (`factory-question`); the next message answers it. `reviewing`: a
+ * task of a wave with `reviewEach` passed its gates and waits for the wave's reviewer (`review-each.ts`), whose
+ * verdict comes as `/factory reviewed`.
+ */
+export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked" | "merging" | "done" | "cancelled" | "reviewing";
 /** A task in one of these states does nothing until someone sends it a command or a message. */
-export const RESTING_STATES: readonly State[] = ["waiting_approve", "waiting_answer", "blocked", "done", "cancelled"];
+export const RESTING_STATES: readonly State[] = ["waiting_approve", "waiting_answer", "blocked", "done", "cancelled", "reviewing"];
+/** Resting states whose next step is the factory's, not someone's: no attention, and a watcher does not count them as rest. */
+export const FACTORY_TURN_STATES: readonly State[] = ["reviewing"];
 export type GatePhase = "hooks" | "gates" | "merge_gates" | "after_merge";
 export type Trigger = "start" | "hooks" | "gates" | "review" | "protected" | "message" | "retry" | "conflict";
 export type Severity = "blocker" | "major" | "minor";

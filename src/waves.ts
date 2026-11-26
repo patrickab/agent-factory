@@ -17,7 +17,7 @@
  */
 import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { FactoryError } from "./core-shared.ts";
-import { MODEL_SIZES, normalizeModels, parseSettingsFields, RESTING_STATES, type MinorFinding, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
+import { FACTORY_TURN_STATES, MODEL_SIZES, normalizeModels, parseSettingsFields, RESTING_STATES, type MinorFinding, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
@@ -75,6 +75,8 @@ export interface WaveDeclaration {
   after?: string[];
   /** The contracts (memory-store, the store is `plan`) its tasks work by (absent: none). */
   contracts?: string[];
+  /** Its reviewer judges each task once its gates passed, before it merges (`review-each.ts`). Absent: false. */
+  reviewEach?: boolean;
   origin: string | null;
   createdAt: string;
   /** Stored only: not part of a `WaveView`. A file without it reads as `{}`. */
@@ -93,6 +95,12 @@ export type WaveReview = {
   usage: Usage | null;
   wallMs: number;
 };
+/**
+ * One review of a task of a `reviewEach` wave (`review-each.ts`): `key`/`taskId` the task, `round` the task's round
+ * judged, `tree` the worktree's tree it judged on `base` (the next review's diff starts there while the base stays),
+ * `contracts` the hash of the contracts' text in its prompt (null: none).
+ */
+export type WaveTaskReview = WaveReview & { key: string; taskId: string; tree: string; base: string; contracts: string | null };
 /** `flaky`: the failing test names (else the commands) of the steps that failed and then passed on their rerun; absent when none. */
 export type WaveGate = { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null; flaky?: string[] };
 /** The commit range that reached the target. */
@@ -116,6 +124,7 @@ export type WaveEvent =
   | { at: string; kind: "start"; branch: string; base: string }
   | ({ kind: "gate"; commit?: string } & WaveGate)
   | ({ kind: "review" } & WaveReview)
+  | ({ kind: "task_review" } & WaveTaskReview)
   | ({ kind: "merge" } & WaveMerge)
   | ({ at: string; kind: "remote" } & Partial<WaveRemote>)
   /** `contracts.apply` changed the contract `name` (its facts `paths`); `done`: the wave's done tasks, reported to the supervisor. */
@@ -184,6 +193,8 @@ export interface WaveFold extends WaveDeclaration {
   resolved?: WaveResolved[];
   /** The `conflict` events, oldest first; absent when none. */
   conflicts?: WaveConflict[];
+  /** The `task_review` events, oldest first; absent when none. */
+  taskReviews?: WaveTaskReview[];
 }
 
 /** A wave that has its branch: declared without `after`, or started (`start` event). */
@@ -224,6 +235,8 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   resolved?: WaveResolved[];
   /** The conflicts a task was added for (`conflict-<n>`), oldest first; absent when none. */
   conflicts?: WaveConflict[];
+  /** The reviews of its tasks (`reviewEach`), oldest first; their usage counts in the tasks' own. Absent when none. */
+  taskReviews?: WaveTaskReview[];
   usage: Usage | null;
   /** The part of `usage.cost` the wave's and its tasks' scouts spent. Always set by the core. */
   scoutingCost?: number;
@@ -333,6 +346,7 @@ export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration 
     base: after === undefined ? str(raw, "base") : strOrNull(raw, "base"),
     ...(after === undefined ? {} : { after }),
     ...(contracts === undefined ? {} : { contracts }),
+    ...(raw.reviewEach === true ? { reviewEach: true } : {}),
     origin: strOrNull(raw, "origin"),
     createdAt: str(raw, "createdAt"),
     overrides: parseWaveOverrides(raw.overrides),
@@ -356,6 +370,20 @@ function parseFinding(raw: unknown): WaveFinding {
   const line = raw.line ?? null;
   if (line !== null && typeof line !== "number") throw new Error("line must be a number or null");
   return { severity: oneOf(raw, "severity", ["blocker", "major", "minor"] as const), file: str(raw, "file", false), line, text: str(raw, "text", false) };
+}
+
+function parseReview(raw: Record<string, unknown>): Omit<WaveReview, "at"> {
+  if (!Array.isArray(raw.findings)) throw new Error("findings must be an array");
+  return {
+    round: num(raw, "round"),
+    sessionId: strOrNull(raw, "sessionId"),
+    model: strOrNull(raw, "model"),
+    verdict: oneOf(raw, "verdict", ["approved", "rejected", "failed"] as const),
+    status: str(raw, "status"),
+    findings: raw.findings.map(parseFinding),
+    usage: usageOf(raw.usage),
+    wallMs: num(raw, "wallMs"),
+  };
 }
 
 export function parseWaveEvent(raw: unknown): WaveEvent {
@@ -393,21 +421,10 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       if (Array.isArray(raw.flaky)) event.flaky = raw.flaky.filter((name): name is string => typeof name === "string");
       return event;
     }
-    case "review": {
-      if (!Array.isArray(raw.findings)) throw new Error("findings must be an array");
-      return {
-        at,
-        kind,
-        round: num(raw, "round"),
-        sessionId: strOrNull(raw, "sessionId"),
-        model: strOrNull(raw, "model"),
-        verdict: oneOf(raw, "verdict", ["approved", "rejected", "failed"] as const),
-        status: str(raw, "status"),
-        findings: raw.findings.map(parseFinding),
-        usage: usageOf(raw.usage),
-        wallMs: num(raw, "wallMs"),
-      };
-    }
+    case "review":
+      return { at, kind, ...parseReview(raw) };
+    case "task_review":
+      return { at, kind, ...parseReview(raw), key: str(raw, "key"), taskId: str(raw, "taskId"), tree: str(raw, "tree"), base: str(raw, "base"), contracts: strOrNull(raw, "contracts") };
     case "merge":
       return { at, kind, from: str(raw, "from"), to: str(raw, "to"), queueMs: num(raw, "queueMs") };
     case "remote": {
@@ -676,6 +693,11 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         (fold.conflicts ??= []).push({ ...conflict, files: [...conflict.files] });
         break;
       }
+      case "task_review": {
+        const { kind: _kind, ...review } = event;
+        (fold.taskReviews ??= []).push({ ...review, findings: review.findings.map((finding) => ({ ...finding })) });
+        break;
+      }
       default:
         throw new Error(`kind ${JSON.stringify((event as { kind: unknown }).kind)} is no wave event`);
     }
@@ -786,7 +808,7 @@ export function stuckKeys(fold: WaveFold, states: TaskStates): string[] {
   const active = fold.tasks.some((task) => {
     if (task.taskId === null) return false;
     const state = states.get(task.key) ?? null;
-    return state === null || !RESTING_STATES.includes(state as State);
+    return state === null || !RESTING_STATES.includes(state as State) || FACTORY_TURN_STATES.includes(state as State);
   });
   return active ? [] : unreachable;
 }

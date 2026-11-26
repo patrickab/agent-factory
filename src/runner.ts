@@ -8,7 +8,8 @@
  *   `/factory start` with a coder model, Pi starts on it (`--model`, `piArgs`): a model set later in the session fires
  *   `model_select`, on which a user's extension may persist it into the worktree's `.pi/settings.json`
  * - Closes Pi's stdin once Pi answered the prompt, no agent run is active (`agent_start` .. `agent_settled`), no inbox
- *   line is unsent or unanswered and the task rests (`RESTING_STATES`). `/factory approve`, `/factory retry` and a plain
+ *   line is unsent or unanswered and the task rests (`RESTING_STATES`). `/factory approve`, `/factory retry`,
+ *   `/factory reviewed` and a plain
  *   message start at rest, so for them the task must first have left that rest: a `factory-state` entry written after
  *   the runner started. A `factory: ...` error notify before the answer means the command refused and changed nothing:
  *   stdin closes once no run is active. The merge runs after the settle, so the check repeats on every event and every
@@ -109,7 +110,7 @@ export async function lastFactoryState(sessionDir: string, sessionId: string): P
 }
 
 /** The commands that start from a resting state and must leave it before the runner may end. */
-const LEAVES_REST = /^\/factory\s+(approve|retry)(\s|$)/;
+const LEAVES_REST = /^\/factory\s+(approve|retry|reviewed)(\s|$)/;
 
 /** The sidecar of an inbox that holds how many of its bytes have been sent to Pi (`<inbox>.read`). */
 export function inboxReadPath(inboxPath: string): string {

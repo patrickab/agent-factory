@@ -6,6 +6,7 @@
  *   /factory approve                                  merge a task that waits for approve
  *   /factory retry                                    another coder turn on a blocked or cancelled task
  *   /factory cancel                                   kill the running command group, end `cancelled`
+ *   /factory reviewed {"round", "review"}             the wave reviewer's verdict on a task resting `reviewing`
  *   /factory models [add|remove|set ...]              the user's factory model list (`models.ts`, any session)
  *   /factory waves                                    show or hide the finished waves in this session's widget
  *
@@ -58,11 +59,12 @@ import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
-import { taskWave, waveMergeRefusal } from "../core.ts";
+import { taskWave, waveMergeRefusal, waveReviewsEach } from "../core.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
 import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "../pipeline.ts";
 import {
+  applyReviewed,
   approveTask,
   askSupervisor,
   cancelTask,
@@ -210,6 +212,10 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
       const dir = ctx.sessionManager.getSessionDir?.();
       return dir === undefined ? null : taskWave(dir, ctx.sessionManager.getSessionId());
     },
+    reviewEach: async () => {
+      const dir = ctx.sessionManager.getSessionDir?.();
+      return dir === undefined ? false : waveReviewsEach(dir, ctx.sessionManager.getSessionId());
+    },
   });
 
   const command = (args: string, ops: OpsDeps): Promise<OpResult> => {
@@ -226,6 +232,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     if (verb === "approve") return approveTask(ops);
     if (verb === "retry") return retryTask(ops);
     if (verb === "cancel") return cancelTask(ops);
+    if (verb === "reviewed") return applyReviewed(ops, text.slice(verb.length).trim());
     return Promise.resolve({ ok: false, error: `unknown command "${verb}"` });
   };
 

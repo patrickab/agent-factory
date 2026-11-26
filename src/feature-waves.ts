@@ -38,6 +38,11 @@ export const WAVES = feature({
             "Contracts (memory-store directories run/contract/<name>/ or documents run/contract/<name>.md in plan) the wave's coders work by; core is added when it exists. Needs plan and memory-store on PATH",
         },
         overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, remote: REMOTE } },
+        reviewEach: {
+          type: "boolean",
+          description:
+            "The wave's reviewer judges each task once its gates passed (the task rests reviewing): blocker and major findings start the task's next round within maxRounds (out of rounds: blocked), else it merges. Default false: one review of the whole wave",
+        },
       },
       ["repo", "tag", "title", "request", "tasks"],
       true,

@@ -16,7 +16,7 @@ import { findProof, proofNeedsAttention, proofRests, proofView, type ProofView }
 import { findWave, queueLook, queueStalled, waveLook, type WaveLook } from "./core-waves.ts";
 import { liveRunners } from "./launch.ts";
 import { readFactoryStates, sessionFilePath } from "./runner.ts";
-import type { State } from "./state.ts";
+import { FACTORY_TURN_STATES, type State } from "./state.ts";
 import { listTasks, tagInGroup, type TaskRecord } from "./tasks.ts";
 import { foldWave, listWaves, readWave, RESTING_WAVE_STAGES, stuckKeys, type WaveFile, type WaveStage, type WaveView } from "./waves.ts";
 import { liveWaveRunners } from "./wave-poke.ts";
@@ -47,7 +47,8 @@ async function waitMayEnd(records: TaskRecord[], states: (State | null)[], waves
   const runs = async (record: TaskRecord) => (await liveRunners(record)).length > 0;
   for (const [index, record] of records.entries()) {
     const state = states[index];
-    if (state !== null && state !== "done" && !(await runs(record))) return true;
+    // A task waiting for its wave's reviewer (`FACTORY_TURN_STATES`) is the factory's to move on.
+    if (state !== null && state !== "done" && !FACTORY_TURN_STATES.includes(state) && !(await runs(record))) return true;
   }
   if (wavesBusy || states.some((state) => state !== "done")) return false;
   for (const record of records) if (await runs(record)) return false;

@@ -5,8 +5,13 @@
  *   `execute()` runs, and `terminate: true` ends the run on the call
  * - The parent reads the findings from `details.findings` of the tool result (`review.ts`). Whether the review
  *   approves is derived there from the severities, so the tool does not ask for it
+ * - Provides `read_diff({paths?})` when the factory names a diff file (`REVIEW_DIFF_ENV`, a `TaskDiff` as JSON, written
+ *   by `review-each.ts` per review): the only way the diff reaches a task's reviewer. Lockfiles last, cut as the review
+ *   patch is (`reviewPatch`); `paths` keeps only those files (or directories)
  */
+import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { REVIEW_DIFF_ENV, readDiffText } from "../review-diff.ts";
 
 const parameters = {
   type: "object",
@@ -37,6 +42,20 @@ const parameters = {
 };
 
 export default function (pi: ExtensionAPI) {
+  const diffFile = process.env[REVIEW_DIFF_ENV];
+  if (diffFile) {
+    pi.registerTool({
+      name: "read_diff",
+      label: "Read diff",
+      description: "The diff under review: every changed path first, then the patch (lockfiles last). paths: only these files or directories.",
+      promptSnippet: "Read the diff under review",
+      parameters: { type: "object", properties: { paths: { type: "array", items: { type: "string" }, description: "Only these files or directories" } } },
+      async execute(_toolCallId, params) {
+        const { paths } = params as { paths?: string[] };
+        return { content: [{ type: "text", text: readDiffText(readFileSync(diffFile, "utf8"), paths) }], details: {} };
+      },
+    });
+  }
   pi.registerTool({
     name: "submit_verdict",
     label: "Submit verdict",

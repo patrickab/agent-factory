@@ -134,6 +134,8 @@ function taskStateLines(view: TaskView): string[] {
       return labelled(indent, "question: ", view.question ?? "(the question is not recorded)");
     case "waiting_approve":
       return [`${indent}waits for tasks.approve`];
+    case "reviewing":
+      return [`${indent}waits for its wave's reviewer`];
     case "blocked": {
       const lines = view.failure === null ? [] : labelled(indent, "failure: ", tailLines(view.failure));
       const review = view.review;

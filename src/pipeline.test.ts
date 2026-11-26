@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_PROTECTED, type FactoryConfig } from "./config.ts";
-import { runMerge, runRound, type PipelineSteps } from "./pipeline.ts";
+import { reviewedDrafts, runMerge, runRound, type PipelineSteps } from "./pipeline.ts";
 import type { CommandResult } from "./run.ts";
 import { type Draft, type MergeData, type ReviewData, type ReviewStatus, type Settings, type Snapshot } from "./state.ts";
 
@@ -357,5 +357,52 @@ describe("runMerge", () => {
   test("a merge that fails under a cancel ends cancelled", async () => {
     const entries = await runMerge(snapshotOf(), config, fakeSteps({ cancelled: () => true, merge: async () => ({ gates: [], result: { kind: "failed", merge: failed } }) }));
     expect(lastState(entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
+  });
+});
+
+describe("review per task (reviewEach)", () => {
+  test("a passed round of a reviewEach wave's task rests reviewing: no review of its own, no merge", async () => {
+    const steps = fakeSteps({ reviewEach: async () => true });
+    const result = await runRound(snapshotOf(), steps);
+    expect(steps.calls).toEqual(["fmt", "lint", "test"]);
+    expect(lastState(result.entries)).toEqual({ state: "reviewing", round: 1, reason: "passed" });
+    expect(result.continue).toBe(false);
+  });
+
+  test("without reviewEach the round is as before", async () => {
+    const steps = fakeSteps({ reviewEach: async () => false });
+    const result = await runRound(snapshotOf(), steps);
+    expect(steps.calls).toContain("review");
+    expect(lastState(result.entries)?.state).toBe("merging");
+  });
+
+  test("approved: the review is recorded and the task merges; minor findings start no round", () => {
+    const snapshot = { ...snapshotOf(), state: "reviewing" as const };
+    const result = reviewedDrafts(snapshot, reviewOf("ok", ["minor"]));
+    expect(kinds(result.entries)).toEqual(["factory-review", "factory-state"]);
+    expect(lastState(result.entries)).toEqual({ state: "merging", round: 1, reason: "approved" });
+  });
+
+  test("a major finding: the next round with only the blocker and major findings, within the run's rounds", () => {
+    const snapshot = { ...snapshotOf(), state: "reviewing" as const };
+    const result = reviewedDrafts(snapshot, reviewOf("ok", ["major", "minor"]));
+    expect(result.continue).toBe(true);
+    expect(kinds(result.entries)).toEqual(["factory-review", "factory-round", "custom_message", "factory-state"]);
+    expect(lastState(result.entries)).toEqual({ state: "running", round: 2, reason: "review" });
+    const feedback = result.entries.find((entry) => entry.type === "custom_message");
+    expect(feedback?.type === "custom_message" && feedback.content).toContain("[major] a.ts:1: major problem");
+    expect(feedback?.type === "custom_message" && feedback.content).not.toContain("minor problem");
+  });
+
+  test("out of rounds: blocked, max_rounds: review", () => {
+    const snapshot = { ...snapshotOf({ maxRounds: 2 }, 2, 1), state: "reviewing" as const };
+    const result = reviewedDrafts(snapshot, reviewOf("ok", ["blocker"]));
+    expect(result.continue).toBe(false);
+    expect(lastState(result.entries)).toEqual({ state: "blocked", round: 2, reason: "max_rounds: review" });
+  });
+
+  test("no verdict blocks the task", () => {
+    const snapshot = { ...snapshotOf(), state: "reviewing" as const };
+    expect(lastState(reviewedDrafts(snapshot, reviewOf("malformed")).entries)).toEqual({ state: "blocked", round: 1, reason: "review_malformed" });
   });
 });

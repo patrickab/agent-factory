@@ -36,7 +36,7 @@ import {
 import { inboxReadPath, readFactoryStates, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { runCommand } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
-import { COMMIT_ASK_TYPE, isFactoryPrompt, messageText, minorFindings, normalizeModels, parseSettingsFields, RESTING_STATES, type Finding, type MinorFinding, type Settings, type State } from "./state.ts";
+import { COMMIT_ASK_TYPE, FACTORY_TURN_STATES, isFactoryPrompt, messageText, minorFindings, normalizeModels, parseSettingsFields, RESTING_STATES, type Finding, type MinorFinding, type Settings, type State } from "./state.ts";
 import { listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLogPath, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { cents, errorText, isRecord } from "./util.ts";
 import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
@@ -442,9 +442,12 @@ function refuseMergeRequest(record: TaskRecord, what: string): void {
   if (record.kind === "merge_request") throw new FactoryError("refused", `task ${shortId(record)} is an old merge request: ${what} is refused, it can only be removed`);
 }
 
-/** No runner lives and nothing moves the task on by itself: its state is a resting one, or it is interrupted. */
+/**
+ * No runner lives and nothing moves the task on by itself: its state is a resting one, or it is interrupted. A task
+ * waiting for the factory (`FACTORY_TURN_STATES`: its wave's reviewer) does not rest.
+ */
 export function rests(view: TaskView): boolean {
-  return !view.running && (view.interrupted || (view.state !== null && RESTING_STATES.includes(view.state)));
+  return !view.running && (view.interrupted || (view.state !== null && RESTING_STATES.includes(view.state) && !FACTORY_TURN_STATES.includes(view.state)));
 }
 
 /** It rests and waits for someone: every resting state but `done`. */
