@@ -332,7 +332,7 @@ export async function runProof(id: string): Promise<void> {
     const emptyTree = await git(runner.cleanup, path, ["hash-object", "-t", "tree", "/dev/null"]);
     for (const argv of hooked ? config.merge_gates : []) {
       log(id, `gate ${argv.join(" ")}`);
-      const step = await runGateStep(argv, () => runner.run(argv, { cwd: path, env: { FACTORY_BASE: emptyTree } }), () => stopping);
+      const step = await runGateStep(argv, (env) => runner.run(argv, { cwd: path, env: { ...env, FACTORY_BASE: emptyTree } }), () => stopping);
       const ok = passed(step.result);
       await appendEvent(id, { kind: "step", command: argv.join(" "), passed: ok, wallMs: step.result.durationMs, ...(step.flaky === null ? {} : { flaky: step.flaky }) });
       flaky.push(...(step.flaky ?? []));

@@ -307,7 +307,7 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
     try {
       for (const argv of config.merge_gates) {
         log(id, `gate ${argv.join(" ")}`);
-        const { result, flaky } = await runGateStep(argv, () => runner.run(argv, { cwd: root }), () => stopping);
+        const { result, flaky } = await runGateStep(argv, (env) => runner.run(argv, { cwd: root, env }), () => stopping);
         gates.push({ argv, result, passed: passed(result), flaky });
         if (!passed(result)) break;
       }
@@ -417,6 +417,7 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
     status,
     asIs: true,
     gated,
+    stop: () => stopping,
   });
   const gates = outcome.gates.filter((gate: GateData) => gate.phase === "merge_gates");
   const gate = gates.length === 0 ? [] : [gateEvent("merge", gates.map((data) => ({ result: { output: data.outputTail, durationMs: data.durationMs }, passed: data.exitCode === 0 && !data.killed, flaky: data.flaky })))];

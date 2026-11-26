@@ -12,13 +12,16 @@
  * - `factory actions [<name>]`: one line per action, or one action's params in full; with `--json` the `ACTIONS` map
  *   (or the one action's spec) as JSON. `factory --core-path`: the absolute path of `core.ts`.
  *   `factory --help`: one line per action with its summary
+ * - `factory slot -- <command...>`: runs the command holding a test slot (`test-slots.ts`), its exit code passed
+ *   through; with `FACTORY_SLOT_HELD` set it runs it directly. For test runs outside the factory's gates
  */
 import { join } from "node:path";
 import { agentActions, agentError, agentView, hasAgentView } from "./agent-view.ts";
 import { ACTIONS, callAction, FactoryError } from "./core.ts";
+import { runInSlot } from "./test-slots.ts";
 import { errorText } from "./util.ts";
 
-const USAGE = "usage: factory <action> [<json params> | -] [--json] | factory actions [<name>] [--json] | factory --core-path | factory --help";
+const USAGE = "usage: factory <action> [<json params> | -] [--json] | factory actions [<name>] [--json] | factory slot -- <command...> | factory --core-path | factory --help";
 const JSON_FLAG = "--json";
 /** Actions whose answer is a log for programs: JSON, with or without `--json`. */
 const ALWAYS_JSON: readonly string[] = ["tasks.timeline", "waves.timeline"];
@@ -57,6 +60,21 @@ function actions(name: string | undefined, json: boolean): number {
   return 0;
 }
 
+/** `factory slot -- <command...>`. */
+async function slot(args: string[]): Promise<number> {
+  const argv = args[0] === "--" ? args.slice(1) : args;
+  if (argv.length === 0) {
+    process.stderr.write(`${USAGE}\n`);
+    return 2;
+  }
+  try {
+    return await runInSlot(argv);
+  } catch (error) {
+    process.stderr.write(`factory: slot: ${errorText(error)}\n`);
+    return 127;
+  }
+}
+
 async function main(args: string[]): Promise<number> {
   const [first, ...rest] = args;
   if (first === "--help" || first === "-h") {
@@ -67,6 +85,7 @@ async function main(args: string[]): Promise<number> {
     process.stdout.write(`${join(import.meta.dirname, "core.ts")}\n`);
     return 0;
   }
+  if (first === "slot") return slot(rest);
   const json = rest.includes(JSON_FLAG);
   const positional = rest.filter((arg) => arg !== JSON_FLAG);
   if (first === undefined || positional.length > 1) {

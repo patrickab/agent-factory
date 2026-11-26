@@ -49,7 +49,8 @@ export interface PipelineSteps {
   pendingMessages(): boolean;
   config(): FactoryConfig;
   /** Runs a hook or gate in the task's checkout. */
-  runCommand(argv: string[]): Promise<CommandResult>;
+  /** `env`: added to the command's environment (a gate's test slot). */
+  runCommand(argv: string[], env?: Record<string, string>): Promise<CommandResult>;
   diff(): Promise<TaskDiff>;
   review(round: number, diff: TaskDiff): Promise<ReviewData>;
   merge(config: FactoryConfig): Promise<MergeOutcome>;
@@ -166,7 +167,7 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
       for (const argv of commands) {
         steps.status(`round ${round}: ${phase} ${argv.join(" ")}`);
         // A failed gate runs once more before it counts (`runGateStep`); hooks run once.
-        const { result, flaky } = phase === "gates" ? await runGateStep(argv, () => steps.runCommand(argv), steps.cancelled) : { result: await steps.runCommand(argv), flaky: null };
+        const { result, flaky } = phase === "gates" ? await runGateStep(argv, (env) => steps.runCommand(argv, env), steps.cancelled) : { result: await steps.runCommand(argv), flaky: null };
         drafts.push(customDraft("factory-gate", gateData(round, phase, argv, result, flaky)));
         if (steps.cancelled()) return end("cancelled", "cancelled");
         if (result.exitCode === INFRA_EXIT && !result.killed) return end("blocked", `infra: ${lastLine(result.output)}`);

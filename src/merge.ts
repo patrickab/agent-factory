@@ -97,6 +97,8 @@ export interface MergeInput {
   baseEnv?: boolean;
   /** A commit these gates already passed on (a wave's review): they are skipped when the rebased HEAD is that commit. */
   gated?: string | null;
+  /** Ends a wait for a test slot (a cancel, a stopping runner). */
+  stop?: () => boolean;
 }
 
 export type GateFailure = { argv: string[]; result: CommandResult };
@@ -232,7 +234,7 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       try {
         for (const argv of skip ? [] : mergeGates) {
           status(`merge gate ${argv.join(" ")}`);
-          const { result: gate, flaky } = await runGateStep(argv, () => exec(argv, { cwd: root, ...(env ? { env } : {}) }));
+          const { result: gate, flaky } = await runGateStep(argv, (slot) => exec(argv, { cwd: root, env: { ...slot, ...env } }), input.stop);
           gates.push(gateData(round, "merge_gates", argv, gate, flaky));
           if (!passed(gate)) return { kind: "gate_failed", gate: { argv, result: gate } };
         }

@@ -42,6 +42,7 @@ import { cents, errorText, isRecord } from "./util.ts";
 import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
 import { pokeWave } from "./wave-poke.ts";
 import { addScoutUsage, cancelScouts, scoutUsage } from "./scouts.ts";
+import { slotWaiting } from "./test-slots.ts";
 
 /** A task as every client sees it. `running`: a live runner holds the task. */
 export interface TaskView {
@@ -69,6 +70,8 @@ export interface TaskView {
   running: boolean;
   /** The state is `running` or `merging` but no runner lives (it crashed, or the host rebooted). */
   interrupted: boolean;
+  /** Its runner waits for a test slot (`test-slots.ts`) to run a gate; absent otherwise. */
+  waitingForSlot?: true;
   /** The settings of the session's `factory-task` entry, null before it. */
   settings: Settings | null;
   /** Coder messages, reviews and the task's scouts together; `input` is uncached input tokens. Null before any. */
@@ -286,7 +289,9 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
   }
   const scouting = await scoutUsage({ kind: "task", id: record.id });
   usage = addScoutUsage(usage, scouting) as TaskView["usage"];
-  const running = (await liveRunners(record)).length > 0;
+  const runners = await liveRunners(record);
+  const running = runners.length > 0;
+  const waitingForSlot = await slotWaiting(runners);
   const view: Omit<TaskView, "actions"> = {
     id: record.id,
     repo: record.repo,
@@ -312,6 +317,7 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
     scoutingCost: cents(scouting?.cost ?? 0),
     ...taskOutcome(entries, last?.state === "blocked"),
     flaky: flakyNames(entries),
+    ...(waitingForSlot ? { waitingForSlot } : {}),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
   const continuable = waveStage === null || waveStage === "building";

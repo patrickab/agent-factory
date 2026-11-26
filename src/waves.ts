@@ -188,6 +188,8 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   detail: string | null;
   running: boolean;
   interrupted: boolean;
+  /** Its runner waits for a test slot (`test-slots.ts`) to run a merge gate; absent otherwise. */
+  waitingForSlot?: true;
   /** `id`: the task's id, a pending one's too (declared with it); absent for a pending task of an old log. */
   tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null; id?: string }[];
   counts: { total: number; done: number };

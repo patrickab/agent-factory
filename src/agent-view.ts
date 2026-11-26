@@ -139,8 +139,13 @@ function taskStateLines(view: TaskView): string[] {
 }
 
 /** One task: header, title, the lines of its state, `next:`. Exported for notifications. */
+/** `waiting for a test slot` while its runner waits for one to run a gate. */
+function slotLine(view: { waitingForSlot?: true }): string[] {
+  return view.waitingForSlot ? ["  waiting for a test slot"] : [];
+}
+
 export function taskBlock(view: TaskView): string {
-  return scrub([taskHeader(view), `  ${view.title}`, ...taskStateLines(view), ...flakyLine(view.flaky), `  ${taskNext(view)}`].join("\n"));
+  return scrub([taskHeader(view), `  ${view.title}`, ...taskStateLines(view), ...slotLine(view), ...flakyLine(view.flaky), `  ${taskNext(view)}`].join("\n"));
 }
 
 /** One line of a list: the header and the title. */
@@ -339,7 +344,7 @@ function updateLines(view: WaveView): string[] {
 export function waveBlock(view: WaveView): string {
   const next = view.actions.length === 0 ? "next: none, it runs" : `next: ${view.actions.join(", ")}`;
   const flaky = [...new Set(view.gates.flatMap((gate) => gate.flaky ?? []))];
-  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...flakyLine(flaky), ...updateLines(view), ...feedbackLines(view), `  ${next}`].join("\n"));
+  return scrub([waveHeader(view), `  ${view.title}`, ...waveStageLines(view), ...slotLine(view), ...flakyLine(flaky), ...updateLines(view), ...feedbackLines(view), `  ${next}`].join("\n"));
 }
 
 export function waveList(waves: WaveView[]): string {

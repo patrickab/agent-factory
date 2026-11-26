@@ -57,6 +57,7 @@ import {
 import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
 import { cancelScouts, scoutUsage } from "./scouts.ts";
 import { waveFeedback } from "./feedback.ts";
+import { slotWaiting } from "./test-slots.ts";
 
 export type WaveActionName = "waves.add" | "waves.retry" | "waves.approve" | "waves.cancel" | "waves.remove";
 
@@ -280,7 +281,9 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[]): Promise<Wave
   const full = foldWave(file.declaration, file.events);
   const { overrides: _overrides, ...fold } = full;
   const { states, views } = await waveTaskViews(full);
-  const running = (await liveWaveRunners(fold.id)).length > 0;
+  const runners = await liveWaveRunners(fold.id);
+  const running = runners.length > 0;
+  const waitingForSlot = await slotWaiting(runners);
   const waves = all ?? (await listWaves());
   const queue = fold.stage === "queued" ? await queueLook(full, waves) : null;
   const stuck = (fold.stage === "building" && stuckKeys(full, states).length > 0) || (queue !== null && queue.never !== null);
@@ -311,7 +314,7 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[]): Promise<Wave
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
   const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
   const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
-  return { view: { ...fold, reviews, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, scoutingCost, actions }, stuck };
+  return { view: { ...fold, reviews, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, scoutingCost, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, stuck };
 }
 
 /**

@@ -208,7 +208,7 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
     cancelled: () => runner.cancelled,
     pendingMessages: () => deps.hasPendingMessages(),
     config: () => taskFilesNow.config,
-    runCommand: (argv) => runner.run(argv, { cwd: root }),
+    runCommand: (argv, env) => runner.run(argv, { cwd: root, ...(env ? { env } : {}) }),
     diff: async () => taskDiff(runner.run, root, await taskBase(runner.run, root, task), taskFilesNow.config.lockfiles),
     review: (round, diff) =>
       runReview({
@@ -236,7 +236,7 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
       // A wave's task: what its change reaches, not the whole suite (the wave runs that once, before its reviewer).
       const inWave = ((await deps.wave?.()) ?? null) !== null;
       const gates = inWave ? { gates: [...config.gates, ...config.task_gates], baseEnv: true } : {};
-      return mergeTask({ exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent, status: mergeStatus, message, ...gates });
+      return mergeTask({ exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent, status: mergeStatus, message, stop: () => runner.cancelled, ...gates });
     },
     openRebase: () => rebaseInProgress(runner.run, root),
     // A follow-up on a merged task is a new commit of its own: the task title already named the first one.
