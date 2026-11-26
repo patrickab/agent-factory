@@ -670,8 +670,8 @@ describe("waves", () => {
       await appendWaveEvent(id, { kind: "start", branch: "main-factory-w3", base });
       git(repo, "branch", "main-factory-w3", base);
       await merge(repo, p2);
-      // The wave is not `building` here (its runner died), so `waveLanded` skips it and `merge` runs no sync: the
-      // branch stays on `base`. The forced move stands in for the sync a live runner's merge would do.
+      // The test's `merge` helper is a plain `git merge` plus a `merged` event and runs no `waveLanded`: the branch
+      // stays on `base`. The forced move stands in for the sync p2's runner would do at its merge.
       expect(git(repo, "rev-parse", "main-factory-w3")).toBe(base);
       git(repo, "branch", "-f", "main-factory-w3", "main");
       await callAction("waves.retry", { id });

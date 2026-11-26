@@ -178,6 +178,8 @@ describe("cardsToRule and the widget", () => {
   test("a quiet contract notice keeps an open rejection of its wave", () => {
     const rejected = noticeEntry("wave:bbbb2222:rejected:3", "attention");
     expect(cardsToRule([rejected, noticeEntry("wave:bbbb2222:contract:4", "quiet")])).toBe(1);
+    expect(cardsToRule([rejected, noticeEntry("wave:bbbb2222:note:4", "quiet")])).toBe(1);
+    expect(cardsToRule([rejected, noticeEntry("wave:bbbb2222:fix:4", "quiet")])).toBe(1);
     expect(cardsToRule([rejected, noticeEntry("wave:bbbb2222:merged:5", "quiet")])).toBe(0);
   });
 
