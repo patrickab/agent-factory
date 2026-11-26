@@ -49,6 +49,12 @@ What the factory is and how it works: `README.md`. Its views: `VIEWS.md`. Open w
 - A reviewer's context holds no diff of an earlier round
 - Test runs share the machine: no gate may start processes outside the shared limit
 
+## Simplicity
+
+- Always the simplest and most maintainable solution: little code, easy to follow, one home for each piece of data and one path to read it. A feature that adds a second path beside an existing one, or a copy of data that already lives somewhere, is designed again first
+- A fallback exists only for a failure that really happens. Tests cover the behaviour someone relies on, not every clause
+- The codebase must stay small enough to keep in one's head: a change that removes code is as welcome as one that adds a feature
+
 ## Working on this repository
 - The `factory` command on this machine runs from the checkout `~/git/agent-factory`. Work in a worktree on a
   development branch; merge into the default branch only while no wave of any repository is running
