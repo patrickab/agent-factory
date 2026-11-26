@@ -133,7 +133,7 @@ export async function rebaseWorktree(exec: Exec, cleanup: Exec, root: string, ta
     await commitWorktree(exec, root, message, protectedGlobs);
     await squashOntoBase(exec, root, task, message);
   }
-  const rebase = await exec(["git", "rebase", "--autostash", `refs/heads/${task.mainBranch}`], { cwd: root });
+  const rebase = await continueResolved(exec, cleanup, root, task.mainBranch, await exec(["git", "rebase", "--autostash", `refs/heads/${task.mainBranch}`], { cwd: root }));
   if (passed(rebase)) {
     // An autostash that did not apply cleanly leaves conflict markers, which the next commit would take.
     const unmerged = nulList(await git(exec, root, ["diff", "--name-only", "--diff-filter=U", "-z"]));
@@ -145,6 +145,34 @@ export async function rebaseWorktree(exec: Exec, cleanup: Exec, root: string, ta
   if (open !== null || rebase.killed) await cleanup(["git", "rebase", "--abort"], { cwd: root });
   if (conflicts.length > 0 && !rebase.killed) return conflicts;
   throw new Error(`rebase onto ${task.mainBranch} failed: ${outputTail(rebase.output)}`);
+}
+
+/**
+ * A rebase that stopped although git's rerere staged a recorded resolution for every conflict: no unmerged path, no
+ * conflict marker in what is staged. Continues it, once per commit of the branch at most, while it stops that way, and
+ * logs the files so resolved. Answers the last rebase command's result; any other state is left as it is for the
+ * caller (a stop on unmerged paths, a killed command, a failure), which aborts the rebase as before.
+ */
+async function continueResolved(exec: Exec, cleanup: Exec, root: string, mainBranch: string, rebase: CommandResult): Promise<CommandResult> {
+  try {
+    let left: number | null = null;
+    while (!passed(rebase) && !rebase.killed) {
+      const open = await rebaseInProgress(cleanup, root);
+      if (open === null || open.length > 0) return rebase;
+      const staged = nulList(await git(cleanup, root, ["diff", "--cached", "--name-only", "-z"]));
+      if (staged.length === 0) return rebase;
+      const check = await cleanup(["git", "diff", "--cached", "--check"], { cwd: root });
+      if (check.output.includes("leftover conflict marker")) return rebase;
+      left ??= Number(await git(cleanup, root, ["rev-list", "--count", `refs/heads/${mainBranch}..ORIG_HEAD`]));
+      if (!(left > 0)) return rebase;
+      left--;
+      console.error(`merge: the rebase onto ${mainBranch} in ${root} stopped on conflicts git's rerere resolved, continuing: ${staged.join(", ")}`);
+      rebase = await exec(["git", "rebase", "--continue"], { cwd: root, env: { GIT_EDITOR: "true" } });
+    }
+  } catch (error) {
+    console.error(`merge: looking at the stopped rebase onto ${mainBranch} in ${root}: ${errorText(error)}`);
+  }
+  return rebase;
 }
 
 /**

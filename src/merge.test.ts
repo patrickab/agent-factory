@@ -354,6 +354,71 @@ describe("mergeTask", () => {
     expect(gitIn(repo(), "log", "--format=%s")).toBe("moved\nmain edit\nbase");
   });
 
+  describe("a rebase git's rerere already resolved", () => {
+    /**
+     * A branch of two commits that each conflict with main on their own file, and resolutions recorded for both by a
+     * rebase of a copy of it (`f-resolution` and `h-resolution` the resolved texts). Answers the branch's worktree.
+     */
+    function recorded(branch: string, fResolution: string, hResolution: string): string {
+      gitIn(repo(), "config", "rerere.enabled", "true");
+      gitIn(repo(), "config", "rerere.autoupdate", "true");
+      writeFileSync(join(repo(), "f.txt"), "f\nbase\n");
+      writeFileSync(join(repo(), "h.txt"), "h\nbase\n");
+      gitIn(repo(), "add", "-A");
+      gitIn(repo(), "commit", "--quiet", "-m", "f and h");
+      const worktree = addWorktree(branch);
+      writeFileSync(join(worktree, "f.txt"), "f\ntask\n");
+      gitIn(worktree, "commit", "--quiet", "-am", "task f");
+      writeFileSync(join(worktree, "h.txt"), "h\ntask\n");
+      gitIn(worktree, "commit", "--quiet", "-am", "task h");
+      writeFileSync(join(repo(), "f.txt"), "f\nmain\n");
+      writeFileSync(join(repo(), "h.txt"), "h\nmain\n");
+      gitIn(repo(), "commit", "--quiet", "-am", "main f and h");
+      // Recording: a copy of the branch rebased by hand, each conflict resolved.
+      gitIn(worktree, "branch", `${branch}-copy`);
+      const copy = join(scratch, `wt-${caseSerial()}-${branch}-copy`);
+      gitIn(repo(), "worktree", "add", "--quiet", copy, `${branch}-copy`);
+      const step = (args: string[]) => execFileSync("git", ["-C", copy, ...args], { stdio: "ignore", env: { ...process.env, GIT_EDITOR: "true" } });
+      expect(() => step(["rebase", "main"])).toThrow();
+      writeFileSync(join(copy, "f.txt"), fResolution);
+      step(["add", "f.txt"]);
+      expect(() => step(["rebase", "--continue"])).toThrow();
+      writeFileSync(join(copy, "h.txt"), hResolution);
+      step(["add", "h.txt"]);
+      step(["rebase", "--continue"]);
+      return worktree;
+    }
+
+    test("is continued over every commit and keeps the recorded resolutions", async () => {
+      const worktree = recorded("task-rr", "f\nboth\n", "h\nboth\n");
+      const task = await taskIn(worktree);
+
+      expect(await rebaseWorktree(runner.run, runner.cleanup, worktree, task, [], task.title, true)).toBeNull();
+
+      expect(gitIn(worktree, "log", "--format=%s")).toBe("task h\ntask f\nmain f and h\nf and h\nbase");
+      expect(readFileSync(join(worktree, "f.txt"), "utf8")).toBe("f\nboth\n");
+      expect(readFileSync(join(worktree, "h.txt"), "utf8")).toBe("h\nboth\n");
+      expect(gitIn(worktree, "status", "--porcelain")).toBe("");
+      expect(gitIn(worktree, "symbolic-ref", "--short", "HEAD")).toBe("task-rr");
+    });
+
+    test("a recorded resolution with a conflict marker is aborted as before", async () => {
+      const worktree = recorded("task-rm", "f\nboth\n", "h\nboth\n");
+      // git records no resolution that holds a marker: one is put into the recorded resolution of `f.txt` by hand.
+      const cache = join(repo(), ".git", "rr-cache");
+      const postimages = readdirSync(cache).map((id) => join(cache, id, "postimage")).filter((path) => readFileSync(path, "utf8") === "f\nboth\n");
+      expect(postimages).toHaveLength(1);
+      writeFileSync(postimages[0]!, "f\n<<<<<<< ours\nboth\n");
+      const task = await taskIn(worktree);
+      const head = gitIn(worktree, "rev-parse", "HEAD");
+
+      await expect(rebaseWorktree(runner.run, runner.cleanup, worktree, task, [], task.title, true)).rejects.toThrow("rebase onto main failed");
+
+      expect(gitIn(worktree, "rev-parse", "HEAD")).toBe(head);
+      expect(gitIn(worktree, "status", "--porcelain")).toBe("");
+    });
+  });
+
   describe("a failed merge gate runs once more", () => {
     /** A task with a change whose merge gates run (main moved), and a count file its gate appends to. */
     function moved(branch: string): { worktree: string; count: string; runs: () => number } {
