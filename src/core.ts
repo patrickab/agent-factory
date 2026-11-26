@@ -32,6 +32,7 @@ import { SETTINGS_HANDLERS } from "./core-settings.ts";
 import { TASK_HANDLERS } from "./core-tasks.ts";
 import { WAIT_HANDLERS } from "./core-wait.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
+import { SCOUT_HANDLERS } from "./core-scouts.ts";
 import { TaskBusyError } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 
@@ -248,6 +249,25 @@ export const ACTIONS = {
     ["id"],
     true,
   ),
+  "scouts.start": spec(
+    "Start a scout: a read-only pi child on the project's small model in the caller's working directory that answers a concern from the map (memory-store map/ of the task's or wave's plan, else store), explores where the map is not current, writes what it learns there and reports MISSING / DECISIONS / KEY FACTS / MEMORY. At most four of a caller run, more queue. Answers {scout, timedOut}",
+    {
+      concern: { type: "string", description: "What the scout finds out" },
+      questions: { type: "array", items: { type: "string" }, description: "Questions the report answers" },
+      wait: { type: "boolean", description: "Answer once the scout reported, after 15 minutes at the latest with what it wrote so far; default false: answer with its id at once" },
+      store: { type: "string", description: "The memory-store whose map/ the scout reads and writes; a task's or wave's plan wins" },
+      repo: { type: "string", description: "The directory the scout explores. Default: the current directory" },
+    },
+    ["concern"],
+    true,
+  ),
+  "scouts.get": spec("One scout: caller, concern, state, usage, report, the map paths it wrote. Answers {scout}", { id: { type: "string", description: "The scout id or a unique prefix of it" } }, ["id"], false),
+  "scouts.list": spec(
+    "Every scout, or the repository's, or a caller's, with state, cost and caller. Answers {scouts}",
+    { repo: { type: "string", description: "Only the scouts of this repository" }, caller: { type: "string", description: "Only the scouts of this caller: a task, wave or session id or a prefix of it" } },
+    [],
+    false,
+  ),
 } satisfies Record<string, ActionSpec>;
 
 export type ActionName = keyof typeof ACTIONS;
@@ -305,7 +325,7 @@ let handlers: Record<ActionName, Handler> | undefined;
  * module, so an area module loaded first may not have finished when this one runs.
  */
 function handlersByName(): Record<ActionName, Handler> {
-  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS };
+  handlers ??= { ...SETTINGS_HANDLERS, ...TASK_HANDLERS, ...WAIT_HANDLERS, ...WAVE_HANDLERS, ...SCOUT_HANDLERS };
   return handlers;
 }
 

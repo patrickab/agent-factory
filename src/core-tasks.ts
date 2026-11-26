@@ -42,6 +42,7 @@ import { listTasks, lockTask, parseTaskRecord, tagInGroup, TaskBusyError, taskLo
 import { errorText, isRecord } from "./util.ts";
 import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
 import { pokeWave } from "./wave-poke.ts";
+import { addScoutUsage, cancelScouts, scoutUsage } from "./scouts.ts";
 
 /** A task as every client sees it. `running`: a live runner holds the task. */
 export interface TaskView {
@@ -71,8 +72,10 @@ export interface TaskView {
   interrupted: boolean;
   /** The settings of the session's `factory-task` entry, null before it. */
   settings: Settings | null;
-  /** Coder messages and reviews together; `input` is uncached input tokens. Null before either. */
+  /** Coder messages, reviews and the task's scouts together; `input` is uncached input tokens. Null before any. */
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number } | null;
+  /** The part of `usage.cost` its scouts spent (cancelled and killed ones too). Always set by the core. */
+  scoutingCost?: number;
   /** The coder's last message (its text), null before one. The answer to the commit message ask does not count. Added in factory/w2. */
   lastMessage: string | null;
   /**
@@ -208,10 +211,14 @@ function taskOutcome(entries: Record<string, unknown>[], blocked: boolean): Pick
   return { lastMessage, failure: blocked ? (failedGate ?? mergeError) : null, review, merged };
 }
 
-/** The unrounded usage of a task view, for sums (the view itself shows cost in cents). */
+/** The unrounded usage of a task view, for sums (the view itself shows cost in cents), and the unrounded scouting cost. */
 const unroundedUsage = new WeakMap<object, NonNullable<TaskView["usage"]>>();
+const unroundedScouting = new WeakMap<object, number>();
 export function rawUsage(view: TaskView): TaskView["usage"] {
   return unroundedUsage.get(view) ?? view.usage;
+}
+export function rawScoutingCost(view: TaskView): number {
+  return unroundedScouting.get(view) ?? view.scoutingCost ?? 0;
 }
 
 /** Cost in cents. */
@@ -254,6 +261,8 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
       addUsage(input, output, isRecord(cost) ? cost.total : undefined, cacheRead, cacheWrite);
     }
   }
+  const scouting = await scoutUsage({ kind: "task", id: record.id });
+  usage = addScoutUsage(usage, scouting) as TaskView["usage"];
   const running = (await liveRunners(record)).length > 0;
   const view: Omit<TaskView, "actions"> = {
     id: record.id,
@@ -277,12 +286,14 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
     interrupted: last !== null && !RESTING_STATES.includes(last.state) && !running,
     settings,
     usage: usage === null ? null : { ...(usage as NonNullable<TaskView["usage"]>), cost: cents((usage as NonNullable<TaskView["usage"]>).cost) },
+    scoutingCost: cents(scouting?.cost ?? 0),
     ...taskOutcome(entries, last?.state === "blocked"),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
   const continuable = waveStage === null || waveStage === "building";
   const result = { ...view, actions: taskActions(view, record.kind === "merge_request", continuable, keptByWave(view, waveStage)) };
   if (usage !== null) unroundedUsage.set(result, usage);
+  unroundedScouting.set(result, scouting?.cost ?? 0);
   return result;
 }
 
@@ -539,6 +550,7 @@ async function requireRunnerStarted(record: TaskRecord, statesBefore: number): P
  * then take the lock and send `/factory cancel`.
  */
 export async function cancelTask(record: TaskRecord, env: RunnerEnv | undefined): Promise<void> {
+  await cancelScouts({ kind: "task", id: record.id });
   await stopRunners(record);
   const sent = await withTaskLock(
     record,

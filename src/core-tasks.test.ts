@@ -80,6 +80,7 @@ describe("task reads", () => {
       interrupted: false,
       settings: { branch: "main", merge: "auto", maxRounds: 2, review: true, models: {} },
       usage: { input: 111, output: 56, cacheRead: 3500, cacheWrite: 20, cost: 1.75 },
+      scoutingCost: 0,
       lastMessage: "done",
       failure: null,
       review: { round: 1, status: "unknown", approved: false, findings: [] },

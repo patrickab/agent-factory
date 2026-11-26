@@ -13,6 +13,7 @@
 import type { ActionSpec, TaskView } from "./core.ts";
 import type { Finding } from "./state.ts";
 import type { WaveView } from "./waves.ts";
+import { SCOUT_RENDERERS } from "./scout-view.ts";
 
 const SHORT = 8;
 /** Lines of a failed gate's output shown under a blocked wave. */
@@ -500,6 +501,7 @@ const RENDERERS: Record<string, Renderer> = {
   "waves.approve": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
   "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
   "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
+  ...SCOUT_RENDERERS,
 };
 
 /** Whether `agentView` renders `action`. */

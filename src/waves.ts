@@ -170,6 +170,8 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   merge: WaveMerge | null;
   remote: WaveRemote | null;
   usage: Usage | null;
+  /** The part of `usage.cost` the wave's and its tasks' scouts spent. Always set by the core. */
+  scoutingCost?: number;
   actions: string[];
 }
 

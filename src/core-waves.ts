@@ -14,7 +14,7 @@ import { join, resolve, sep } from "node:path";
 import type { ActionName } from "./core.ts";
 import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, requireFactoryModels, wantedModels } from "./core-settings.ts";
-import { cancelTask, cents, droppedWork, FINAL_STATES, rawUsage, removable, requireRemovable, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
+import { cancelTask, cents, droppedWork, FINAL_STATES, rawScoutingCost, rawUsage, removable, requireRemovable, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
 import { git, uncommittedFiles } from "./git.ts";
 import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchExists, type RunnerEnv, worktreePath } from "./launch.ts";
 import type { NoticeWave } from "./notify.ts";
@@ -52,6 +52,7 @@ import {
   type WaveView,
 } from "./waves.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
+import { cancelScouts, scoutUsage } from "./scouts.ts";
 
 export type WaveActionName = "waves.add" | "waves.retry" | "waves.approve" | "waves.cancel" | "waves.remove";
 
@@ -273,6 +274,10 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[]): Promise<Wave
     return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: taskUsage };
   });
   for (const review of fold.reviews) usage = addUsage(usage, review.usage);
+  // The wave's own scouts (its reviewer's), then its tasks' (in their usage already).
+  const waveScouting = await scoutUsage({ kind: "wave", id: fold.id });
+  usage = addUsage(usage, waveScouting);
+  const scoutingCost = cents([...views.values()].reduce((sum, view) => sum + rawScoutingCost(view), waveScouting?.cost ?? 0));
   // The predicates of the wave actions' own checks, as one list for clients.
   const allowed: Record<WaveActionName, boolean> = {
     "waves.add": !WAVE_ADD_REFUSED.includes(fold.stage),
@@ -286,7 +291,7 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[]): Promise<Wave
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
   const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
   const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
-  return { view: { ...fold, reviews, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, actions }, stuck };
+  return { view: { ...fold, reviews, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, scoutingCost, actions }, stuck };
 }
 
 /**
@@ -519,6 +524,7 @@ export const WAVE_HANDLERS = {
     await stopWaveRunners(id);
     // The queued waves that wait for it can never start: each records why (once).
     for (const fold of queuedAfter(id, await listWaves())) await recordNeverStart(fold).catch(() => undefined);
+    await cancelScouts({ kind: "wave", id });
     const failures: string[] = [];
     for (const record of await waveRecords(id)) {
       const view = await taskView(record);

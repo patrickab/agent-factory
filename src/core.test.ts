@@ -47,6 +47,9 @@ describe("callAction", () => {
         "waves.approve",
         "waves.cancel",
         "waves.remove",
+        "scouts.start",
+        "scouts.get",
+        "scouts.list",
       ].sort(),
     );
     expect(ACTIONS["tasks.get"].mutates).toBe(false);

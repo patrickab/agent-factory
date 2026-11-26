@@ -101,6 +101,26 @@ const FINDINGS: WaveView["reviews"][number]["findings"] = [
 ];
 
 /** One full view per action, as `callAction` answers it. */
+const SCOUT = {
+  id: "5c0a1234-0000-4000-8000-000000000001",
+  caller: { kind: "task", id: TASK_ID },
+  repo: "/home/u/repo",
+  concern: "how a.txt is made",
+  questions: [],
+  store: "team/plan",
+  commit: "abc123",
+  model: "a/b",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  state: "done",
+  error: null,
+  running: false,
+  interrupted: false,
+  usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.25 },
+  report: "MISSING\n1. nothing\n\nDECISIONS\n- none\n\nKEY FACTS\n- a.txt:1 holds a\n\nMEMORY\n- map/a",
+  reportPath: "/home/u/.pi/agent/factory/scouts/x/report.md",
+  written: ["map/a"],
+};
+
 const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "models.get": { params: {}, result: { models: ["anthropic/opus", "openai/gpt"] } },
   "models.set": { params: { models: ["anthropic/opus"] }, result: { models: ["anthropic/opus"] } },
@@ -193,6 +213,9 @@ const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "waves.approve": { params: { id: "3f2a" }, result: { wave: wave({ stage: "merging" }) } },
   "waves.cancel": { params: { id: "3f2a" }, result: { wave: wave({ stage: "cancelled", running: false }) } },
   "waves.remove": { params: { id: "3f2a" }, result: { removed: WAVE_ID } },
+  "scouts.start": { params: { concern: "how a.txt is made", wait: true }, result: { scout: SCOUT, timedOut: false } },
+  "scouts.get": { params: { id: "5c0a" }, result: { scout: { ...SCOUT, state: "running", report: null, reportPath: null, written: ["map/a"] } } },
+  "scouts.list": { params: {}, result: { scouts: [SCOUT] } },
 };
 
 const FORBIDDEN = [/\/home/, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, new RegExp(SESSION.slice(0, 13)), /SECRET-REQUEST/, /secret patch/];
@@ -226,7 +249,7 @@ describe("agentView", () => {
   });
 
   test("receipts of mutations are one line", () => {
-    for (const name of Object.keys(ACTIONS).filter((action) => ACTIONS[action as keyof typeof ACTIONS].mutates && !["settings.set"].includes(action))) {
+    for (const name of Object.keys(ACTIONS).filter((action) => ACTIONS[action as keyof typeof ACTIONS].mutates && !["settings.set", "scouts.start"].includes(action))) {
       const fixture = FIXTURES[name];
       expect(agentView(name, fixture.params, fixture.result).split("\n").length, name).toBe(1);
     }
