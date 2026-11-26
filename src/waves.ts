@@ -27,7 +27,7 @@ export { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePok
 /** How long an append waits for the log lock before the wave counts as busy. */
 const LOG_LOCK_WAIT_MS = 10_000;
 
-export type WaveStage = "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled";
+export type WaveStage = "queued" | "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled";
 export type WaveReason = "conflict" | "gates" | "dirty" | "infra" | "review_failed";
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 
@@ -40,8 +40,9 @@ export type WaveTaskSpec = { key: string; title: string; request: string; after?
 /** A task spec as the `tasks` event stores it; without `model` (old logs too) the task runs with the `big` model. */
 export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: ModelSize };
 
-export const WAVE_STAGES: readonly WaveStage[] = ["building", "reviewing", "rejected", "merging", "waiting_approve", "merged", "blocked", "cancelled"];
-export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["rejected", "waiting_approve", "merged", "blocked", "cancelled"];
+export const WAVE_STAGES: readonly WaveStage[] = ["queued", "building", "reviewing", "rejected", "merging", "waiting_approve", "merged", "blocked", "cancelled"];
+/** `queued` too: no runner drives a wave that waits for others, a merge of one of them pokes it (`queuedWaves`). */
+export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["queued", "rejected", "waiting_approve", "merged", "blocked", "cancelled"];
 const WAVE_REASONS: readonly WaveReason[] = ["conflict", "gates", "dirty", "infra", "review_failed"];
 
 /**
@@ -51,7 +52,11 @@ const WAVE_REASONS: readonly WaveReason[] = ["conflict", "gates", "dirty", "infr
  */
 export type WaveOverrides = { models?: ModelChoice; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; remote?: boolean };
 
-/** Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. */
+/**
+ * Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. `after`:
+ * the ids of the waves it waits for (absent: none); such a wave is declared `queued`, without `branch` and `base`
+ * (null): its `start` event sets both.
+ */
 export interface WaveDeclaration {
   id: string;
   repo: string;
@@ -60,9 +65,10 @@ export interface WaveDeclaration {
   title: string;
   /** The reviewer's instructions. */
   request: string;
-  branch: string;
+  branch: string | null;
   target: string;
-  base: string;
+  base: string | null;
+  after?: string[];
   origin: string | null;
   createdAt: string;
   /** Stored only: not part of a `WaveView`. A file without it reads as `{}`. */
@@ -91,6 +97,8 @@ export type WaveEvent =
   | { at: string; kind: "tasks"; tasks: WaveTaskEntry[]; dropped?: string[] }
   | { at: string; kind: "task"; key: string; taskId: string; sessionId: string }
   | { at: string; kind: "stage"; stage: WaveStage; reason: WaveReason | null; detail?: string }
+  /** A queued wave starts: its branch is cut at `base` (after this event), it builds. */
+  | { at: string; kind: "start"; branch: string; base: string }
   | ({ kind: "gate"; commit?: string } & WaveGate)
   | ({ kind: "review" } & WaveReview)
   | ({ kind: "merge" } & WaveMerge)
@@ -123,6 +131,8 @@ export type FoldedTask = {
 
 /** Everything of a `WaveView` that needs no task state, and the last stage event's `detail`. */
 export interface WaveFold extends WaveDeclaration {
+  /** The waves it waits for, `[]` when none. */
+  after: string[];
   stage: WaveStage;
   /** Only when `stage` is `blocked`. */
   reason: WaveReason | null;
@@ -135,8 +145,18 @@ export interface WaveFold extends WaveDeclaration {
   remote: WaveRemote | null;
 }
 
+/** A wave that has its branch: declared without `after`, or started (`start` event). */
+export type StartedWaveFold = WaveFold & { branch: string; base: string };
+
+/** Whether the wave has its branch (a queued wave gets it when it starts). */
+export function waveStarted(fold: WaveFold): fold is StartedWaveFold {
+  return fold.branch !== null && fold.base !== null;
+}
+
 /** A wave as every client sees it (the contract's shape); the core builds it from the fold and the tasks. */
-export interface WaveView extends Omit<WaveDeclaration, "overrides"> {
+export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
+  /** The ids of the waves it waits for (`queued` until every one is `merged`), `[]` when none. */
+  after: string[];
   stage: WaveStage;
   reason: WaveReason | null;
   /** Why the wave is at its stage, when its last `stage` event says (`WaveFold.detail`); null otherwise. Added in factory/w2. */
@@ -229,8 +249,17 @@ export function parseWaveOverrides(raw: unknown, prefix = "overrides."): WaveOve
   return { ...parsed, remote: raw.remote };
 }
 
+/** A string array, or undefined when absent. */
+function strings(raw: Record<string, unknown>, key: string): string[] | undefined {
+  const value = raw[key];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) throw new Error(`${key} must be an array of strings`);
+  return [...value];
+}
+
 export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration {
   if (!isRecord(raw)) throw new Error("the declaration is not an object");
+  const after = strings(raw, "after");
   const declaration: WaveDeclaration = {
     id: str(raw, "id"),
     repo: str(raw, "repo"),
@@ -238,9 +267,11 @@ export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration 
     plan: strOrNull(raw, "plan"),
     title: str(raw, "title"),
     request: str(raw, "request", false),
-    branch: str(raw, "branch"),
+    // A queued wave has neither until its `start` event; every other declaration has both.
+    branch: after === undefined ? str(raw, "branch") : strOrNull(raw, "branch"),
     target: str(raw, "target"),
-    base: str(raw, "base"),
+    base: after === undefined ? str(raw, "base") : strOrNull(raw, "base"),
+    ...(after === undefined ? {} : { after }),
     origin: strOrNull(raw, "origin"),
     createdAt: str(raw, "createdAt"),
     overrides: parseWaveOverrides(raw.overrides),
@@ -290,6 +321,8 @@ export function parseWaveEvent(raw: unknown): WaveEvent {
       if (detail !== null) event.detail = detail;
       return event;
     }
+    case "start":
+      return { at, kind, branch: str(raw, "branch"), base: str(raw, "base") };
     case "gate": {
       if (typeof raw.passed !== "boolean") throw new Error("passed must be a boolean");
       const event: WaveEvent = { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), passed: raw.passed, wallMs: num(raw, "wallMs"), log: strOrNull(raw, "log") };
@@ -481,9 +514,11 @@ export function gatedCommit(events: readonly WaveEvent[]): string | null {
 
 // ---- the fold ----
 
-/** The wave's state from its declaration and events: a declared wave is `building`. */
+/** The wave's state from its declaration and events: a declared wave is `building`, `queued` with `after`. */
 export function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): WaveFold {
-  const fold: WaveFold = { ...declaration, stage: "building", reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null };
+  const after = declaration.after ?? [];
+  const stage: WaveStage = after.length > 0 ? "queued" : "building";
+  const fold: WaveFold = { ...declaration, after: [...after], stage, reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null };
   for (const event of events) {
     switch (event.kind) {
       case "tasks":
@@ -509,6 +544,13 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         fold.stage = event.stage;
         fold.reason = event.stage === "blocked" ? event.reason : null;
         fold.detail = event.detail ?? null;
+        break;
+      case "start":
+        fold.branch = event.branch;
+        fold.base = event.base;
+        fold.stage = "building";
+        fold.reason = null;
+        fold.detail = null;
         break;
       case "gate": {
         const { kind: _kind, commit: _commit, ...gate } = event;
@@ -538,7 +580,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
 }
 
 /** Stages that keep what came before them: a wave blocked or cancelled is as far as it was when that happened. */
-const KEEPS_REVIEW: readonly WaveStage[] = ["building", "blocked", "cancelled"];
+const KEEPS_REVIEW: readonly WaveStage[] = ["queued", "building", "blocked", "cancelled"];
 
 /**
  * Whether the wave's review began since it last built (invariant 2): from then on nothing may reach its branch until

@@ -37,7 +37,7 @@ import { errorText, isRecord } from "./util.ts";
 
 export { FactoryError, oneLine, type FactoryErrorCode, type FactoryErrorDetail } from "./core-shared.ts";
 export type { TaskActionName, TaskView, TimelineEntry, TimelineKind } from "./core-tasks.ts";
-export { noticeInputs, startWaveTasks, taskWave, waveBranchName, waveMergeRefusal, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
+export { noticeInputs, pokeQueuedAfter, queueLook, startQueuedWave, startWaveTasks, taskWave, waveBranchName, waveMergeRefusal, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
 
 type Schema = Record<string, unknown>;
 
@@ -188,7 +188,7 @@ export const ACTIONS = {
     true,
   ),
   "waves.start": spec(
-    "Declare a wave: a set of tasks on one new branch (<target>-<tag with / as ->) off the target, the factory starts each task once the tasks it waits for (after) are done; answers {wave}",
+    "Declare a wave: a set of tasks on one new branch (<target>-<tag with / as ->) off the target, the factory starts each task once the tasks it waits for (after) are done. With after (waves it waits for): queued, its branch cut and its tasks started once every one of them is merged; answers {wave}",
     {
       repo: REPO,
       tag: { ...TAG, description: "The wave's tag (its tasks carry it): segments of A-Z a-z 0-9 . _ @ + - joined by /" },
@@ -201,6 +201,12 @@ export const ACTIONS = {
         items: WAVE_TASK_ITEM,
       },
       plan: { type: "string", description: "The memory_store path of the plan the wave works from (only stored)" },
+      after: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Waves this one waits for, by tag (the newest not cancelled) or id, of the same repository and target: the wave is queued, gets its branch off the target's tip and starts once every one is merged",
+      },
       overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, remote: REMOTE } },
     },
     ["repo", "tag", "title", "request", "tasks"],

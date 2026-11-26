@@ -48,6 +48,7 @@ function wave(over: Partial<WaveView> = {}, stuck = false, events: { kind: strin
     title: "the wave",
     request: "SECRET-REQUEST",
     branch: "master-factory-w1",
+    after: [],
     target: "master",
     base: "0ab12cd",
     origin: ORIGIN,

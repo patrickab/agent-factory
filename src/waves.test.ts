@@ -160,7 +160,25 @@ describe("wave records", () => {
 
 describe("foldWave", () => {
   test("a declared wave is building with nothing else", () => {
-    expect(foldWave(declaration(ONE), [])).toEqual({ ...declaration(ONE), stage: "building", reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null });
+    expect(foldWave(declaration(ONE), [])).toEqual({ ...declaration(ONE), after: [], stage: "building", reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null });
+  });
+
+  test("a wave with after is queued without branch and base until its start event; an old declaration has neither after nor a null branch", () => {
+    const queued = declaration(ONE, { branch: null, base: null, after: [uuid(2)] });
+    const text = `${JSON.stringify(queued)}\n${JSON.stringify({ at: "t1", kind: "tasks", tasks: [spec("a")] })}\n`;
+    const file = parseWaveFile(text, ONE);
+    expect(file.declaration).toEqual(queued);
+    const before = foldWave(file.declaration, file.events);
+    expect([before.stage, before.branch, before.base, before.after]).toEqual(["queued", null, null, [uuid(2)]]);
+    const start = parseWaveEvent({ at: "t2", kind: "start", branch: "main-factory-w1", base: "def456" });
+    const after = foldWave(file.declaration, [...file.events, start]);
+    expect([after.stage, after.branch, after.base]).toEqual(["building", "main-factory-w1", "def456"]);
+    expect(() => parseWaveEvent({ at: "t", kind: "start", branch: "b" })).toThrow("base must be a non-empty string");
+    // A declaration of before the field: no after, a branch and a base it must have.
+    const { after: _after, ...old } = declaration(ONE);
+    expect(foldWave(parseWaveFile(`${JSON.stringify(old)}\n`, ONE).declaration, [])).toMatchObject({ stage: "building", after: [], branch: "main-factory-w1", base: "abc123" });
+    expect(() => parseWaveFile(`${JSON.stringify({ ...old, branch: null })}\n`, ONE)).toThrow("branch must be a non-empty string");
+    expect("after" in parseWaveFile(`${JSON.stringify(old)}\n`, ONE).declaration).toBe(false);
   });
 
   test("a task's model: stored in the tasks event, folded; an old log without the field folds to big", () => {

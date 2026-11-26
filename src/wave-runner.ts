@@ -37,7 +37,7 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { withoutPaths } from "./agent-view.ts";
 import { loadTaskFiles, type FactoryConfig } from "./config.ts";
-import { FactoryError, oneLine, startWaveTasks, waveReviewWorktree, waveTaskViews } from "./core.ts";
+import { FactoryError, oneLine, pokeQueuedAfter, startQueuedWave, startWaveTasks, waveReviewWorktree, waveTaskViews } from "./core.ts";
 import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, treeDiff, uncommittedFiles } from "./git.ts";
 import { runAfterCreate } from "./launch.ts";
 import { mergeTask, rebaseWorktree } from "./merge.ts";
@@ -59,7 +59,9 @@ import {
   RESTING_WAVE_STAGES,
   stuckKeys,
   unlockWave,
+  waveStarted,
   type NewWaveEvent,
+  type StartedWaveFold,
   type WaveDeclaration,
   type WaveFold,
   type WaveReason,
@@ -91,7 +93,7 @@ function log(id: string, text: string): void {
 }
 
 /** The wave as a `Task` for the pure steps: its branch merges into its target, its request is the reviewer's. */
-function waveTask(declaration: WaveDeclaration): Task {
+function waveTask(declaration: StartedWaveFold): Task {
   return {
     title: declaration.title,
     request: declaration.request,
@@ -209,7 +211,7 @@ async function targetConfig(declaration: WaveDeclaration, root: string) {
  * task): a later run prepares a fresh one rather than reuse one the hooks never finished. A rebase a dead run left in
  * progress is aborted.
  */
-async function ensureWorktree(declaration: WaveDeclaration): Promise<string> {
+async function ensureWorktree(declaration: StartedWaveFold): Promise<string> {
   const path = reviewWorktree(declaration);
   if (!existsSync(path)) {
     await git(runner.cleanup, declaration.repo, ["worktree", "prune"]);
@@ -269,7 +271,7 @@ function sessionIdOf(sessionFile: string | null): string | null {
  * the commit they passed on: the merge runs them again only on another one.
  */
 /** Resolves when the step ended (with whether its last stage change was recorded, where it says). */
-async function review(fold: WaveFold): Promise<boolean | void> {
+async function review(fold: StartedWaveFold): Promise<boolean | void> {
   const { id } = fold;
   const task = waveTask(fold);
   const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []): Promise<boolean> => {
@@ -367,7 +369,7 @@ async function review(fold: WaveFold): Promise<boolean | void> {
  * `merging`: the merge queue, merge gates and the fast-forward of the target. The merge gates are skipped on the
  * commit they passed on before the review (`gated`): they run again only when the target moved since.
  */
-async function merge(fold: WaveFold, gated: string | null): Promise<void> {
+async function merge(fold: StartedWaveFold, gated: string | null): Promise<void> {
   const { id } = fold;
   const task = waveTask(fold);
   const leave = async (to: WaveStage, reason: WaveReason | null, detail: string | null = null, events: NewWaveEvent[] = []) => {
@@ -439,11 +441,26 @@ async function merge(fold: WaveFold, gated: string | null): Promise<void> {
   }
 }
 
-/** One look at the wave and the step its stage asks for. */
+/** The environment of what the runner starts: without the lock a poke handed to it. */
+function childEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env[WAVE_LOCK_ENV];
+  return env;
+}
+
+/**
+ * One look at the wave and the step its stage asks for. `queued`: starts when every wave it waits for is merged
+ * (`startQueuedWave`), else rests until one of them pokes it. `merged`: pokes the queued waves that wait for it.
+ */
 async function step(id: string): Promise<Next> {
   const { declaration, events } = await readWave(id);
   const fold = foldWave(declaration, events);
+  if (fold.stage === "queued") return (await startQueuedWave(id)) ? "again" : "rest";
+  if (fold.stage === "merged") {
+    for (const failure of await pokeQueuedAfter(id, childEnv())) log(id, `poking a queued wave failed: ${failure}`);
+  }
   if (RESTING_WAVE_STAGES.includes(fold.stage)) return "rest";
+  if (!waveStarted(fold)) throw new Error(`the wave is ${fold.stage} but has no branch (no start event)`);
   if (fold.stage === "reviewing") {
     await whileAt(id, "reviewing", () => review(fold));
     return "again";
@@ -467,8 +484,7 @@ async function build(fold: WaveFold): Promise<Next> {
     await moveStage(id, "building", "reviewing", null);
     return "again";
   }
-  const env = { ...process.env };
-  delete env[WAVE_LOCK_ENV];
+  const env = childEnv();
   try {
     const started = await startWaveTasks(id, env, stopped.signal);
     if (started.length > 0) {

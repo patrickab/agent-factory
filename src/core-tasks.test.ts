@@ -31,6 +31,7 @@ import {
 import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, lockTask, taskLogPath, tasksDir, unlockTask, writeTask } from "./tasks.ts";
+import { appendWaveEvent, createWave } from "./waves.ts";
 
 useCoreFixture();
 
@@ -553,3 +554,18 @@ describe("waiting_answer", () => {
   });
 });
 
+describe("tasks.start and queued waves", () => {
+  test("a queued wave that started owns the branch its start event set (invariant 13)", async () => {
+    const repo = makeRepo();
+    const id = `20000000-${RUN}-4000-8000-000000000007`;
+    const named = `20000000-${RUN}-4000-8000-000000000008`;
+    // Queued: no branch in its declaration.
+    await createWave({ id, repo, tag: "factory/w8", plan: null, title: "w", request: "r", branch: null, target: "main", base: null, after: [named], origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
+    const main = git(repo, "rev-parse", "main");
+    git(repo, "branch", "main-factory-w8");
+    await appendWaveEvent(id, { kind: "start", branch: "main-factory-w8", base: main });
+    const start = () => callAction("tasks.start", { title: "t", request: "r", overrides: { branch: "main-factory-w8" } }, { cwd: repo });
+    await expectError(start(), "refused", "main-factory-w8 is the branch of wave 20000000, which is building");
+    expect(await listTasks()).toEqual([]);
+  });
+});

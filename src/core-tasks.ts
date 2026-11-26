@@ -594,8 +594,10 @@ export const WAVE_FINAL_STAGES: readonly WaveStage[] = ["merged", "cancelled"];
  */
 async function requireNoOpenWaveBranch(repo: string, target: string): Promise<void> {
   for (const file of await listWaves()) {
-    if (file.declaration.repo !== repo || file.declaration.branch !== target) continue;
-    const { stage, id } = foldWave(file.declaration, file.events);
+    if (file.declaration.repo !== repo) continue;
+    // A queued wave's branch is set by its `start` event, not in its declaration.
+    const { stage, id, branch } = foldWave(file.declaration, file.events);
+    if (branch !== target) continue;
     if (WAVE_FINAL_STAGES.includes(stage)) continue;
     throw new FactoryError(
       "refused",

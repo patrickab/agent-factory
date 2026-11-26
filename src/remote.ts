@@ -27,7 +27,7 @@ function oneLine(text: string): string {
 }
 
 /** The wave as these steps need it: its declaration and what the log knows of the forge. */
-export type RemoteWave = Pick<WaveDeclaration, "id" | "repo" | "title" | "request" | "tag" | "branch" | "target" | "overrides"> & { remote: WaveRemote | null };
+export type RemoteWave = Pick<WaveDeclaration, "id" | "repo" | "title" | "request" | "tag" | "target" | "overrides"> & { branch: string; remote: WaveRemote | null };
 
 /** A push or forge call that takes longer is ended and recorded as failed. */
 const COMMAND_TIMEOUT_MS = 120_000;

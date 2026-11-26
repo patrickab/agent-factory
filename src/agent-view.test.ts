@@ -60,6 +60,7 @@ function wave(over: Partial<WaveView> = {}): WaveView {
     title: "the wave mechanism",
     request: "Review the wave mechanism as a whole: SECRET-REQUEST",
     branch: "master-factory-w1",
+    after: [],
     target: "master",
     base: "0ab12cd0ab12cd0ab12cd0ab12cd0ab12cd0ab12",
     origin: SESSION,

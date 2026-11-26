@@ -253,6 +253,8 @@ function waveStageLines(view: WaveView): string[] {
   const lastReview = view.reviews.at(-1);
   if (view.interrupted) return [`  interrupted: ${view.stage} when its runner ended, no runner lives`, waveTasksLine(view)];
   switch (view.stage) {
+    case "queued":
+      return [waveTasksLine(view), ...detailLine(view)];
     case "building": {
       const unreachable = unreachableTasks(view.tasks);
       return [waveTasksLine(view), ...(unreachable.length > 0 ? [`  cannot start: ${unreachable.join(", ")}`] : [])];

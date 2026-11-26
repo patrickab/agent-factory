@@ -13,6 +13,7 @@ function wave(over: Partial<WaveView> = {}): WaveView {
     title: `wave ${n}`,
     request: "the request",
     branch: `master-t-w${n}`,
+    after: [],
     target: "master",
     base: "0ab12cd",
     origin: "origin",
