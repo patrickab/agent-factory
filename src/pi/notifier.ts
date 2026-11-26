@@ -18,7 +18,7 @@
  *   ended reports once (`notify.ts`); a delivered one is not read again. `skipScout`: scouts a tool call waits for
  * - `onWaves`: after every look, the views of every wave this origin declared (the session's widget, `session-widget.ts`)
  */
-import { mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
+import { mkdirSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { noticeInputs } from "../core.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
@@ -113,6 +113,8 @@ export function startNotifier(options: NotifierOptions): Notifier {
   };
   /** This origin's ended gate proofs whose notices are delivered: never read again. An interrupted one is read again: it may still end. */
   const finishedProofs = new Set<string>();
+  /** Interrupted proofs announced, by the stamp of their record: not read again until the record changes (it may still end). */
+  const interruptedProofs = new Map<string, string | null>();
   /** Gate proofs of other origins: never read again. */
   const otherProofs = new Set<string>();
 
@@ -152,7 +154,14 @@ export function startNotifier(options: NotifierOptions): Notifier {
       // A session dir watched from now on: what was written to it during this read is read by the next look.
       if (watchDir(dirname(task.sessionPath), (name) => name === null || [...sessionIds].some((id) => basename(String(name)).includes(id)))) again = true;
     }
-    const proofs = await proofsOf(origin, finishedProofs, otherProofs);
+    const proofStamp = (id: string) => fileStamp(join(proofsDir(), `${id}.jsonl`));
+    for (const [id, stamp] of interruptedProofs) if (proofStamp(id) !== stamp) interruptedProofs.delete(id);
+    // Stamped before the read, like the sessions': a write between the read and a later stamp would never be read.
+    const proofStamps = new Map<string, string | null>();
+    try {
+      for (const name of readdirSync(proofsDir())) if (name.endsWith(".jsonl")) proofStamps.set(name.slice(0, -6), proofStamp(name.slice(0, -6)));
+    } catch {}
+    const proofs = await proofsOf(origin, new Set([...finishedProofs, ...interruptedProofs.keys()]), otherProofs);
     const delivered = await readDelivered();
     const scouts = await openScouts(delivered);
     const pending = pendingNotices(tasks, waves, delivered, { scouts, gates: proofs }).filter((notice) => !scouts.some((scout) => notice.key === scoutNoticeKey(scout.id) && options.skipScout?.(scout.id)));
@@ -169,7 +178,10 @@ export function startNotifier(options: NotifierOptions): Notifier {
       }
     }
     for (const wave of waves) if (FINAL_WAVE_STAGES.includes(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);
-    for (const proof of proofs) if (proof.state !== "running") finishedProofs.add(proof.id);
+    for (const proof of proofs) {
+      if (proof.state !== "running") finishedProofs.add(proof.id);
+      else if (proof.interrupted) interruptedProofs.set(proof.id, proofStamps.get(proof.id) ?? null);
+    }
     if (!stopped) options.onWaves?.([...waves.map((wave) => wave.view).filter((view) => !finishedWaves.has(view.id)), ...finishedWaves.values()]);
   };
 

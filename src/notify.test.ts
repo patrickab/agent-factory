@@ -212,6 +212,12 @@ describe("pendingNotices: waves", () => {
     const resumed = interrupted([{ kind: "tasks" }, { kind: "stage" }, { kind: "update" }, { kind: "task" }]);
     expect(pendingNotices([], [resumed], delivered).map((notice) => notice.key)).toEqual([`wave:${WAVE_ID}:interrupted:4`]);
   });
+
+  test("an interrupted wave delivered under the old key (every event counted) is not announced again", () => {
+    const events = [{ kind: "tasks" }, { kind: "stage" }, { kind: "update" }];
+    const old = new Set([`wave:${WAVE_ID}:interrupted:3`]);
+    expect(pendingNotices([], [wave({ stage: "building", interrupted: true }, false, events)], old).filter((notice) => notice.key.includes(":interrupted:"))).toEqual([]);
+  });
 });
 
 describe("pendingNotices: order", () => {

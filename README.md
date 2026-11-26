@@ -573,4 +573,4 @@ You can hand coding tasks to the factory (the `factory` tool or the `factory` CL
   descendants outside its own cgroup: signal only pids whose `/proc/<pid>/cgroup` equals its own (or use
   `KillMode=control-group` and no tree walk)
 - A review blocked `infra` on `fatal: not a git repository` in the review worktree: a runner killed while git added or
-  removed it. The next review removes such a directory and prunes the worktree list itself; `waves.retry`
+  removed it. The next review removes such a directory and prunes the worktree list itself; `waves.retry` runs that review again

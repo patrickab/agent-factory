@@ -3,7 +3,7 @@
  * holding their state, a fake `pi` that notes `sendMessage`. No runner, no model.
  */
 import { afterAll, afterEach, describe, expect } from "bun:test";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -304,5 +304,21 @@ describe("gate proofs", () => {
     // Ended: never read again.
     await notifier.look();
     expect(sent).toHaveLength(2);
+  });
+
+  test("an announced interrupted proof is not read again until its record changes", async () => {
+    const own = proofOf(3, "sess-A");
+    const sent: string[] = [];
+    const notifier = startNotifier({ origin: "sess-A", send: (text) => sent.push(text), isTaskSession: () => false });
+    stops.push(() => notifier.stop());
+    await notifier.look();
+    expect(sent).toHaveLength(1);
+    // Rewritten into a proof of another origin without a stamp change being possible to hide: unchanged record, not read.
+    const { mtimeMs } = statSync(own);
+    const text = readFileSync(own, "utf8").replace("sess-A", "sess-B");
+    writeFileSync(own, text);
+    utimesSync(own, mtimeMs / 1000, mtimeMs / 1000);
+    await notifier.look();
+    expect(sent).toHaveLength(1);
   });
 });
