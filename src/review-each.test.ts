@@ -15,6 +15,7 @@ import { stopWaveRunners, waveReviewsDir } from "./wave-poke.ts";
 import { reviewEachDeps, runWave } from "./wave-runner.ts";
 import { appendWaveEvent, createWave, foldWave, listWaves, readWave } from "./waves.ts";
 import { NO_USAGE } from "./util.ts";
+import { TASK_ENTRY } from "./core-test-kit.ts";
 
 const savedEnv = { ...process.env };
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-review-each-test-")));
@@ -135,7 +136,7 @@ async function eachWave(keys: string[], state = "reviewing"): Promise<string> {
       origin: null,
     };
     await writeTask(record);
-    writeFileSync(sessionPath(key), "");
+    writeFileSync(sessionPath(key), `${JSON.stringify(TASK_ENTRY)}\n`);
     setState(key, state, 1);
     await appendWaveEvent(WAVE, { kind: "task", key, taskId: record.id, sessionId: record.sessionId });
   }

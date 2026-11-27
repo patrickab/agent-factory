@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FactoryError } from "./core.ts";
 import { allCancelled, appendWaveEvent, createWave, foldWave, readWave, readyForReview, startableKeys, stuckKeys, unreachableKeys, validateTaskSpecs, waveCounts, waveTaskState, type WaveDeclaration, type WaveEvent, type WaveFold } from "./waves.ts";
+import type { State } from "./state.ts";
 import { wavePath } from "./wave-poke.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-waves-test-")));
@@ -44,7 +45,7 @@ function declaration(id: string, overrides: Partial<WaveDeclaration> = {}): Wave
 }
 
 const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after, id: `id-${key}` });
-const states = (entries: Record<string, string | null>) => new Map(Object.entries(entries));
+const states = (entries: Record<string, State | null>) => new Map(Object.entries(entries));
 
 function folded(tasks: ReturnType<typeof spec>[], started: string[] = []): WaveFold {
   const events: WaveEvent[] = [{ at: "t1", kind: "tasks", tasks }];

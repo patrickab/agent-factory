@@ -16,16 +16,17 @@ import { join } from "node:path";
 import { callAction, FactoryError, type TaskView } from "./core.ts";
 import { liveRunners, stopRunners } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
-import { handLockFile, listTasks, lockFile, type TaskRecord } from "./tasks.ts";
-import { stopWaveRunners, waveLockPath } from "./wave-poke.ts";
+import { handLockFile, lockFile } from "./lock.ts";
+import { listTasks, type TaskRecord } from "./tasks.ts";
+import { stopWaveRunners } from "./wave-poke.ts";
 import { listWaves } from "./waves.ts";
 
 let savedEnv: NodeJS.ProcessEnv;
 export let scratch: string;
 export let fakeBin: string;
 let piLog: string;
-/** A wave runner stand-in (`runnerHolding`); it exits once `$FAKE_RUNNER_END` exists. */
-let fakeWaveRunner: string;
+/** A runner stand-in (`runnerHolding`); it exits once `$FAKE_RUNNER_END` exists. */
+let fakeRunner: string;
 /** A PATH with the fake `pi` and without any directory that holds `agent-worktree`. */
 export let testPath: string;
 export let caseDir: string;
@@ -107,9 +108,9 @@ await forever();
   chmodSync(join(fakeBin, "pi"), 0o755);
 
   mkdirSync(join(scratch, "fake-runner"));
-  fakeWaveRunner = join(scratch, "fake-runner", "wave-runner.ts");
+  fakeRunner = join(scratch, "fake-runner", "runner.ts");
   writeFileSync(
-    fakeWaveRunner,
+    fakeRunner,
     `import { existsSync } from "node:fs";
 while (!existsSync(process.env.FAKE_RUNNER_END)) await Bun.sleep(20);
 process.exit(0);
@@ -181,11 +182,14 @@ export async function until(check: () => boolean | Promise<boolean>, timeoutMs =
 }
 
 export const stateOf = async (record: TaskRecord) => (await lastFactoryState(record.sessionDir, record.sessionId))?.state;
-/** Starts a stand-in of wave `id`'s runner and hands it the wave's lock, as a poke does: `liveWaveRunners` finds it. */
-export async function runnerHolding(id: string, env: Record<string, string | undefined>): Promise<Bun.Subprocess> {
-  await lockFile(waveLockPath(id), "a runner holds it");
-  const child = Bun.spawn(["bun", fakeWaveRunner, id], { env });
-  await handLockFile(waveLockPath(id), child.pid);
+/**
+ * Starts a runner stand-in with `id` among its arguments and hands it the `lock`, as a poke or `sendCommand` does:
+ * `liveWaveRunners` or `liveRunners` finds it. It ends once `$FAKE_RUNNER_END` exists, sending nothing.
+ */
+export async function runnerHolding(lock: string, id: string, env: Record<string, string | undefined>): Promise<Bun.Subprocess> {
+  await lockFile(lock, "a runner holds it");
+  const child = Bun.spawn(["bun", fakeRunner, id], { env });
+  await handLockFile(lock, child.pid);
   return child;
 }
 
@@ -250,6 +254,9 @@ export function fakeRecord(id: string, repo: string): TaskRecord {
     origin: null,
   };
 }
+
+/** A session's first entry, as the plugin writes it: a state needs a task. */
+export const TASK_ENTRY = { type: "custom", customType: "factory-task", data: { mainBranch: "main", settings: { branch: "main", merge: "auto", maxRounds: 2, review: true, models: {} } } };
 
 export function writeSession(record: TaskRecord, entries: object[]): string {
   mkdirSync(record.sessionDir, { recursive: true });

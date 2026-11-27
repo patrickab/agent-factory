@@ -9,7 +9,8 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
-import { lockWave, unlockWave, wavePath } from "./wave-poke.ts";
+import { lockWave, waveLockPath, wavePath } from "./wave-poke.ts";
+import { unlockFile } from "./lock.ts";
 import { runWave, waveCommitsRef } from "./wave-runner.ts";
 import { BRANCH, caseDir, commit, getWave, reviewWorktree, TAG, useWaveFixture, WAVE, waveRepo } from "./wave-test-kit.ts";
 import { readWave } from "./waves.ts";
@@ -94,7 +95,7 @@ describe("a squash wave", () => {
     try {
       await callAction("waves.approve", { id: WAVE() });
     } finally {
-      await unlockWave(WAVE());
+      await unlockFile(waveLockPath(WAVE()));
     }
     expect(await runWave(WAVE())).toBe(0);
     const runs = readFileSync(count, "utf8").split("\n").filter(Boolean).length;

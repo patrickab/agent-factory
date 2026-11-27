@@ -14,10 +14,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import { worktreePath } from "./launch.ts";
-import { git } from "./core-test-kit.ts";
+import { git, TASK_ENTRY } from "./core-test-kit.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { caseDigits, caseSerial } from "./test-case.ts";
-import { lockWave, stopWaveRunners, unlockWave } from "./wave-poke.ts";
+import { lockWave, stopWaveRunners, waveLockPath } from "./wave-poke.ts";
+import { unlockFile } from "./lock.ts";
 import { appendWaveEvent, createWave, listWaves, type WaveView } from "./waves.ts";
 
 export let caseDir: string;
@@ -143,7 +144,7 @@ export async function waveRepo(config = 'gates:\n  - ["true"]\n', state = "done"
 /** Overwrites the session of the wave's task `key` with one state. */
 export function setState(key: string, state: string): void {
   mkdirSync(join(caseDir, "sessions"), { recursive: true });
-  writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseSerial()}-${key}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "r" } })}\n`);
+  writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseSerial()}-${key}.jsonl`), `${JSON.stringify(TASK_ENTRY)}\n${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "r" } })}\n`);
 }
 
 export const getWave = async (): Promise<WaveView> => ((await callAction("waves.get", { id: WAVE() })) as { wave: WaveView }).wave;
@@ -155,6 +156,6 @@ export async function holding<T>(act: () => Promise<T>): Promise<T> {
   try {
     return await act();
   } finally {
-    await unlockWave(WAVE());
+    await unlockFile(waveLockPath(WAVE()));
   }
 }

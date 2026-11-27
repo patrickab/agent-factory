@@ -14,8 +14,8 @@ const EXIT_DRAIN_MS = 1000;
 const OUTPUT_KEEP_CHARS = 64_000;
 /** A git command that would open an editor (`rebase --continue`, `commit` without `-m`) takes the message as it is: no command has a TTY. */
 const NO_EDITOR_ENV = { GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" };
-/** The runners' own variables (`runner.ts`, `wave-runner.ts`), never passed on to the commands of a task or a wave. */
-const RUNNER_ONLY_ENV = ["FACTORY_TASK_SESSION", "FACTORY_TASK_LOCK", "FACTORY_TASK_WAVE"];
+/** The runners' own variables (`runner.ts`, `wave-runner.ts`), never passed on to a command or another runner. */
+export const RUNNER_ONLY_ENV = ["FACTORY_TASK_SESSION", "FACTORY_TASK_LOCK", "FACTORY_TASK_WAVE"];
 
 /** The environment of a command: the process's without `RUNNER_ONLY_ENV`, plus `NO_EDITOR_ENV` and `extra`. */
 export function commandEnv(base: Record<string, string | undefined>, extra: Record<string, string> = {}): Record<string, string | undefined> {

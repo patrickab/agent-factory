@@ -3,7 +3,7 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { callAction, type TaskView } from "./core.ts";
 import { caseDir, expectError, fakeRecord, git, ID_1, makeRepo, scratch, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
-import { cancelScout, cancelScouts, readScout, scoutDirs, scoutView, type ScoutView } from "./scouts.ts";
+import { cancelScout, cancelScouts, readScout, scoutDirs, scoutLockPath, scoutView, type ScoutView } from "./scouts.ts";
 import { readStore, writeFakeMemoryStore, writeStore } from "./fake-memory-store.ts";
 import { signalRunner } from "./spawn.ts";
 import { writeTask } from "./tasks.ts";
@@ -132,7 +132,7 @@ describe("scouting cost", () => {
     expect(scout.store).toBe(STORE);
     const [dir] = await scoutDirs({ kind: "task", id: ID_1 });
     await until(async () => (await readScout(dir)).fold.usage !== null);
-    signalRunner((await readScout(dir)).fold.pid as number, "SIGKILL");
+    signalRunner(Number(readFileSync(scoutLockPath(dir), "utf8").split(" ")[0]), "SIGKILL");
     await until(async () => ((await callAction("scouts.get", { id: scout.id })) as { scout: ScoutView }).scout.interrupted);
     const task = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
     expect(task.usage?.cost).toBe(1.5);

@@ -10,7 +10,7 @@ import { REVIEWER_FIX_CAP } from "../core-waves.ts";
 import { caseDir, makeRepo, useCoreFixture } from "../core-test-kit.ts";
 import { writeFakeMemoryStore, writeStore } from "../fake-memory-store.ts";
 import { pendingNotices } from "../notify.ts";
-import { lockFile, unlockFile } from "../tasks.ts";
+import { lockFile, unlockFile } from "../lock.ts";
 import { waveLockPath } from "../wave-poke.ts";
 import { createWave, foldWave, readWave, type WaveView } from "../waves.ts";
 import defaultExtension, { FIX_TOOL, NOTIFY_TOOL, registerReviewerTools, type ReviewerIds } from "./reviewer-tool.ts";

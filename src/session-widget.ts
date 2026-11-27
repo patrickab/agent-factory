@@ -7,7 +7,7 @@
 import { scrub } from "./agent-view.ts";
 import { unreachableTasks } from "./cards.ts";
 import { dollars } from "./util.ts";
-import { WAVE_FINAL_STAGES, type WaveView } from "./waves.ts";
+import { waveFinal, type WaveView } from "./waves.ts";
 
 export interface SessionWidgetOptions {
   showFinished: boolean;
@@ -143,8 +143,8 @@ function rows(views: readonly WaveView[], width: number): string[] {
 export function sessionWidget(waves: readonly WaveView[], { showFinished, width, rulings = 0 }: SessionWidgetOptions): string[] {
   const toRule = rulings > 0 ? ` · ${rulings} ${rulings === 1 ? "card" : "cards"} to rule on` : "";
   if (waves.length === 0) return toRule === "" ? [] : [truncate(`Factory${toRule}`, width)];
-  const active = waves.filter((view) => !WAVE_FINAL_STAGES.includes(view.stage));
-  const finished = waves.filter((view) => WAVE_FINAL_STAGES.includes(view.stage)).sort(newestFirst);
+  const active = waves.filter((view) => !waveFinal(view.stage));
+  const finished = waves.filter((view) => waveFinal(view.stage)).sort(newestFirst);
   active.sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)) || newestFirst(a, b));
   const finishedCost = showFinished ? money(totalCost(finished)) : "";
   if (active.length === 0) {

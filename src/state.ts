@@ -16,12 +16,24 @@ import type { Usage } from "./util.ts";
  * verdict comes as `/factory reviewed`.
  */
 export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked" | "merging" | "done" | "cancelled" | "reviewing";
-/** A task in one of these states does nothing until someone sends it a command or a message. */
-export const RESTING_STATES: readonly State[] = ["waiting_approve", "waiting_answer", "blocked", "done", "cancelled", "reviewing"];
-/** Resting states whose next step is the factory's, not someone's: no attention, and a watcher does not count them as rest. */
-export const FACTORY_TURN_STATES: readonly State[] = ["reviewing"];
-/** States nothing leaves. */
-export const FINAL_STATES: readonly State[] = ["done", "cancelled"];
+/**
+ * One row per state: `rests`: nothing happens until someone sends a command or a message; `factoryTurn`: a resting
+ * state whose next step is the factory's, not someone's (no attention, a watcher does not count it as rest); `final`:
+ * nothing leaves it.
+ */
+const STATES: Record<State, { rests: boolean; factoryTurn?: true; final?: true }> = {
+  running: { rests: false },
+  waiting_approve: { rests: true },
+  waiting_answer: { rests: true },
+  blocked: { rests: true },
+  merging: { rests: false },
+  done: { rests: true, final: true },
+  cancelled: { rests: true, final: true },
+  reviewing: { rests: true, factoryTurn: true },
+};
+export const isResting = (state: State): boolean => STATES[state].rests;
+export const isFactoryTurn = (state: State): boolean => STATES[state].factoryTurn === true;
+export const isFinal = (state: State): boolean => STATES[state].final === true;
 export type GatePhase = "gates" | "merge_gates" | "after_merge";
 export type Trigger = "start" | "gates" | "review" | "protected" | "message" | "retry" | "conflict";
 export type Severity = "blocker" | "major" | "minor";
@@ -142,10 +154,18 @@ export interface Snapshot {
    */
   runFirstRound: number;
   reason: string;
+  /** The timestamp of the last `factory-state` entry, null before one. */
+  at: string | null;
   /** Written by a merge that has not recorded its `factory-merge` entry yet. */
   mergeIntent: MergeIntentData | null;
-  /** The error of the last merge, when it failed. */
-  mergeError: string | null;
+  /** Why the current round failed: its failed gate (`<argv> (exit N)` and output tail) or failed merge; a new round clears it. */
+  failure: string | null;
+  /** The last review, null before one. */
+  review: Pick<ReviewData, "round" | "status" | "approved" | "findings"> | null;
+  /** The minor findings of every review, oldest first. */
+  minors: MinorFinding[];
+  /** The `flaky` names of the gate records, in order, each once. */
+  flaky: string[];
   /** The commit the last successful merge landed for the task (`MergeData.commit`). */
   mergedCommit: string | null;
   /** The coder's commit message for the next merge (`factory-commit-message`), null when the task title is used; a successful merge clears it. */
@@ -205,27 +225,31 @@ export type Draft = EntryDraft | FeedbackDraft | CommitAskDraft;
 
 const RUN_TRIGGERS: readonly Trigger[] = ["start", "message", "retry"];
 
-type Reducer<K extends EntryType> = (snapshot: Snapshot | undefined, data: EntryData[K]) => Snapshot | undefined;
+type Reducer<K extends EntryType> = (snapshot: Snapshot | undefined, data: EntryData[K], at: string) => Snapshot | undefined;
+
+/** A failed gate as `<argv> (exit N)` and its output tail; null for a passed one. */
+function failedGateText(gate: GateData): string | null {
+  if (gate.exitCode === 0 && !gate.killed) return null;
+  const tail = gate.outputTail.trimEnd();
+  return `${gate.argv.join(" ")} (${gate.killed ? "killed" : `exit ${String(gate.exitCode)}`})${tail === "" ? "" : `\n${tail}`}`;
+}
 
 const REDUCERS: { [K in EntryType]: Reducer<K> } = {
-  "factory-task": (_snapshot, task) => ({ task, state: "running", round: 0, runFirstRound: 1, reason: "", mergeIntent: null, mergeError: null, mergedCommit: null, commitMessage: null }),
+  "factory-task": (_snapshot, task) => ({ task, state: "running", round: 0, runFirstRound: 1, reason: "", at: null, mergeIntent: null, failure: null, review: null, minors: [], flaky: [], mergedCommit: null, commitMessage: null }),
   "factory-round": (snapshot, { round, trigger }) => {
     if (!snapshot) return undefined;
     const opensRun = RUN_TRIGGERS.includes(trigger) || (trigger === "conflict" && snapshot.state !== "running" && snapshot.state !== "merging");
-    return { ...snapshot, round, runFirstRound: opensRun ? round : snapshot.runFirstRound };
+    return { ...snapshot, round, runFirstRound: opensRun ? round : snapshot.runFirstRound, failure: null };
   },
-  "factory-gate": (snapshot) => snapshot,
-  "factory-review": (snapshot) => snapshot,
+  "factory-gate": (snapshot, gate) =>
+    snapshot && { ...snapshot, failure: failedGateText(gate) ?? snapshot.failure, flaky: [...new Set([...snapshot.flaky, ...(gate.flaky ?? [])])] },
+  "factory-review": (snapshot, { round, status, approved, findings }) =>
+    snapshot && { ...snapshot, review: { round, status, approved, findings }, minors: [...snapshot.minors, ...minorFindings(round, findings)] },
   "factory-merge-intent": (snapshot, mergeIntent) => snapshot && { ...snapshot, mergeIntent },
   "factory-merge": (snapshot, { ok, error, commit }) =>
-    snapshot && {
-      ...snapshot,
-      mergeIntent: null,
-      mergeError: ok ? null : error,
-      mergedCommit: ok && commit ? commit : snapshot.mergedCommit,
-    },
-  "factory-state": (snapshot, { state, reason }) =>
-    snapshot && { ...snapshot, state, reason, mergeIntent: null, question: state === "waiting_answer" ? snapshot.question : undefined },
+    snapshot && { ...snapshot, mergeIntent: null, failure: ok ? null : error, mergedCommit: ok && commit ? commit : snapshot.mergedCommit },
+  "factory-state": (snapshot, { state, round, reason }, at) =>
+    snapshot && { ...snapshot, state, round, reason, at, mergeIntent: null, question: state === "waiting_answer" ? snapshot.question : undefined },
   "factory-commit-message": (snapshot, commitMessage) => snapshot && { ...snapshot, commitMessage },
   "factory-question": (snapshot, { text }) => snapshot && { ...snapshot, question: text },
 };
@@ -234,9 +258,9 @@ export function isEntryType(value: string): value is EntryType {
   return Object.hasOwn(REDUCERS, value);
 }
 
-export function applyEntry<K extends EntryType>(snapshot: Snapshot | undefined, customType: K, data: EntryData[K]): Snapshot | undefined {
+export function applyEntry<K extends EntryType>(snapshot: Snapshot | undefined, customType: K, data: EntryData[K], at = new Date().toISOString()): Snapshot | undefined {
   const reduce: Reducer<K> = REDUCERS[customType];
-  return reduce(snapshot, data);
+  return reduce(snapshot, data, at);
 }
 
 /** The task of a session branch, or undefined when the branch holds no `factory-task` entry. Unknown `factory-*` entries are skipped. */
@@ -244,8 +268,8 @@ export function rebuild(entries: Iterable<{ type?: unknown }>): Snapshot | undef
   let snapshot: Snapshot | undefined;
   for (const entry of entries) {
     if (entry.type !== "custom") continue;
-    const { customType, data } = entry as { customType?: unknown; data?: unknown };
-    if (typeof customType === "string" && isEntryType(customType)) snapshot = applyEntry(snapshot, customType, data as EntryData[EntryType]);
+    const { customType, data, timestamp } = entry as { customType?: unknown; data?: unknown; timestamp?: string };
+    if (typeof customType === "string" && isEntryType(customType)) snapshot = applyEntry(snapshot, customType, data as EntryData[EntryType], timestamp);
   }
   return snapshot;
 }

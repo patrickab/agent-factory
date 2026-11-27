@@ -3,19 +3,18 @@
  * `bun runner.ts <worktree> <sessionDir> <sessionId> <inboxPath> <message>`.
  * - Closes Pi's stdin once Pi answered, no run is active, no inbox line is unsent and the task rests after it left its
  *   rest (a command or message starts at rest). A `/` command or message the factory plugin did not handle is refused
- * - Inbox lines go to Pi as follow-ups; how far it was sent is stored before the send, so no line goes out twice. Lines
- *   that came after stdin closed start a successor runner, which gets the task lock
+ * - Inbox lines go to Pi as follow-ups; how far it was sent is stored before the send, so no line goes out twice. A line
+ *   that came after stdin closed is the sender's to deliver (`messageTask`)
  * - Imports nothing outside node built-ins and the plain plugin modules: the deployed plugin has no `node_modules`
  */
-import { spawn } from "node:child_process";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { contractCheck } from "./contracts.ts";
-import { rebuild, RESTING_STATES, type StateData } from "./state.ts";
-import { handLockFile, unlockFile } from "./tasks.ts";
+import { rebuild, isResting, type StateData } from "./state.ts";
+import { unlockFile } from "./lock.ts";
 import { errorText, ifMissing, isRecord, jsonLines, writeAtomic } from "./util.ts";
 import { pokeWave, TASK_WAVE_ENV } from "./wave-poke.ts";
-import { foldWave, readWave, WAVE_FINAL_STAGES } from "./waves.ts";
+import { foldWave, readWave, waveFinal } from "./waves.ts";
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const CHECK_INTERVAL_MS = 2000;
@@ -72,7 +71,7 @@ export function inboxReadPath(inboxPath: string): string {
   return `${inboxPath}.read`;
 }
 
-async function readInboxOffset(inboxPath: string): Promise<number> {
+export async function readInboxOffset(inboxPath: string): Promise<number> {
   const text = await readFile(inboxReadPath(inboxPath), "utf8").catch(() => "0");
   const offset = Number(text.trim());
   return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
@@ -209,7 +208,7 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
    */
   const sendInbox = async (state: StateData | undefined, left: boolean): Promise<boolean> => {
     if (state === undefined || state.state === "merging") return false;
-    const open = runActive ? state.state === "running" : RESTING_STATES.includes(state.state) && left && !commandFailed;
+    const open = runActive ? state.state === "running" : isResting(state.state) && left && !commandFailed;
     if (!open) return false;
     const { texts, next } = await unreadInboxLines(inboxPath, inboxOffset);
     if (next === inboxOffset) return false;
@@ -240,10 +239,10 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
     if (plainRun && runsStarted > 0 && count === startCount) {
       return refuse("pi ran the message without the factory plugin (no factory-state entry): is the agent-factory Pi package installed (`pi install <path of the agent-factory clone>`)?");
     }
-    // A line that came in and cannot go out yet keeps Pi open; one that comes after `closeStdin` waits for the next runner.
+    // A line that came in and cannot go out yet keeps Pi open; one that comes after `closeStdin` goes with the next runner.
     if (await inboxUnread()) return;
     if (commandFailed) return closeStdin();
-    const resting = last !== undefined && RESTING_STATES.includes(last.state);
+    const resting = last !== undefined && isResting(last.state);
     if (resting && left) closeStdin();
   };
   const check = async () => {
@@ -353,11 +352,6 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
   clearTimeout(killTimer);
   process.off("SIGTERM", stop);
   process.off("SIGINT", stop);
-  if (answered && !refused && killTimer === undefined) {
-    await startSuccessor([worktree, sessionDir, sessionId, inboxPath], inboxOffset).catch((error: unknown) =>
-      console.error(`runner: starting the runner for the inbox lines left: ${errorText(error)}`),
-    );
-  }
   if (!answered) {
     console.error(`runner: pi exited (${exitCode}) before it answered the prompt`);
     return exitCode === 0 ? 1 : exitCode;
@@ -367,40 +361,21 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
 }
 
 /**
- * When inbox lines past `offset` came after stdin closed and the task rests: a new detached runner (same output, same
- * environment) with the first line as its message, that line marked sent first, and the task lock handed to it.
+ * The first unsent message of the inbox, marked sent (`<inbox>.read` moved past it), for the next runner's prompt;
+ * undefined when every line was sent. A broken line before it is passed over.
  */
-async function startSuccessor(args: [worktree: string, sessionDir: string, sessionId: string, inboxPath: string], offset: number): Promise<void> {
-  const [, sessionDir, sessionId, inboxPath] = args;
-  const state = await lastFactoryState(sessionDir, sessionId);
-  if (state === undefined || !RESTING_STATES.includes(state.state)) return;
-  const bytes = await readFile(inboxPath).catch(() => undefined);
-  if (bytes === undefined) return;
-  // The first complete line that holds a message; a broken line before it is passed over.
-  let first: { text: string; end: number } | undefined;
-  for (let start = offset; first === undefined; ) {
+export async function takeInboxLine(inboxPath: string): Promise<string | undefined> {
+  const bytes = await ifMissing(readFile(inboxPath), null);
+  if (bytes === null) return undefined;
+  for (let start = await readInboxOffset(inboxPath); ; ) {
     const end = bytes.indexOf(0x0a, start) + 1;
-    if (end === 0) return;
+    if (end === 0) return undefined;
     const text = inboxLineText(bytes.subarray(start, end).toString("utf8"));
-    if (text !== undefined) first = { text, end };
     start = end;
+    if (text === undefined) continue;
+    await writeInboxOffset(inboxPath, end);
+    return text;
   }
-  await writeInboxOffset(inboxPath, first.end);
-  let pid: number | undefined;
-  try {
-    const child = spawn(process.execPath, [import.meta.path, ...args, first.text], { detached: true, stdio: ["ignore", "inherit", "inherit"], env: process.env });
-    await new Promise<void>((resolveSpawn, reject) => {
-      child.once("spawn", () => resolveSpawn());
-      child.once("error", reject);
-    });
-    child.unref();
-    pid = child.pid;
-  } catch (error) {
-    await writeInboxOffset(inboxPath, offset);
-    throw error;
-  }
-  const lock = process.env.FACTORY_TASK_LOCK;
-  if (pid !== undefined && lock) await handLockFile(lock, pid);
 }
 
 /**
@@ -411,9 +386,9 @@ async function pokeTaskWave(sessionDir: string, sessionId: string): Promise<void
   const wave = process.env[TASK_WAVE_ENV];
   if (wave === undefined || wave === "") return;
   const state = await lastFactoryState(sessionDir, sessionId);
-  if (state === undefined || !RESTING_STATES.includes(state.state)) return;
+  if (state === undefined || !isResting(state.state)) return;
   const file = await readWave(wave);
-  if (WAVE_FINAL_STAGES.includes(foldWave(file.declaration, file.events).stage)) return;
+  if (waveFinal(foldWave(file.declaration, file.events).stage)) return;
   await pokeWave(wave);
 }
 

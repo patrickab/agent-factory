@@ -7,13 +7,13 @@
 import { mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { noticeInputs } from "../core.ts";
-import { FINAL_STATES } from "../state.ts";
+import { isFinal } from "../state.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
 import { pendingNotices, scoutNoticeKey, type Notice } from "../notify.ts";
 import { callerKey, scoutDirs, scoutsDir, scoutView, type ScoutView } from "../scouts.ts";
 import { proofsDir, proofsOf } from "../gates-prove.ts";
 import { tasksDir } from "../tasks.ts";
-import { WAVE_FINAL_STAGES, type WaveView } from "../waves.ts";
+import { waveFinal, type WaveView } from "../waves.ts";
 import { wavePath, wavesDir } from "../wave-poke.ts";
 
 export interface NotifierOptions {
@@ -145,11 +145,11 @@ export function startNotifier(options: NotifierOptions): Notifier {
     for (const task of tasks) {
       const seen = before.get(task.id);
       // Final when read, the file stamped before that read: a task first read here is read once more first.
-      if (seen !== undefined && seen.path === task.sessionPath && task.state !== null && FINAL_STATES.includes(task.state)) {
+      if (seen !== undefined && seen.path === task.sessionPath && task.state !== null && isFinal(task.state)) {
         finishedTasks.set(task.id, { sessionId: task.sessionId, path: seen.path, stamp: seen.stamp });
       }
     }
-    for (const wave of waves) if (WAVE_FINAL_STAGES.includes(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);
+    for (const wave of waves) if (waveFinal(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);
     if (!stopped) options.onWaves?.([...waves.map((wave) => wave.view).filter((view) => !finishedWaves.has(view.id)), ...finishedWaves.values()]);
   };
 

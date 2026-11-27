@@ -10,16 +10,14 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { factoryHome } from "./settings.ts";
-import { onPath, spawnDetached, stopProcesses, type RunnerEnv } from "./spawn.ts";
-import { handLockFile, lockFile, lockRunner, unlockFile } from "./tasks.ts";
+import { lockFile, lockRunner, startRunner } from "./lock.ts";
+import { stopProcesses, type RunnerEnv } from "./spawn.ts";
 import { isBusy } from "./util.ts";
 
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory.
 export const WAVE_RUNNER_PATH = join(import.meta.dirname, "wave-runner.ts");
 /** Set on a wave task's runner: the wave it pokes when it ends with the task at rest. */
 export const TASK_WAVE_ENV = "FACTORY_TASK_WAVE";
-/** A task runner's own variables, which a poke (from that runner) never passes on to the wave runner. */
-const TASK_RUNNER_ENV = ["FACTORY_TASK_SESSION", "FACTORY_TASK_LOCK", TASK_WAVE_ENV];
 
 /** Wave ids have the shape of task ids (`crypto.randomUUID`): never a path separator. */
 const WAVE_ID = /^[0-9a-f-]{36}$/;
@@ -83,19 +81,12 @@ export async function lockWave(id: string): Promise<void> {
   await lockFile(waveLockPath(id), `wave ${id.slice(0, 8)} has a runner`);
 }
 
-/** Removes the wave runner's lock if this process holds it. */
-export async function unlockWave(id: string): Promise<void> {
-  await unlockFile(waveLockPath(id));
-}
-
 /**
  * Makes the wave's runner look at the wave: the marker, then a new runner with `env` (default `process.env`) unless a
  * live one holds the wave's lock. Resolves with true when it started a runner.
  */
 export async function pokeWave(id: string, env: RunnerEnv = process.env): Promise<boolean> {
   if (!isWaveId(id)) throw new Error(`${id} is not a wave id`);
-  const bun = onPath("bun");
-  if (bun === null) throw new Error("bun is not on PATH: the wave runner needs it");
   await mkdir(wavesDir(), { recursive: true });
   // The marker first: a runner that holds the lock now looks for it after it let the lock go.
   await writeFile(wavePokePath(id), "", "utf8");
@@ -105,16 +96,8 @@ export async function pokeWave(id: string, env: RunnerEnv = process.env): Promis
     if (isBusy(error)) return false;
     throw error;
   }
-  let pid: number | undefined;
-  try {
-    const runnerEnv: RunnerEnv = { ...env };
-    for (const key of TASK_RUNNER_ENV) delete runnerEnv[key];
-    pid = await spawnDetached([bun, WAVE_RUNNER_PATH, id], runnerEnv, waveLogPath(id), import.meta.dirname);
-  } finally {
-    if (pid === undefined) await unlockWave(id);
-  }
-  if (pid !== undefined) await handLockFile(waveLockPath(id), pid);
-  return pid !== undefined;
+  await startRunner({ lock: waveLockPath(id), argv: [WAVE_RUNNER_PATH, id], env, log: waveLogPath(id), cwd: import.meta.dirname });
+  return true;
 }
 
 /** The wave's live runner: the holder of its lock (`lockRunner`), named by the wave id; as a list. */

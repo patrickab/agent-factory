@@ -11,7 +11,7 @@ import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CommandResult } from "./run.ts";
 import { factoryHome } from "./settings.ts";
-import { procAlive, procStart } from "./tasks.ts";
+import { procAlive, procStart } from "./lock.ts";
 
 export const SLOTS_ENV = "FACTORY_SLOTS";
 export const TEST_JOBS_ENV = "FACTORY_TEST_JOBS";

@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { caseDigits, caseSerial, caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
 import type { TaskView } from "./core-tasks.ts";
-import { caseDir, expectError, failure, fakeRecord, git, makeRepo, prompts, RUN, runnerEnded, runnerHolding, stateOf, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { caseDir, expectError, failure, fakeRecord, git, makeRepo, prompts, RUN, runnerEnded, runnerHolding, stateOf, until, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { sessionWave, startWaveTasks } from "./core-waves.ts";
 import { stopRunners } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, writeTask, type TaskRecord } from "./tasks.ts";
-import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath } from "./wave-poke.ts";
+import { liveWaveRunners, pokeWave, stopWaveRunners, waveLockPath, wavePokePath } from "./wave-poke.ts";
 import { appendWaveEvent, createWave, foldWave, listWaves, readWave, type WaveView } from "./waves.ts";
 
 useCoreFixture();
@@ -414,7 +414,7 @@ describe("waiting on waves and the wave actions", () => {
       const record = { ...fakeRecord([taskId(1), taskId(2), taskId(3)][index], repo), tag: "factory/w1", wave: WAVE() };
       await writeTask(record);
       // "starting": no session file yet.
-      if (state !== "starting") writeSession(record, [stateEntry(state)]);
+      if (state !== "starting") writeSession(record, [TASK_ENTRY, stateEntry(state)]);
       await appendWaveEvent(WAVE(), { kind: "task", key: String.fromCharCode(97 + index), taskId: record.id, sessionId: record.sessionId });
       records.push(record);
     }
@@ -425,7 +425,7 @@ describe("waiting on waves and the wave actions", () => {
   /** A live stand-in of the wave's runner; resolves with the function that ends it. */
   async function fakeRunner(): Promise<() => Promise<void>> {
     const end = join(caseDir, "runner-end");
-    const child = await runnerHolding(WAVE(), { ...process.env, FAKE_RUNNER_END: end });
+    const child = await runnerHolding(waveLockPath(WAVE()), WAVE(), { ...process.env, FAKE_RUNNER_END: end });
     await until(async () => (await liveWaveRunners(WAVE())).length === 1);
     return async () => {
       writeFileSync(end, "");
@@ -453,7 +453,7 @@ describe("waiting on waves and the wave actions", () => {
     const stop = await fakeRunner();
     const quiet = await wait({ wave: WAVE(), timeoutMs: 1_000 });
     expect([quiet.timedOut, quiet.attention]).toEqual([true, []]);
-    setTimeout(() => writeSession(asking, [stateEntry("waiting_answer")]), 300);
+    setTimeout(() => writeSession(asking, [TASK_ENTRY, stateEntry("waiting_answer")]), 300);
     const asked = await wait({ wave: WAVE(), timeoutMs: 10_000 });
     expect([asked.timedOut, asked.attention, asked.waves[0].stage]).toEqual([false, [taskId(2)], "building"]);
     await stop();
@@ -478,7 +478,7 @@ describe("waiting on waves and the wave actions", () => {
       await expectError(callAction("tasks.retry", { id: cancelled.id }), "refused", `belongs to wave ${WAVE().slice(0, 8)}, which is ${stage}`);
       await expectError(callAction("tasks.message", { id: done.id, text: "one more thing" }), "refused", "waves.add");
     }
-    writeSession(done, [stateEntry("waiting_approve")]);
+    writeSession(done, [TASK_ENTRY, stateEntry("waiting_approve")]);
     expect(await actionsOf(done)).toEqual(["tasks.cancel", "tasks.remove"]);
     await expectError(callAction("tasks.approve", { id: done.id }), "refused", "approve is refused; give the work to the wave with waves.add");
     // Nothing reached a runner.
@@ -569,7 +569,7 @@ describe("waiting on waves and the wave actions", () => {
     for (const record of [a, b]) git(repo, "worktree", "add", "--quiet", "-b", record.branch, record.worktree, "main");
     await expectError(callAction("waves.remove", { id: WAVE(), force: true }), "refused", "waits for the answer to its question");
     expect((await getWave()).actions).toEqual([]);
-    writeSession(b, [stateEntry("cancelled")]);
+    writeSession(b, [TASK_ENTRY, stateEntry("cancelled")]);
     writeFileSync(join(a.worktree, "stray.txt"), "x\n");
     const refused = await failure(callAction("waves.remove", { id: WAVE() }));
     expect([refused.code, refused.detail, refused.message]).toEqual(["refused", { force: true }, expect.stringContaining("give force: true")]);

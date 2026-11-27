@@ -20,14 +20,15 @@ import { fitFix, reviewFit, reviewNext, type ReviewEachDeps } from "./review-eac
 import { CommandRunner, type CommandResult } from "./run.ts";
 import { INFRA_EXIT, passed, type GateData, type Task } from "./state.ts";
 import { errorText, FactoryError, isBusy, outputTail } from "./util.ts";
-import { clearPoke, lockWave, unlockWave, waveLockPath, wavePokePath } from "./wave-poke.ts";
+import { clearPoke, lockWave, waveLockPath, wavePokePath } from "./wave-poke.ts";
+import { unlockFile } from "./lock.ts";
 import {
   allCancelled,
   appendWaveEvents,
   foldWave,
   readWave,
   readyForReview,
-  RESTING_WAVE_STAGES,
+  waveRests,
   stuckKeys,
   type NewWaveEvent,
   type WaveDeclaration,
@@ -511,7 +512,7 @@ async function step(id: string): Promise<Next> {
   if (fold.stage === "merged") {
     for (const failure of await pokeQueuedAfter(id, process.env)) log(id, `poking a queued wave failed: ${failure}`);
   }
-  if (RESTING_WAVE_STAGES.includes(fold.stage)) return "rest";
+  if (waveRests(fold.stage)) return "rest";
   if (fold.stage === "reviewing") await leave(fold, "reviewing", await whileAt(id, "reviewing", () => review(fold)));
   else if (fold.stage === "merging") await leave(fold, "merging", await merge(fold));
   else return build(fold);
@@ -620,7 +621,7 @@ export async function runWave(id: string): Promise<number> {
   try {
     for (;;) {
       await drive(id);
-      await unlockWave(id);
+      await unlockFile(waveLockPath(id));
       // A poke that found the lock still taken left its marker for this runner: look again if nobody else took over.
       if (stopping || !existsSync(wavePokePath(id))) return 0;
       try {
@@ -631,7 +632,7 @@ export async function runWave(id: string): Promise<number> {
       }
     }
   } finally {
-    await unlockWave(id).catch(() => undefined);
+    await unlockFile(waveLockPath(id)).catch(() => undefined);
     process.off("SIGTERM", stop);
     process.off("SIGINT", stop);
   }

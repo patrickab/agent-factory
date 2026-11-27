@@ -17,9 +17,8 @@ import { git } from "./git.ts";
 import { defaultBranch, localBranchExists, runAfterCreate, worktreePath } from "./launch.ts";
 import { CommandRunner, runCommand, type CommandResult, type Exec } from "./run.ts";
 import { factoryHome, loadSettings } from "./settings.ts";
-import { onPath, spawnDetached } from "./spawn.ts";
+import { lockFile, lockHeld, startRunner, unlockFile } from "./lock.ts";
 import { passed } from "./state.ts";
-import { handLockFile, lockFile, lockRunner, unlockFile } from "./tasks.ts";
 import { errorText, FactoryError, ifMissing, jsonLines, outputTail, writeAtomic } from "./util.ts";
 
 export type ProofState = "running" | "passed" | "flaky" | "failing";
@@ -86,9 +85,9 @@ async function proofIds(): Promise<string[]> {
   return names.filter((name) => name.endsWith(".jsonl")).map((name) => name.slice(0, -".jsonl".length));
 }
 
-/** Whether its runner lives is asked first: a runner writes its end before it exits. */
+/** Whether its runner lives is asked first: a runner writes its end before it exits. The starter's lock counts too. */
 export async function proofView(id: string): Promise<ProofView> {
-  const lives = (await lockRunner(proofLockPath(id), id)) !== null;
+  const lives = await lockHeld(proofLockPath(id));
   const { declaration, end } = await readProof(id);
   const steps = end?.steps ?? [];
   return {
@@ -145,8 +144,6 @@ export const PROOF_HANDLERS = {
     if (!(await localBranchExists(repo, branch))) throw new FactoryError("not_found", `${repo} has no local branch ${branch}`);
     if (!(await branchHasConfig(repo, branch))) throw new FactoryError("refused", `${repo}: branch ${branch} has no factory.yaml (write one with /factory init or the config.write action, and commit it)`);
     await removeLeftovers(repo);
-    const bun = onPath("bun");
-    if (bun === null) throw new FactoryError("failed", "bun is not on PATH: the proof's runner needs it");
     const declaration: ProofDeclaration = {
       id: crypto.randomUUID(),
       repo,
@@ -155,19 +152,15 @@ export const PROOF_HANDLERS = {
       origin: origin ?? null,
       createdAt: new Date().toISOString(),
     };
+    const { id } = declaration;
     // Held by this process until the runner has it.
-    await lockFile(proofLockPath(declaration.id), `proof ${declaration.id.slice(0, 8)} is busy`);
+    await lockFile(proofLockPath(id), `proof ${id.slice(0, 8)} is busy`);
     await writeProof(declaration);
-    const pid = await spawnDetached([bun, PROOF_RUNNER_PATH, declaration.id], env ?? process.env, proofLogPath(declaration.id), import.meta.dirname).catch((error: unknown) => {
-      log(declaration.id, errorText(error));
-      return undefined;
+    await startRunner({ lock: proofLockPath(id), argv: [PROOF_RUNNER_PATH, id], env: env ?? process.env, log: proofLogPath(id), cwd: import.meta.dirname }).catch(async (error: unknown) => {
+      await rm(proofPath(id), { force: true });
+      throw new FactoryError("failed", `the runner of proof ${id.slice(0, 8)} did not start (${errorText(error)})`);
     });
-    if (pid === undefined) {
-      await Promise.all([proofPath(declaration.id), proofLockPath(declaration.id)].map((path) => rm(path, { force: true })));
-      throw new FactoryError("failed", `the runner of proof ${declaration.id.slice(0, 8)} did not start`);
-    }
-    await handLockFile(proofLockPath(declaration.id), pid);
-    return { proof: await proofView(declaration.id) };
+    return { proof: await proofView(id) };
   },
 } satisfies Record<string, Handler>;
 

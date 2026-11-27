@@ -8,7 +8,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Notice } from "./notify.ts";
 import { factoryHome } from "./settings.ts";
-import { withLock } from "./tasks.ts";
+import { withLock } from "./lock.ts";
 import { readJsonl } from "./util.ts";
 
 /** How long a claim waits for the lock another session holds. */

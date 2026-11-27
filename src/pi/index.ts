@@ -40,7 +40,7 @@ import {
   type OpsDeps,
   type RunOpening,
 } from "../ops.ts";
-import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, type Draft, type State } from "../state.ts";
+import { applyEntry, followUpMessages, messageText, rebuild, isResting, stateDraft, type Draft, type State } from "../state.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
 import { createScoutTracker, registerScoutTool, type ScoutCore } from "./scout-tool.ts";
 import { isTaskSession, registerFactoryTool, toolError, toolText } from "./tool.ts";
@@ -248,7 +248,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     taskRecord = undefined;
     registerTaskTools();
     // A run is active only inside the process that started it: a task loaded in a state that does not rest was interrupted.
-    if (session.snapshot && !RESTING_STATES.includes(session.snapshot.state)) await resumeTask(deps(ctx), session.snapshot);
+    if (session.snapshot && !isResting(session.snapshot.state)) await resumeTask(deps(ctx), session.snapshot);
   });
 
   pi.on("session_tree", (_event, ctx) => {
@@ -277,7 +277,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     }
     // The answer to the coder's question continues its round: no rebase, so the worktree stays as the coder left it.
     if (atRest.state === "waiting_answer") return;
-    if (!RESTING_STATES.includes(atRest.state)) return;
+    if (!isResting(atRest.state)) return;
     const ops = deps(ctx);
     try {
       opened = await openRun(ops, atRest);
@@ -301,7 +301,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     opened = undefined;
     const ops = deps(ctx);
     const answers = event.messageType === "user" && atRest.state === "waiting_answer";
-    const opens = event.messageType === "user" && !answers && RESTING_STATES.includes(atRest.state);
+    const opens = event.messageType === "user" && !answers && isResting(atRest.state);
     if (answers) resumeAnswered(ops, atRest);
     if (opens) startRun(ops, atRest, "message", opening);
     // A `factory.yaml` that does not parse is reported by the round, not here.

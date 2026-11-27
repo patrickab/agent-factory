@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RESTING_STATES, RETRY_PROMPT, roundsUsed, type Finding, type Task } from "./state.ts";
+import { isResting, applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RETRY_PROMPT, roundsUsed, type Finding, type Task } from "./state.ts";
 
 const task: Task = {
   title: "Add notes",
@@ -10,7 +10,7 @@ const task: Task = {
   baseSha: "abc",
 };
 
-const custom = (customType: string, data: unknown) => ({ type: "custom", customType, data });
+const custom = (customType: string, data: unknown) => ({ type: "custom", customType, data, timestamp: "t" });
 const finding = (severity: Finding["severity"]): Finding => ({ file: "a.ts", line: 1, severity, text: "x" });
 
 describe("rebuild", () => {
@@ -24,12 +24,12 @@ describe("rebuild", () => {
       custom("factory-round", { round: 1, trigger: "start" }),
       custom("factory-state", { state: "running", round: 1, reason: "start" }),
       { type: "message" },
-      custom("factory-gate", { round: 1 }),
+      custom("factory-gate", { round: 1, phase: "gates", argv: ["t"], exitCode: 0, killed: false, durationMs: 1, outputTail: "" }),
       custom("factory-round", { round: 2, trigger: "gates" }),
       custom("factory-merge-intent", { commit: "def", before: "abc" }),
       custom("factory-merge", { ok: false, commit: null, error: "x", depsSynced: false }),
     ]);
-    expect(snapshot).toMatchObject({ state: "running", round: 2, mergeIntent: null, mergeError: "x" });
+    expect(snapshot).toMatchObject({ state: "running", round: 2, mergeIntent: null, failure: "x" });
     const done = rebuild([
       custom("factory-task", task),
       custom("factory-round", { round: 1, trigger: "start" }),
@@ -37,7 +37,7 @@ describe("rebuild", () => {
       custom("factory-merge", { ok: true, commit: "def", error: null, depsSynced: false }),
       custom("factory-state", { state: "done", round: 1, reason: "merged" }),
     ]);
-    expect(done).toEqual({ task, state: "done", round: 1, runFirstRound: 1, reason: "merged", mergeIntent: null, mergeError: null, mergedCommit: "def", commitMessage: null });
+    expect(done).toEqual({ task, state: "done", round: 1, runFirstRound: 1, reason: "merged", at: "t", mergeIntent: null, failure: null, review: null, minors: [], flaky: [], mergedCommit: "def", commitMessage: null });
   });
 
   test("message and retry open a run with a fresh round budget", () => {
@@ -67,7 +67,7 @@ describe("rebuild", () => {
     ];
     const asked = rebuild(entries);
     expect(asked).toMatchObject({ state: "waiting_answer", round: 1, runFirstRound: 1, reason: "question", question: "Which table?" });
-    expect(RESTING_STATES).toContain("waiting_answer");
+    expect(isResting("waiting_answer")).toBe(true);
     const answered = rebuild([...entries, custom("factory-state", { state: "running", round: 1, reason: "answer" })]);
     expect(answered).toMatchObject({ state: "running", round: 1, runFirstRound: 1 });
     expect(answered?.question).toBeUndefined();

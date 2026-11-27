@@ -24,7 +24,7 @@ const SYSTEMD_USER_ENV = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"];
  * it runs in a transient user scope of its own (`--collect`: unloaded even when it failed), outside the caller's
  * process group and control group: a restart of the service or the terminal the caller lived in leaves it. Else the
  * command as it is (detached by `spawnDetached`). `systemd-run --scope` execs the command, so the spawned pid and its
- * command line are the runner's (`runnerAlive` finds it).
+ * command line are the runner's (`lockRunner` finds it).
  */
 function runnerSpawn(command: string[], env: RunnerEnv, hostEnv: RunnerEnv, systemdRun: string | null): { argv: string[]; env: RunnerEnv } {
   if (systemdRun === null || (env.XDG_RUNTIME_DIR ?? hostEnv.XDG_RUNTIME_DIR) === undefined) return { argv: command, env };

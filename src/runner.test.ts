@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { messageTask, sendCommand } from "./launch.ts";
 import { saveSettings } from "./settings.ts";
-import { lockTask, taskLockPath, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
+import { lockTask, taskLockPath, taskLogPath, type TaskRecord } from "./tasks.ts";
+import { unlockFile } from "./lock.ts";
 
 const savedEnv = { ...process.env };
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-runner-test-")));
@@ -20,7 +21,7 @@ const RUNNER = join(import.meta.dir, "runner.ts");
  * answer), `retry` (answers, a run starts later and ends blocked again), `started` (the prompt went to the model:
  * disposition `started`, a run, no entry), `inbox` (a run that takes every follow-up prompt that comes in, noted as
  * `coder <text>`, until 1.5 s pass without one, then blocked), `plain` (as `inbox`, answered `started`).
- * FAKE_PI_EXIT_DELAY: ms between stdin EOF and the exit. Every stdin line after the prompt is noted as `stdin <line>`;
+ * Every stdin line after the prompt is noted as `stdin <line>`;
  * a later prompt is answered `queued` during a run, else `started`.
  */
 const fakeBin = join(scratch, "bin");
@@ -83,7 +84,6 @@ setInterval(() => {}, 1000);
     }
   }
   note("eof " + current);
-  if (process.env.FAKE_PI_EXIT_DELAY) await sleep(Number(process.env.FAKE_PI_EXIT_DELAY));
   if (mode !== "stubborn") process.exit(0);
 })();
 note("prompt " + (await prompt));
@@ -286,26 +286,6 @@ describe("runner", () => {
     expect(noted(next).slice(3)).toEqual(["state running", stdin[0], "coder two", "state blocked", "settled", "eof blocked"]);
   }, 20_000);
 
-  test("an inbox line that came after stdin closed: once pi exited at rest, a successor runner sends it and takes the lock", async () => {
-    const c = newCase();
-    const lock = join(c.dir, "task.lock");
-    const runner = Bun.spawn(["bun", RUNNER, c.worktree, c.sessionDir, c.sessionId, c.inbox, "/factory start {}"], {
-      env: { ...process.env, PATH: `${fakeBin}:${savedEnv.PATH}`, FAKE_PI_LOG: c.log, FAKE_PI_MODE: "merge", FAKE_PI_EXIT_DELAY: "1500", FACTORY_TASK_LOCK: lock },
-    });
-    writeFileSync(lock, `${runner.pid} 0\n`);
-    await until(() => noted(c).includes("eof done"));
-    appendFileSync(c.inbox, `${JSON.stringify({ text: "late" })}\n`);
-    expect(await runner.exited).toBe(0);
-    const prompt = `prompt ${JSON.stringify({ id: "1", type: "prompt", message: "late", streamingBehavior: "followUp" })}`;
-    await until(() => noted(c).includes(prompt));
-    const holder = Number(readFileSync(lock, "utf8").split(" ")[0]);
-    expect(holder).not.toBe(runner.pid);
-    expect(readFileSync(`${c.inbox}.read`, "utf8").trim()).toBe(String(readFileSync(c.inbox).length));
-    // The last runner removes the lock as it exits.
-    await until(() => !existsSync(lock), 15_000);
-    expect(noted(c).filter((line) => line.startsWith("eof "))).toEqual(["eof done", "eof done"]);
-  }, 30_000);
-
   for (const signal of ["SIGTERM", "SIGINT"] as const) {
     test(`${signal}: closes stdin, kills a pi that does not end, leaves no pi behind`, async () => {
       const c = newCase();
@@ -363,7 +343,7 @@ describe("messageTask", () => {
     await lockTask(record.id);
     await expect(messageTask(record, "hi")).rejects.toThrow(`task ${record.id.slice(0, 8)} is busy`);
     expect(existsSync(c.log)).toBe(false);
-    await unlockTask(record.id);
+    await unlockFile(taskLockPath(record.id));
   });
 
 });

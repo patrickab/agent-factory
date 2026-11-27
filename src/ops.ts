@@ -30,7 +30,7 @@ import {
   conflictFeedback,
   customDraft,
   FEEDBACK_TYPE,
-  FINAL_STATES,
+  isFinal,
   type MergeData,
   mergeFailedPrompt,
   parseStartPayload,
@@ -393,7 +393,7 @@ export async function retryTask(deps: OpsDeps, current: Snapshot): Promise<OpRes
     }
     startRun(deps, current, "retry", opening);
     // A failed merge is in no message the coder sees.
-    const failed = current.reason === "merge_failed" && current.mergeError;
+    const failed = current.reason === "merge_failed" && current.failure;
     if (opening.conflict !== undefined) deps.sendMessage(conflictMessage(current.round, opening.conflict), { triggerTurn: true });
     else deps.sendUserMessage(failed ? mergeFailedPrompt(failed) : RETRY_PROMPT);
     return { ok: true };
@@ -403,7 +403,7 @@ export async function retryTask(deps: OpsDeps, current: Snapshot): Promise<OpRes
 /** Kills the running command group. A merge or a round in flight ends itself `cancelled`, an idle task is cancelled here. */
 export async function cancelTask(deps: OpsDeps, current: Snapshot): Promise<OpResult> {
   const { state } = current;
-  if (FINAL_STATES.includes(state)) return { ok: false, error: "the task is not active" };
+  if (isFinal(state)) return { ok: false, error: "the task is not active" };
   return guarded(async () => {
     const { runner } = deps.session;
     runner.cancel();

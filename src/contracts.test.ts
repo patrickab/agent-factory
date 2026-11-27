@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { contractCheck, contractsForLaunch, readContract, stampOf } from "./contracts.ts";
 import { waveContracts } from "./core-contracts.ts";
 import { callAction } from "./core.ts";
-import { caseDir, expectError, fakeRecord, makeRepo, RUN, scratch, testPath, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { caseDir, expectError, fakeRecord, makeRepo, RUN, scratch, testPath, until, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { readStore, writeFakeMemoryStore, writeStore } from "./fake-memory-store.ts";
 import { readTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { appendWaveEvent, createWave, type WaveView } from "./waves.ts";
@@ -114,7 +114,7 @@ describe("contracts.apply", () => {
       record.sessionDir = join(caseDir, "sessions", key);
       await writeTask(record);
     }
-    writeSession(await readTask(asked), [{ type: "custom", customType: "factory-state", data: { state: "waiting_answer", round: 1, reason: "start" } }]);
+    writeSession(await readTask(asked), [TASK_ENTRY, { type: "custom", customType: "factory-state", data: { state: "waiting_answer", round: 1, reason: "start" } }]);
 
     const answer = (await callAction("contracts.apply", { store: STORE, name: "api", op: { op: "update", path: "answer", id: "f0", text: "{ok, raced}" } })) as { kept: { key: string }[] };
     expect(answer.kept.map((task) => task.key)).toEqual(["ask"]);

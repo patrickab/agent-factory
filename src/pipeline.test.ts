@@ -26,8 +26,12 @@ function snapshotOf(settings: Partial<Settings> = {}, round = 1, runFirstRound =
     round,
     runFirstRound,
     reason: "start",
+    at: null,
     mergeIntent: null,
-    mergeError: null,
+    failure: null,
+    review: null,
+    minors: [],
+    flaky: [],
     mergedCommit: null,
     commitMessage: null,
   };

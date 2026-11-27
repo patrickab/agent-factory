@@ -4,7 +4,7 @@ import { SCOUT_HANDLERS } from "./core-scouts.ts";
 import { feature, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 import { notice, scoutNoticeKey, type Notice } from "./notify.ts";
-import type { ScoutView } from "./scouts.ts";
+import { FINAL_SCOUT_STATES, type ScoutView } from "./scouts.ts";
 import { short } from "./util.ts";
 
 /** `scout <id> reported`, or how else it ended. */
@@ -14,7 +14,7 @@ export function scoutEndTitle(scout: ScoutView): string {
 
 function scoutNotice(scout: ScoutView): Notice | null {
   if (scout.caller.kind !== "session" || scout.caller.id === null) return null;
-  const ended = scout.state === "done" || scout.state === "failed" || scout.state === "cancelled";
+  const ended = FINAL_SCOUT_STATES.includes(scout.state);
   if (!ended && !scout.interrupted) return null;
   const title = scoutEndTitle(scout);
   return notice(scoutNoticeKey(scout.id), scout.caller.id, title, () => scoutCard(scout, title));

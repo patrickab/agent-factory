@@ -7,7 +7,7 @@ import { waveCause } from "./decisions.ts";
 import { feature, REPO, spec, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
 import { schemaOf } from "./settings.ts";
 import type { Handlers } from "./feature.ts";
-import { WAVE_FINAL_STAGES, type WaveView } from "./waves.ts";
+import { waveFinal, type WaveView } from "./waves.ts";
 import { short } from "./util.ts";
 
 export const WAVES = feature({
@@ -76,7 +76,7 @@ export const WAVES = feature({
       false,
       // The finished ones as a count: a long history must not fill an agent's context.
       (_params, result: { waves: WaveView[] }) => {
-        const open = result.waves.filter((wave) => !WAVE_FINAL_STAGES.includes(wave.stage));
+        const open = result.waves.filter((wave) => !waveFinal(wave.stage));
         return card("action", "quiet", result.waves.length === 0 ? "no waves" : plural(result.waves.length, "wave"), {
           rows: [
             ...open.map((wave) => ({ label: wave.tag, text: `${waveState(wave)}  ${wave.counts.done}/${wave.counts.total}  ${short(wave.id)}  ${wave.title}` })),

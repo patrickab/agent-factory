@@ -7,7 +7,7 @@
  *   open wave's branch (invariant 13)
  */
 import { existsSync } from "node:fs";
-import { readFile, stat, truncate } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { byId, nonEmpty, primaryOf, tagParam, type Handler } from "./core-shared.ts";
 import { diffFileCounts, git, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
@@ -19,19 +19,19 @@ import {
   messageTask,
   sendCommand,
   stopRunners,
-  taskInboxPath,
   unmergedWork,
   type RunnerEnv,
   type UnmergedWork,
 } from "./launch.ts";
-import { inboxReadPath, readFactoryStates, sessionEntries, sessionFilePath, taskMainBranch } from "./runner.ts";
+import { readFactoryStates, sessionEntries, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { runCommand } from "./run.ts";
 import { requireModels } from "./models.ts";
 import { checkSettings, factoryHome, loadSettings, resolveSettings } from "./settings.ts";
-import { COMMIT_ASK_TYPE, FACTORY_TURN_STATES, FINAL_STATES, isFactoryPrompt, messageText, minorFindings, rebuild, RESTING_STATES, type EntryData, type EntryType, type Finding, type GateData, type MergeData, type MinorFinding, type ReviewData, type Settings, type State, type StateData } from "./state.ts";
-import { listTasks, lockTask, tagInGroup, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
+import { COMMIT_ASK_TYPE, isFactoryTurn, isFinal, isFactoryPrompt, messageText, rebuild, isResting, type Finding, type MinorFinding, type ReviewData, type Settings, type Snapshot, type State } from "./state.ts";
+import { listTasks, lockTask, tagInGroup, taskLockPath, taskLogPath, type TaskRecord } from "./tasks.ts";
+import { unlockFile } from "./lock.ts";
 import { addUsage, cents, FactoryError, isRecord, jsonLines, piUsage, short, writeAtomic, type Usage } from "./util.ts";
-import { foldWave, listWaves, readWave, WAVE_FINAL_STAGES, type WaveStage } from "./waves.ts";
+import { foldWave, listWaves, readWave, waveFinal, type WaveStage } from "./waves.ts";
 import { pokeWave } from "./wave-poke.ts";
 import { cancelScouts, scoutUsage } from "./scouts.ts";
 import { slotWaiting } from "./test-slots.ts";
@@ -138,73 +138,23 @@ async function taskWaveStage(record: TaskRecord, known?: WaveStage): Promise<Wav
   }
 }
 
-/** A failed gate as `<argv> (exit N)` and its output tail; null for a passed one. */
-function failedGateText(gate: GateData): string | null {
-  if (gate.exitCode === 0 && !gate.killed) return null;
-  const tail = gate.outputTail.trimEnd();
-  return `${gate.argv.join(" ")} (${gate.killed ? "killed" : `exit ${String(gate.exitCode)}`})${tail === "" ? "" : `\n${tail}`}`;
-}
-
-/** The unrounded usage of a task view, for sums (the view itself shows cost in cents). */
-const unroundedUsage = new WeakMap<object, Usage>();
-export function rawUsage(view: TaskView): Usage | null {
-  return unroundedUsage.get(view) ?? view.usage;
-}
-
 /** What a task's session file says (`sessionSummary`): a function of its content only. `usage` unrounded. */
-interface SessionSummary extends Pick<TaskView, "settings" | "question" | "lastMessage" | "failure" | "review" | "merged" | "minors" | "flaky"> {
-  last: { state: State; round: number; reason: string; at: string } | null;
-  usage: TaskView["usage"];
+interface SessionSummary {
+  snapshot?: Snapshot;
+  /** Coder messages and reviews. */
+  usage: Usage | null;
+  lastMessage: string | null;
 }
 
-/**
- * The plugin's reducer (`rebuild`) gives the settings, the question and the merged commit; one loop adds the rest: the
- * last state with its time, usage, the coder's last message (not its answer to the commit message ask), the failure of
- * the round it stopped in when `blocked`, the last review, minors and flaky names.
- */
+/** The plugin's reducer (`rebuild`), and what no custom entry holds: usage and the coder's last message (not its answer to the commit message ask). */
 function summarize(entries: Record<string, unknown>[]): SessionSummary {
-  const snapshot = rebuild(entries);
-  let last: SessionSummary["last"] = null;
   let usage: Usage | null = null;
   let lastMessage: string | null = null;
   let answeringCommitAsk = false;
-  let failedGate: string | null = null;
-  let mergeError: string | null = null;
-  let review: TaskView["review"] = null;
-  const minors: MinorFinding[] = [];
-  const flaky = new Set<string>();
   for (const entry of entries) {
     if (entry.type === "custom_message" && entry.customType === COMMIT_ASK_TYPE) answeringCommitAsk = true;
-    if (entry.type === "custom") {
-      const data = entry.data as EntryData[EntryType];
-      switch (entry.customType as EntryType) {
-        case "factory-state": {
-          const { state, round, reason } = data as StateData;
-          last = { state, round, reason, at: typeof entry.timestamp === "string" ? entry.timestamp : "" };
-          break;
-        }
-        case "factory-round":
-          // A new round: what failed before it was fed back to the coder.
-          [failedGate, mergeError, answeringCommitAsk] = [null, null, false];
-          break;
-        case "factory-gate": {
-          const gate = data as GateData;
-          failedGate = failedGateText(gate) ?? failedGate;
-          for (const name of gate.flaky ?? []) flaky.add(name);
-          break;
-        }
-        case "factory-merge":
-          mergeError = (data as MergeData).ok ? null : (data as MergeData).error;
-          break;
-        case "factory-review": {
-          const { round, status, approved, findings, usage: used } = data as ReviewData;
-          review = { round, status, approved, findings };
-          minors.push(...minorFindings(round, findings));
-          usage = addUsage(usage, used);
-          break;
-        }
-      }
-    }
+    if (entry.type === "custom" && entry.customType === "factory-round") answeringCommitAsk = false;
+    if (entry.type === "custom" && entry.customType === "factory-review") usage = addUsage(usage, (entry.data as ReviewData).usage);
     if (entry.type !== "message" || !isRecord(entry.message)) continue;
     const message = entry.message;
     const text = messageText(message).trim();
@@ -213,19 +163,7 @@ function summarize(entries: Record<string, unknown>[]): SessionSummary {
     if (text !== "" && !answeringCommitAsk) lastMessage = text;
     usage = addUsage(usage, piUsage(message.usage));
   }
-  const blocked = (last as SessionSummary["last"])?.state === "blocked";
-  return {
-    last,
-    usage,
-    settings: snapshot?.task.settings ?? null,
-    question: snapshot?.question ?? null,
-    merged: snapshot?.mergedCommit ?? null,
-    lastMessage,
-    failure: blocked ? (failedGate ?? mergeError) : null,
-    review,
-    minors,
-    flaky: [...flaky],
-  };
+  return { snapshot: rebuild(entries), usage, lastMessage };
 }
 
 /** Where the summary of the session file `sessionPath` is kept once its task finished: `cache/sessions/<file name>.json`. */
@@ -237,7 +175,7 @@ function summaryCachePath(sessionPath: string): string {
  * Summaries read in this process, by session path, with the file's size and mtime: a poll parses only what changed. At
  * most `MAX_SUMMARIES`, the least recently stored go first: a long-lived host lists tasks for months.
  */
-const summaries = new Map<string, { size: number; mtimeMs: number; summary: SessionSummary }>();
+const summaries = new Map<string, SessionSummary & { size: number; mtimeMs: number }>();
 const MAX_SUMMARIES = 500;
 
 /**
@@ -251,32 +189,36 @@ async function sessionSummary(sessionPath: string | null): Promise<SessionSummar
   const cachePath = summaryCachePath(sessionPath);
   if (file !== null) {
     const known = summaries.get(sessionPath);
-    if (known?.size === file.size && known.mtimeMs === file.mtimeMs) return known.summary;
+    if (known?.size === file.size && known.mtimeMs === file.mtimeMs) return known;
+    // A cache of another shape has no snapshot: read again and rewritten.
     const cached: unknown = await readFile(cachePath, "utf8").then(JSON.parse, () => null).catch(() => null);
-    if (isRecord(cached) && cached.size === file.size && cached.mtimeMs === file.mtimeMs && isRecord(cached.summary)) return cached.summary as unknown as SessionSummary;
+    if (isRecord(cached) && cached.size === file.size && cached.mtimeMs === file.mtimeMs && isRecord(cached.snapshot)) return cached as unknown as SessionSummary;
   }
   const summary = summarize(await sessionEntries(sessionPath));
   if (file === null) return summary;
+  const stored = { ...summary, size: file.size, mtimeMs: file.mtimeMs };
   summaries.delete(sessionPath);
   if (summaries.size >= MAX_SUMMARIES) summaries.delete(summaries.keys().next().value as string);
-  summaries.set(sessionPath, { size: file.size, mtimeMs: file.mtimeMs, summary });
-  if (summary.last !== null && FINAL_STATES.includes(summary.last.state)) {
+  summaries.set(sessionPath, stored);
+  if (summary.snapshot && isFinal(summary.snapshot.state)) {
     // Only a cache: on a failure the next listing reads the session again.
-    await writeAtomic(cachePath, JSON.stringify({ size: file.size, mtimeMs: file.mtimeMs, summary })).catch(() => undefined);
+    await writeAtomic(cachePath, JSON.stringify(stored)).catch(() => undefined);
   }
   return summary;
 }
 
-/** The task as clients see it. `knownWaveStage`: its wave's stage, read already. */
-export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise<TaskView> {
+/** The task as clients see it, and its unrounded usage for sums (the view shows cents). `knownWaveStage`: its wave's stage, read already. */
+export async function taskLook(record: TaskRecord, knownWaveStage?: WaveStage): Promise<{ view: TaskView; usage: Usage | null }> {
   // Liveness before the state: a runner writes its last state before it exits, so a state read after a dead runner is
   // its last one; read the other way round, a runner that wrote `done` and exited in between looks interrupted.
   const runners = await liveRunners(record);
   const running = runners.length > 0;
   const waitingForSlot = await slotWaiting(runners);
   const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
-  const { last, settings, question, usage: sessionUsage, ...outcome } = await sessionSummary(sessionPath);
+  const { snapshot, usage: sessionUsage, lastMessage } = await sessionSummary(sessionPath);
   const usage = addUsage(sessionUsage, await scoutUsage({ kind: "task", id: record.id }));
+  // The task has a state once it wrote a `factory-state` entry.
+  const last = snapshot?.at ? snapshot : null;
   const { sessionDir: _dir, contracts: _contracts, contractNotes: _notes, ...fields } = record;
   const view: Omit<TaskView, "actions"> = {
     ...fields,
@@ -285,18 +227,25 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
     round: last?.round ?? null,
     reason: last?.reason ?? null,
     at: last?.at ?? null,
-    question: last?.state === "waiting_answer" ? question : null,
+    question: last?.state === "waiting_answer" ? (last.question ?? null) : null,
     running,
-    interrupted: last !== null && !RESTING_STATES.includes(last.state) && !running,
-    settings,
+    interrupted: last !== null && !isResting(last.state) && !running,
+    settings: snapshot?.task.settings ?? null,
     usage: usage === null ? null : { ...usage, cost: cents(usage.cost) },
-    ...outcome,
+    lastMessage,
+    failure: last?.state === "blocked" ? last.failure : null,
+    review: snapshot?.review ?? null,
+    minors: snapshot?.minors ?? [],
+    merged: snapshot?.mergedCommit ?? null,
+    flaky: snapshot?.flaky ?? [],
     ...(waitingForSlot ? { waitingForSlot } : {}),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
-  const result = { ...view, actions: TASK_ACTIONS.filter((action) => refusal(view, action, waveStage) === null) };
-  if (usage !== null) unroundedUsage.set(result, usage);
-  return result;
+  return { view: { ...view, actions: TASK_ACTIONS.filter((action) => refusal(view, action, waveStage) === null) }, usage };
+}
+
+export async function taskView(record: TaskRecord): Promise<TaskView> {
+  return (await taskLook(record)).view;
 }
 
 /**
@@ -327,11 +276,11 @@ export function refusal(view: Omit<TaskView, "actions">, action: TaskActionName,
       if (!view.interrupted && view.state !== "blocked" && view.state !== "cancelled") return refused(`is ${stateText(view)}, retry needs blocked, cancelled or interrupted`);
       return ending ?? leftBuilding("retry");
     case "tasks.cancel":
-      return view.state !== null && FINAL_STATES.includes(view.state) ? refused(`is ${view.state} already`) : null;
+      return view.state !== null && isFinal(view.state) ? refused(`is ${view.state} already`) : null;
     case "tasks.remove":
       if (view.running) return refused("is running, cancel it first");
       if (view.state === "waiting_answer") return refused("waits for the answer to its question, answer it with tasks.message or cancel it first");
-      if (view.state !== "done" || waveStage === null || waveStage === "removed" || WAVE_FINAL_STAGES.includes(waveStage)) return null;
+      if (view.state !== "done" || waveStage === null || waveStage === "removed" || waveFinal(waveStage)) return null;
       return refused(
         `is done in wave ${short(view.wave)}, which is ${waveStage}: the wave counts on it (removed, the tasks waiting for it could never start); remove it once the wave is merged or cancelled, or with its wave (waves.remove)`,
       );
@@ -351,10 +300,10 @@ async function requireAction(record: TaskRecord, view: TaskView, action: TaskAct
 
 /**
  * No runner lives and nothing moves the task on by itself: its state is a resting one, or it is interrupted. A task
- * waiting for the factory (`FACTORY_TURN_STATES`: its wave's reviewer) does not rest.
+ * waiting for the factory (`isFactoryTurn`: its wave's reviewer) does not rest.
  */
 export function rests(view: TaskView): boolean {
-  return !view.running && (view.interrupted || (view.state !== null && RESTING_STATES.includes(view.state) && !FACTORY_TURN_STATES.includes(view.state)));
+  return !view.running && (view.interrupted || (view.state !== null && isResting(view.state) && !isFactoryTurn(view.state)));
 }
 
 /** It rests and waits for someone: every resting state but `done`. */
@@ -380,7 +329,7 @@ export async function withTaskLock<T>(record: TaskRecord, check: (view: TaskView
     await check(view);
     return await act(view);
   } finally {
-    await unlockTask(record.id);
+    await unlockFile(taskLockPath(record.id));
   }
 }
 
@@ -392,22 +341,6 @@ async function requireNoRunner(record: TaskRecord): Promise<void> {
 async function sendToRestingTask(record: TaskRecord, message: string, env: RunnerEnv | undefined): Promise<void> {
   await requireNoRunner(record);
   await sendCommand(record, message, env);
-}
-
-/**
- * Takes back the inbox line of `text` when it is the inbox's last line and no runner has sent it yet (it lies past
- * `<inbox>.read`); `false` otherwise.
- */
-async function withdrawUnsentLine(record: TaskRecord, text: string): Promise<boolean> {
-  const inbox = taskInboxPath(record.id);
-  const bytes = await readFile(inbox).catch(() => undefined);
-  if (bytes === undefined) return false;
-  const line = Buffer.from(`${JSON.stringify({ text })}\n`);
-  const start = bytes.length - line.length;
-  const sent = Number((await readFile(inboxReadPath(inbox), "utf8").catch(() => "0")).trim()) || 0;
-  if (start < sent || !bytes.subarray(start).equals(line)) return false;
-  await truncate(inbox, start);
-  return true;
 }
 
 function plural(count: number, word: string): string {
@@ -538,7 +471,7 @@ async function requireNoOpenWaveBranch(repo: string, target: string): Promise<vo
     if (file.declaration.repo !== repo) continue;
     const { stage, id, branch } = foldWave(file.declaration, file.events);
     if (branch !== target) continue;
-    if (WAVE_FINAL_STAGES.includes(stage)) continue;
+    if (waveFinal(stage)) continue;
     throw new FactoryError(
       "refused",
       `${target} is the branch of wave ${short(id)}, which is ${stage}: only the wave's own tasks reach it; give the work to the wave with waves.add`,
@@ -650,10 +583,8 @@ export const TASK_HANDLERS = {
     const text = nonEmpty(params.text);
     if (text === undefined) throw new FactoryError("invalid", "tasks.message needs a text that is not empty");
     await requireAction(record, await taskView(record), "tasks.message");
-    // `messageTask` takes the task lock itself (resting) or appends to the live runner's inbox (running).
+    // `messageTask` takes the task lock itself (resting) or hands the line to the live runner and sees it delivered.
     await messageTask(record, text, env);
-    // A runner that ended as the line was appended never sends it: take it back and start a runner with it.
-    if ((await liveRunners(record)).length === 0 && (await withdrawUnsentLine(record, text))) await messageTask(record, text, env);
     await pokeWaveOf(record, env);
     return taskView(record);
   },

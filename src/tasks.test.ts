@@ -2,7 +2,8 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listTasks, lockTask, removeTask, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { listTasks, lockTask, removeTask, taskLockPath, taskLogPath, tasksDir, writeTask, type TaskRecord } from "./tasks.ts";
+import { unlockFile } from "./lock.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tasks-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -70,10 +71,8 @@ describe("task lock", () => {
   test("one holder at a time; this process holds it until it unlocks", async () => {
     await lockTask(ONE);
     await expect(lockTask(ONE)).rejects.toMatchObject({ code: "busy" });
-    await unlockTask(ONE);
+    await unlockFile(taskLockPath(ONE));
     expect(existsSync(taskLockPath(ONE))).toBe(false);
-    await lockTask(ONE);
-    await unlockTask(ONE);
   });
 
   test("a lock whose holder no longer runs is taken over; unlock leaves another holder's lock alone", async () => {
@@ -81,7 +80,7 @@ describe("task lock", () => {
     writeFileSync(taskLockPath(ONE), "2147483646 0\n");
     await lockTask(ONE);
     writeFileSync(taskLockPath(ONE), "1 0\n");
-    await unlockTask(ONE);
+    await unlockFile(taskLockPath(ONE));
     expect(readFileSync(taskLockPath(ONE), "utf8")).toBe("1 0\n");
   });
 });

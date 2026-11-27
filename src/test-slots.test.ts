@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { runGateStep } from "./flaky-rerun.ts";
 import { type CommandResult, runCommand } from "./run.ts";
 import { type SlotPool, slotWaiting, takeSlot } from "./test-slots.ts";
-import { procStart } from "./tasks.ts";
+import { procStart } from "./lock.ts";
 
 const dirs: string[] = [];
 afterEach(() => {

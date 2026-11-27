@@ -6,7 +6,7 @@ import { callAction } from "./core.ts";
 import { launchSpec } from "./core-plan.ts";
 import { caseDir, expectError, fakeRecord, makeRepo, RUN, runnerHolding, until, useCoreFixture } from "./core-test-kit.ts";
 import { writeTask } from "./tasks.ts";
-import { liveWaveRunners } from "./wave-poke.ts";
+import { liveWaveRunners, waveLockPath } from "./wave-poke.ts";
 import { appendWaveEvent, createWave, readWave, type WaveView } from "./waves.ts";
 
 useCoreFixture();
@@ -34,7 +34,7 @@ async function writtenWave(n: number, tasks: ReturnType<typeof spec>[], started:
 /** A live stand-in of the wave's runner; resolves with the function that ends it. */
 async function fakeRunner(id: string): Promise<() => Promise<void>> {
   const end = join(caseDir, "runner-end");
-  const child = await runnerHolding(id, { ...process.env, FAKE_RUNNER_END: end });
+  const child = await runnerHolding(waveLockPath(id), id, { ...process.env, FAKE_RUNNER_END: end });
   await until(async () => (await liveWaveRunners(id)).length === 1);
   return async () => {
     writeFileSync(end, "");

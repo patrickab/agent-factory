@@ -2,7 +2,7 @@
 import { plural } from "./agent-view.ts";
 import { card, decision, taskCard, taskState } from "./cards.ts";
 import { TASK_HANDLERS, type TaskView } from "./core-tasks.ts";
-import { FINAL_STATES } from "./state.ts";
+import { isFinal } from "./state.ts";
 import { taskCause } from "./decisions.ts";
 import { feature, ID, REPO, spec, TAG, TAG_FILTER } from "./feature.ts";
 import { schemaOf } from "./settings.ts";
@@ -14,7 +14,7 @@ export const TASKS = feature({
   actions: {
     // The finished ones as a count: a long history must not fill an agent's context.
     "tasks.list": spec("Every task, or the repository's", { repo: { type: "string", description: "Only the tasks of this repository" }, tag: TAG_FILTER }, [], false, (_params, result: { tasks: TaskView[] }) => {
-      const open = result.tasks.filter((task) => task.state === null || !FINAL_STATES.includes(task.state));
+      const open = result.tasks.filter((task) => task.state === null || !isFinal(task.state));
       return card("action", "quiet", result.tasks.length === 0 ? "no tasks" : plural(result.tasks.length, "task"), {
         rows: [
           ...open.map((task) => ({ label: short(task.id), text: `${taskState(task)}  ${task.tag}  ${task.title}` })),

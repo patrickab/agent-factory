@@ -4,10 +4,11 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import type { TaskView, TimelineEntry } from "./core-tasks.ts";
-import { caseDir, expectError, failure, fakeRecord, git, ID_1, ID_2, makeRepo, prompts, recordOf, restingTask, runnerEnded, startTask, stateOf, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { caseDir, expectError, failure, fakeRecord, git, ID_1, ID_2, makeRepo, prompts, recordOf, restingTask, runnerEnded, runnerHolding, startTask, stateOf, until, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { stopRunners, taskInboxPath } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
-import { listTasks, lockTask, taskLogPath, unlockTask, writeTask } from "./tasks.ts";
+import { listTasks, lockTask, taskLockPath, taskLogPath, writeTask } from "./tasks.ts";
+import { unlockFile } from "./lock.ts";
 
 useCoreFixture();
 
@@ -102,7 +103,7 @@ describe("task actions", () => {
     try {
       await expectError(callAction("tasks.approve", { id: record.id }), "busy", "is busy");
     } finally {
-      await unlockTask(record.id);
+      await unlockFile(taskLockPath(record.id));
     }
   }, 30_000);
 
@@ -193,6 +194,23 @@ describe("tasks.message", () => {
     expect(existsSync(taskInboxPath(record.id))).toBe(false);
   }, 30_000);
 
+  test("a message sent as the runner ends, after its last look at the inbox: the coder gets it once", async () => {
+    const record = await restingTask(makeRepo(), "blocked");
+    const end = join(caseDir, "runner-end");
+    // A runner that closed Pi's stdin: it holds the task lock and ends without reading the inbox again.
+    const runner = await runnerHolding(taskLockPath(record.id), record.sessionId, { ...process.env, FAKE_RUNNER_END: end });
+    await until(async () => !(await runnerEnded(record)));
+    const sent = callAction("tasks.message", { id: record.id, text: "late note" });
+    await until(() => existsSync(taskInboxPath(record.id)));
+    writeFileSync(end, "");
+    await runner.exited;
+    await sent;
+    await until(() => prompts().includes("prompt late note"));
+    expect(prompts().filter((prompt) => prompt === "prompt late note")).toHaveLength(1);
+    // Marked sent: no runner sends it again.
+    expect(Number(readFileSync(`${taskInboxPath(record.id)}.read`, "utf8"))).toBe(readFileSync(taskInboxPath(record.id)).length);
+  }, 30_000);
+
   test("a running task's live runner gets an inbox line; no state, merging and done are refused", async () => {
     await writeTask(fakeRecord(ID_1, "/r"));
     await expectError(callAction("tasks.message", { id: ID_1, text: "hi" }), "refused", "has not started yet");
@@ -208,7 +226,7 @@ describe("tasks.message", () => {
     for (const [state, why] of [["merging", "is merging"], ["done", "waves.add"]]) {
       const resting = fakeRecord(ID_2, "/r");
       await writeTask(resting);
-      writeSession(resting, [{ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "approved" } }]);
+      writeSession(resting, [TASK_ENTRY, { type: "custom", customType: "factory-state", data: { state, round: 1, reason: "approved" } }]);
       await expectError(callAction("tasks.message", { id: ID_2, text: "hi" }), "refused", why);
     }
   }, 30_000);

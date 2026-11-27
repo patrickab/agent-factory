@@ -7,12 +7,14 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { TASK_ENTRY } from "../core-test-kit.ts";
 import { caseDigits, caseSerial, caseTests } from "../test-case.ts";
 import factory from "./index.ts";
 import { startNotifier } from "./notifier.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { writeTask, type TaskRecord } from "../tasks.ts";
-import { appendScoutEvent, scoutDir, writeScoutDeclaration } from "../scouts.ts";
+import { lockFile } from "../lock.ts";
+import { appendScoutEvent, scoutDir, scoutLockPath, writeScoutDeclaration } from "../scouts.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-notifier-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -54,7 +56,7 @@ async function taskOf(n: number, origin: string | null, state: string): Promise<
   };
   mkdirSync(sessionDir, { recursive: true });
   const file = join(sessionDir, `2026-01-01T00-00-00-000Z_${record.sessionId}.jsonl`);
-  writeFileSync(file, `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "gates_failed" }, timestamp: "2026-01-01T00:01:00.000Z" })}\n`);
+  writeFileSync(file, `${JSON.stringify(TASK_ENTRY)}\n${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "gates_failed" }, timestamp: "2026-01-01T00:01:00.000Z" })}\n`);
   await writeTask(record);
   return { record, file };
 }
@@ -97,6 +99,8 @@ async function until(check: () => boolean, ms = 5_000): Promise<void> {
 async function scoutOf(n: number, origin: string, report?: string): Promise<string> {
   const caller = { kind: "session" as const, id: origin };
   const dir = scoutDir(caller, ID(n));
+  // Held by this process, as by a live runner: the scout is not interrupted.
+  await lockFile(scoutLockPath(dir), "held by the test");
   await writeScoutDeclaration(dir, { id: ID(n), caller, repo: join(scratch, "repo"), cwd: scratch, concern: "how a works", questions: [], store: "app/plan", commit: "abc", model: null, createdAt: "2026-01-01T00:00:00.000Z" });
   await appendScoutEvent(dir, { kind: "state", state: "running" });
   if (report !== undefined) await scoutDone(dir, report);

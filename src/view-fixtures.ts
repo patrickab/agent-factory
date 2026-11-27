@@ -43,7 +43,7 @@ export function task(over: Partial<TaskView> = {}): TaskView {
 }
 
 export type WaveTask = WaveView["tasks"][number];
-export const waveTask = (key: string, state: string, after: string[] = [], taskId: string | null = `${key.padEnd(8, "0").slice(0, 8)}-1111-4222-8333-944445555666`): WaveTask => ({
+export const waveTask = (key: string, state: WaveTask["state"], after: string[] = [], taskId: string | null = `${key.padEnd(8, "0").slice(0, 8)}-1111-4222-8333-944445555666`): WaveTask => ({
   key,
   title: `the ${key}`,
   after,

@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { procAlive, procStart } from "./tasks.ts";
+import { procAlive, procStart } from "./lock.ts";
 
 const QUEUE_DIR = "factory-merge-queue";
 

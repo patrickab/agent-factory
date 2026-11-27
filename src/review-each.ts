@@ -14,11 +14,11 @@ import { liveRunners, messageTask, type RunnerEnv } from "./launch.ts";
 import { reviewerSession, runReviewer, STUB_PREFIX, VERDICT_TOOL, type ReviewerRun } from "./review.ts";
 import type { Exec } from "./run.ts";
 import { lastFactoryState } from "./runner.ts";
-import { approvedFrom, rejectingLines, type ReviewData, type ReviewStatus } from "./state.ts";
+import { approvedFrom, rejectingLines, type Finding, type ReviewData, type ReviewStatus } from "./state.ts";
 import { listTasks, type TaskRecord } from "./tasks.ts";
 import { errorText } from "./util.ts";
 import { waveReviewsDir } from "./wave-poke.ts";
-import { appendWaveEvents, type NewWaveEvent, type WaveFold, type TaskStates, type WaveFinding, type WaveTaskReview } from "./waves.ts";
+import { appendWaveEvents, type NewWaveEvent, type WaveFold, type TaskStates, type WaveTaskReview } from "./waves.ts";
 
 /** How often one runner process hands one verdict to its task before it leaves it to a restart. */
 const DELIVERIES = 3;
@@ -139,7 +139,7 @@ export async function reviewFit(fold: WaveFold, input: { root: string; round: nu
 }
 
 /** The `fix:` task of a fit pass's blocker and major findings (`start_fix`'s input). */
-export function fitFix(round: number, findings: readonly WaveFinding[]): { title: string; request: string } {
+export function fitFix(round: number, findings: readonly Finding[]): { title: string; request: string } {
   return {
     title: `fix: how the wave's tasks fit together (wave review round ${round})`,
     request: [`The wave's reviewer, judging how the wave's tasks fit together, found:`, "", rejectingLines(findings), "", "Fix them on the wave's branch; your change is reviewed like every task's."].join("\n"),

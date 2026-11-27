@@ -7,24 +7,26 @@
  * - `deleteTask` removes through git only the task's own branch, never another
  */
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, rm } from "node:fs/promises";
+import { appendFile, mkdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
 import { contractsForLaunch } from "./contracts.ts";
 import { git, primaryCheckout } from "./git.ts";
-import { CODER_EXTENSIONS_ENV, CODER_MODEL_ENV, inboxReadPath, lastFactoryState } from "./runner.ts";
+import { CODER_EXTENSIONS_ENV, CODER_MODEL_ENV, inboxReadPath, lastFactoryState, readInboxOffset, takeInboxLine } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, taskModels, type ModelSize, type StoredSettings } from "./settings.ts";
 import type { Settings, StartPayload } from "./state.ts";
-import { onPath, spawnDetached, stopProcesses, type RunnerEnv } from "./spawn.ts";
-import { handTaskLock, lockRunner, lockTask, removeTask, systemUser, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { lockRunner, startRunner, unlockFile } from "./lock.ts";
+import { onPath, stopProcesses, type RunnerEnv } from "./spawn.ts";
+import { lockTask, removeTask, systemUser, taskLockPath, taskLogPath, tasksDir, writeTask, type TaskRecord } from "./tasks.ts";
 import { TASK_WAVE_ENV, waveDir } from "./wave-poke.ts";
-import { FactoryError, outputTail } from "./util.ts";
+import { FactoryError, isBusy, outputTail } from "./util.ts";
 
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory, and a runner would not start.
 const RUNNER_PATH = join(import.meta.dirname, "runner.ts");
 const SLUG_MAX_CHARS = 40;
 const HOOK_TIMEOUT_MS = 10 * 60_000;
+const INBOX_POLL_MS = 100;
 
 export type { RunnerEnv };
 
@@ -218,32 +220,28 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
 }
 
 /**
- * Starts `bun runner.ts` for `message` in its own process group, detached, output appended to the task's log, with
- * `env` (default `process.env`) plus the lock path, the task's wave (`TASK_WAVE_ENV`, which the runner pokes when
- * it ends with the task at rest) and the repository's `extensions` setting (`CODER_EXTENSIONS_ENV`). The caller holds
- * the task lock (`lockTask`): it passes to the runner, which removes it when it exits.
+ * Starts `bun runner.ts` for `message` (`startRunner`), output appended to the task's log, with `env` (default
+ * `process.env`) plus the lock path, the task's wave (`TASK_WAVE_ENV`, which the runner pokes when it ends with the
+ * task at rest) and the repository's `extensions` setting (`CODER_EXTENSIONS_ENV`). The caller holds the task lock
+ * (`lockTask`): it passes to the runner, which removes it when it exits.
  */
 export async function sendCommand(record: TaskRecord, message: string, env: RunnerEnv = process.env): Promise<void> {
-  const bun = onPath("bun");
-  if (bun === null) throw new Error("bun is not on PATH: the task runner needs it");
-  await mkdir(tasksDir(), { recursive: true });
   await mkdir(record.sessionDir, { recursive: true });
-  const { [TASK_WAVE_ENV]: _wave, ...base } = env;
   const { extensions } = await loadSettings(record.repo);
-  const pid = await spawnDetached(
-    [bun, RUNNER_PATH, record.worktree, record.sessionDir, record.sessionId, taskInboxPath(record.id), message],
+  await startRunner({
+    lock: taskLockPath(record.id),
+    argv: [RUNNER_PATH, record.worktree, record.sessionDir, record.sessionId, taskInboxPath(record.id), message],
+    env,
     // A task runs without pauses, so the default short prompt cache is enough and the dearer long cache writes are not.
-    {
-      ...base,
+    vars: {
       FACTORY_TASK_LOCK: taskLockPath(record.id),
       PI_CACHE_RETENTION: "short",
       [CODER_EXTENSIONS_ENV]: extensions === undefined ? undefined : JSON.stringify(extensions),
       ...(record.wave === null ? {} : { [TASK_WAVE_ENV]: record.wave }),
     },
-    taskLogPath(record.id),
-    dirname(RUNNER_PATH),
-  );
-  if (pid !== undefined) await handTaskLock(record.id, pid);
+    log: taskLogPath(record.id),
+    cwd: dirname(RUNNER_PATH),
+  });
 }
 
 /** The messages for a task's live runner, one JSON `{"text"}` per line; the runner stores how far it sent them in `<inbox>.read`. */
@@ -253,25 +251,52 @@ export function taskInboxPath(id: string): string {
 
 /**
  * A message for the task's coder. A live runner holds the task: one line in its inbox, which it sends to Pi as a
- * follow-up. Resting or interrupted: takes the task lock and starts a runner with `text` as the prompt and `env`, the
- * lock handed to it. Refuses (`refused`, one sentence) while the task merges or before it has a state, a
- * `busy` FactoryError while another holds its lock.
+ * follow-up. A runner that closed Pi's stdin before the line came ends without sending it, so this waits until the
+ * line is sent or the runner is gone, and then delivers it itself. With no runner (at rest, interrupted, or ended with
+ * lines unsent): takes the task lock and starts a runner with `env` and the first unsent inbox line as its prompt, else
+ * `text`, the lock handed to it; that runner sends the lines after it. Refuses (`refused`, one sentence) while the task
+ * merges or before it has a state, a `busy` FactoryError while another holds its lock; a line already appended is never
+ * refused, it goes with the next runner.
  */
 export async function messageTask(record: TaskRecord, text: string, env?: RunnerEnv): Promise<void> {
-  if ((await liveRunners(record)).length > 0) {
-    await mkdir(tasksDir(), { recursive: true });
-    return appendFile(taskInboxPath(record.id), `${JSON.stringify({ text })}\n`, "utf8");
-  }
-  await lockTask(record.id);
-  try {
-    // The caller checked `refusal(view, "tasks.message")` before the lock; the state may have moved since.
-    const state = await lastFactoryState(record.sessionDir, record.sessionId);
-    if (state === undefined) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} has not started yet, send the message once it runs`);
-    if (state.state === "merging") throw new FactoryError("refused", `task ${record.id.slice(0, 8)} is merging, send the message when the merge has ended`);
-    if ((await liveRunners(record)).length > 0) throw new FactoryError("busy", `task ${record.id.slice(0, 8)} is busy: its last runner is still ending, try again in a few seconds`);
-    await sendCommand(record, text, env);
-  } finally {
-    await unlockTask(record.id);
+  const inbox = taskInboxPath(record.id);
+  /** The inbox's size once `text` is in it; 0 before. */
+  let end = 0;
+  for (;;) {
+    if ((await liveRunners(record)).length > 0) {
+      if (end === 0) {
+        await mkdir(tasksDir(), { recursive: true });
+        await appendFile(inbox, `${JSON.stringify({ text })}\n`, "utf8");
+        end = (await stat(inbox)).size;
+      }
+      while ((await readInboxOffset(inbox)) < end && (await liveRunners(record)).length > 0) await Bun.sleep(INBOX_POLL_MS);
+      if ((await readInboxOffset(inbox)) >= end) return;
+    }
+    const locked = await lockTask(record.id).then(
+      () => true,
+      (error: unknown) => {
+        // Another sender's runner may be starting with the line: look again.
+        if (end === 0 || !isBusy(error)) throw error;
+        return false;
+      },
+    );
+    if (locked) {
+      try {
+        // The caller checked `refusal(view, "tasks.message")` before the lock; the state may have moved since.
+        const state = await lastFactoryState(record.sessionDir, record.sessionId);
+        if (end > 0) {
+          const first = state === undefined || state.state === "merging" ? undefined : await takeInboxLine(inbox);
+          if (first !== undefined) await sendCommand(record, first, env);
+          return;
+        }
+        if (state === undefined) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} has not started yet, send the message once it runs`);
+        if (state.state === "merging") throw new FactoryError("refused", `task ${record.id.slice(0, 8)} is merging, send the message when the merge has ended`);
+        return await sendCommand(record, text, env);
+      } finally {
+        await unlockFile(taskLockPath(record.id));
+      }
+    }
+    await Bun.sleep(INBOX_POLL_MS);
   }
 }
 

@@ -10,7 +10,7 @@ import { findTask, needsAttention, rests, tasksIn, taskView, type TaskView } fro
 import { findProof, proofNeedsAttention, proofRests, proofView, type ProofView } from "./gates-prove.ts";
 import { findWave, lookWave, type WaveLook } from "./core-waves.ts";
 import { listTasks, tagInGroup, type TaskRecord } from "./tasks.ts";
-import { listWaves, readWave, RESTING_WAVE_STAGES, type WaveFile, type WaveView } from "./waves.ts";
+import { listWaves, readWave, waveRests, type WaveFile, type WaveView } from "./waves.ts";
 import { FactoryError } from "./util.ts";
 
 const WAIT_POLL_MS = 500;
@@ -20,8 +20,8 @@ const WAIT_POLL_MS = 500;
  * stuck (`stuckKeys`: tasks that can never start and nothing else running, where its runner rests too; or queued after
  * a cancelled wave). A queued wave that can still start does not rest: a merge of the waves it waits for starts it.
  */
-function waveRests({ view }: WaveLook): boolean {
-  return view.interrupted || (!view.running && (view.stuck || (view.stage !== "queued" && RESTING_WAVE_STAGES.includes(view.stage))));
+function lookRests({ view }: WaveLook): boolean {
+  return view.interrupted || (!view.running && (view.stuck || (view.stage !== "queued" && waveRests(view.stage))));
 }
 
 /**
@@ -29,7 +29,7 @@ function waveRests({ view }: WaveLook): boolean {
  * (building, whether or not its runner has rested yet, or queued after a cancelled wave).
  */
 function waveNeedsAttention(look: WaveLook): boolean {
-  return look.view.stuck || (waveRests(look) && look.view.attention);
+  return look.view.stuck || (lookRests(look) && look.view.attention);
 }
 
 /** What a `tasks.wait` watches, read again on every poll: new tasks and waves of a tag count as they appear. */
@@ -59,7 +59,7 @@ async function waitForTasks(watched: Watched, timeoutMs: number, signal: AbortSi
       ...proofs.filter(proofNeedsAttention).map((proof) => proof.id),
     ];
     const answer = { tasks, waves: looks.map((look) => look.view), ...(proofs.length === 0 ? {} : { proofs }), attention };
-    if ((tasks.every(rests) && looks.every(waveRests) && proofs.every(proofRests)) || attention.length > 0) return { ...answer, timedOut: false };
+    if ((tasks.every(rests) && looks.every(lookRests) && proofs.every(proofRests)) || attention.length > 0) return { ...answer, timedOut: false };
     if (timedOut) return { ...answer, timedOut: true };
     // An abort ends the sleep; the loop head answers it.
     await sleep(Math.max(0, Math.min(WAIT_POLL_MS, deadline - Date.now())), undefined, { signal }).catch(() => undefined);

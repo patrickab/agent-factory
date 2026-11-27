@@ -11,7 +11,8 @@ import { join } from "node:path";
 import { runCommand, type CommandResult } from "./run.ts";
 import { factoryHome } from "./settings.ts";
 import { onPath } from "./spawn.ts";
-import { listTasks, readTask, withLock, writeTask, type ContractStamp, type TaskRecord } from "./tasks.ts";
+import { withLock } from "./lock.ts";
+import { listTasks, readTask, writeTask, type ContractStamp, type TaskRecord } from "./tasks.ts";
 import { outputTail } from "./util.ts";
 
 export const CONTRACT_DIR = "run/contract";

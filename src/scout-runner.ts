@@ -17,11 +17,12 @@ import {
   runningScouts,
   SCOUT_EXTENSION_PATH,
   SCOUT_LIMIT,
+  scoutLockPath,
   scoutsDir,
   ScoutOutput,
   type ScoutDeclaration,
 } from "./scouts.ts";
-import { withLock } from "./tasks.ts";
+import { unlockFile, withLock } from "./lock.ts";
 import { errorText } from "./util.ts";
 import { memoryStoreRoot } from "./wave-poke.ts";
 
@@ -140,12 +141,14 @@ async function main(dir: string): Promise<void> {
 
 if (import.meta.main) {
   const dir = process.argv[2];
-  try {
-    await main(dir);
-  } catch (error) {
-    console.error(`scout runner: ${errorText(error)}`);
-    await appendScoutEvent(dir, { kind: "state", state: "failed", error: errorText(error) }).catch(() => undefined);
-    process.exit(1);
-  }
-  process.exit(0);
+  const failed = await main(dir).then(
+    () => false,
+    async (error: unknown) => {
+      console.error(`scout runner: ${errorText(error)}`);
+      await appendScoutEvent(dir, { kind: "state", state: "failed", error: errorText(error) }).catch(() => undefined);
+      return true;
+    },
+  );
+  await unlockFile(scoutLockPath(dir));
+  process.exit(failed ? 1 : 0);
 }

@@ -12,7 +12,7 @@ import type { ModelSize } from "./settings.ts";
 import { readTask } from "./tasks.ts";
 import { FactoryError, short } from "./util.ts";
 import { liveWaveRunners, pokeWave } from "./wave-poke.ts";
-import { appendWaveEvents, checkTaskGraph, foldWave, readWave, WAVE_FINAL_STAGES, type FoldedTask, type NewWaveEvent } from "./waves.ts";
+import { appendWaveEvents, checkTaskGraph, foldWave, readWave, waveFinal, type FoldedTask, type NewWaveEvent } from "./waves.ts";
 
 /**
  * The runner is about to launch the pending task `key`: records a `launch` event and resolves with its spec as folded
@@ -63,7 +63,7 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   if (model === "small") await requireModels({ small: (await readWave(waveId)).declaration.overrides.models?.small });
 
   const appended = await appendWaveEvents(waveId, async (fold) => {
-    if (WAVE_FINAL_STAGES.includes(fold.stage)) throw new FactoryError("refused", `wave ${shown} is ${fold.stage}, its tasks cannot change`);
+    if (waveFinal(fold.stage)) throw new FactoryError("refused", `wave ${shown} is ${fold.stage}, its tasks cannot change`);
     const task = fold.tasks.find((candidate) => candidate.key === key);
     if (task === undefined) throw new FactoryError("not_found", `wave ${shown} has no task ${key}`);
     if (task.dropped) throw new FactoryError("refused", `task ${key} of wave ${shown} was dropped (it could never start): add a task with waves.add`);
@@ -92,7 +92,7 @@ async function updateWave(params: Params): Promise<unknown> {
   if (title === undefined && request === undefined) throw new FactoryError("invalid", "waves.update needs title or request");
   const { id } = (await findWave(params.id)).declaration;
   const appended = await appendWaveEvents(id, (fold) => {
-    if (WAVE_FINAL_STAGES.includes(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, it cannot change`);
+    if (waveFinal(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, it cannot change`);
     const event: NewWaveEvent = { kind: "update" };
     if (title !== undefined && title !== fold.title) event.title = title;
     if (request !== undefined && request !== fold.request) event.request = request;

@@ -10,7 +10,7 @@ import { plural, scrub } from "./agent-view.ts";
 import type { TaskView } from "./core-tasks.ts";
 import type { ProofView } from "./gates-prove.ts";
 import type { ScoutView } from "./scouts.ts";
-import type { Finding, MinorFinding } from "./state.ts";
+import { isFinal, type Finding, type MinorFinding } from "./state.ts";
 import { dollars, short } from "./util.ts";
 import type { WaveUpdate, WaveView } from "./waves.ts";
 
@@ -108,7 +108,7 @@ export function taskCard(task: TaskView, title: string, tone: CardTone = "quiet"
       ...row("wave", task.wave !== null && short(task.wave)),
       ...row("round", task.round === null ? null : String(task.round)),
       ...row("interrupted", task.interrupted && `${task.state}, no runner lives`),
-      ...row("why", task.state === "blocked" || task.state === "done" || task.state === "cancelled" ? task.reason : null),
+      ...row("why", task.state === "blocked" || (task.state !== null && isFinal(task.state)) ? task.reason : null),
       ...row("review", review !== null && `${review.round}: ${review.status === "ok" ? "rejected" : `failed (${review.status})`}`),
       ...row("merged", task.merged !== null && short(task.merged)),
       ...row("slot", task.waitingForSlot && "waits for a test slot"),

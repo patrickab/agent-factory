@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { joinQueue, leaveQueue, queueAhead } from "./queue.ts";
-import { procAlive, procStart } from "./tasks.ts";
+import { procAlive, procStart } from "./lock.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-queue-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));

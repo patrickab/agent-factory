@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { callAction } from "./core.ts";
 import type { TaskView } from "./core-tasks.ts";
-import { expectError, fakeRecord, ID_1, ID_2, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { expectError, fakeRecord, ID_1, ID_2, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { appendWaveEvent, createWave, type WaveView } from "./waves.ts";
 
@@ -15,7 +15,7 @@ describe("tasks.wait", () => {
   async function waitTask(id: string, tag: string, state?: string): Promise<TaskRecord> {
     const record = { ...fakeRecord(id, "/r"), tag };
     await writeTask(record);
-    if (state !== undefined) writeSession(record, [stateEntry(state)]);
+    if (state !== undefined) writeSession(record, [TASK_ENTRY, stateEntry(state)]);
     return record;
   }
 
@@ -36,7 +36,7 @@ describe("tasks.wait", () => {
   test("returns when one task blocks while another has not finished", async () => {
     await waitTask(ID_1, "w");
     const blocking = await waitTask(ID_2, "w");
-    setTimeout(() => writeSession(blocking, [stateEntry("blocked")]), 300);
+    setTimeout(() => writeSession(blocking, [TASK_ENTRY, stateEntry("blocked")]), 300);
     const result = await wait({ tag: "w", timeoutMs: 10_000 });
     expect(result.attention).toEqual([ID_2]);
     expect(result.timedOut).toBe(false);

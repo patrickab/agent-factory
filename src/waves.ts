@@ -10,8 +10,8 @@
 import { mkdir, open, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MODEL_SIZES, type ModelSize, type StoredSettings } from "./settings.ts";
-import { FACTORY_TURN_STATES, RESTING_STATES, type MinorFinding, type State } from "./state.ts";
-import { withLock } from "./tasks.ts";
+import { isFactoryTurn, isFinal, isResting, type Finding, type MinorFinding, type State } from "./state.ts";
+import { withLock } from "./lock.ts";
 import { errorText, FactoryError, ifMissing, isRecord, jsonLines, type Usage } from "./util.ts";
 import { isWaveId, waveDir, waveHome, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, wavesDir } from "./wave-poke.ts";
 import type { FeedbackEntry } from "./feedback.ts";
@@ -34,14 +34,27 @@ export type WaveTaskSpec = { key: string; title: string; request: string; after?
  */
 export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: ModelSize; id: string };
 
-/** `queued` too: no runner drives a wave that waits for others, a merge of one of them pokes it (`queuedWaves`). */
-export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["queued", "rejected", "waiting_approve", "merged", "blocked", "cancelled"];
-
-/** Stages nothing leaves. */
-export const WAVE_FINAL_STAGES: readonly WaveStage[] = ["merged", "cancelled"];
-
-/** The stages a wave waits for the supervisor in (`interrupted` and stuck too: `WaveView.attention`). */
-export const WAVE_ATTENTION_STAGES: readonly WaveStage[] = ["rejected", "blocked", "waiting_approve"];
+/**
+ * One row per stage: `rests`: no runner drives it (`queued` too: a merge of a wave it waits for pokes it,
+ * `queuedWaves`); `final`: nothing leaves it; `attention`: it waits for the supervisor (`interrupted` and stuck too:
+ * `WaveView.attention`); `closed`: it takes no more tasks (`merging` too: its rebased branch is in the merge queue);
+ * `keepsReview`: entering it does not begin the review.
+ */
+const WAVE_STAGES: Record<WaveStage, { rests: boolean; final?: true; attention?: true; closed?: true; keepsReview?: true }> = {
+  queued: { rests: true, keepsReview: true },
+  building: { rests: false, keepsReview: true },
+  reviewing: { rests: false },
+  rejected: { rests: true, attention: true },
+  merging: { rests: false, closed: true },
+  waiting_approve: { rests: true, attention: true },
+  merged: { rests: true, final: true, closed: true },
+  blocked: { rests: true, attention: true, keepsReview: true },
+  cancelled: { rests: true, final: true, closed: true, keepsReview: true },
+};
+export const waveRests = (stage: WaveStage): boolean => WAVE_STAGES[stage].rests;
+export const waveFinal = (stage: WaveStage): boolean => WAVE_STAGES[stage].final === true;
+export const waveAttention = (stage: WaveStage): boolean => WAVE_STAGES[stage].attention === true;
+export const waveClosed = (stage: WaveStage): boolean => WAVE_STAGES[stage].closed === true;
 
 /**
  * The settings `waves.start` got, stored with the wave. Its tasks start with `models`, `maxRounds` and `review` from
@@ -75,7 +88,6 @@ export interface WaveDeclaration {
   overrides: WaveOverrides;
 }
 
-export type WaveFinding = { severity: "blocker" | "major" | "minor"; file: string; line: number | null; text: string };
 export type WaveReview = {
   round: number;
   at: string;
@@ -83,7 +95,7 @@ export type WaveReview = {
   model: string | null;
   verdict: "approved" | "rejected" | "failed";
   status: string;
-  findings: WaveFinding[];
+  findings: Finding[];
   usage: Usage;
   wallMs: number;
 };
@@ -215,12 +227,12 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after" | 
    * that was cancelled or removed (`queueLook`). A stuck wave rests (its runner does too); it is not interrupted.
    */
   stuck: boolean;
-  /** It waits for the supervisor: interrupted, stuck, or in one of `WAVE_ATTENTION_STAGES`, whatever `running` says. */
+  /** It waits for the supervisor: interrupted, stuck, or in one of `waveAttention`, whatever `running` says. */
   attention: boolean;
   /** Its runner waits for a test slot (`test-slots.ts`) to run a merge gate; absent otherwise. */
   waitingForSlot?: true;
   /** `id`: the task's id, a pending one's too (declared with it). */
-  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null; id: string }[];
+  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: State | "pending"; usage: Usage | null; id: string }[];
   counts: { total: number; done: number };
   reviews: WaveReview[];
   /**
@@ -330,7 +342,6 @@ export async function removeWave(id: string): Promise<void> {
 // ---- the fold ----
 
 /** Stages that keep what came before them: a wave blocked or cancelled is as far as it was when that happened. */
-const KEEPS_REVIEW: readonly WaveStage[] = ["queued", "building", "blocked", "cancelled"];
 
 /** The wave's state from its declaration and events: a declared wave is `building`, `queued` with `after`. */
 export function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): WaveFold {
@@ -373,7 +384,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         fold.reason = event.stage === "blocked" ? event.reason : null;
         fold.detail = event.detail ?? null;
         if (event.stage === "building") fold.reviewBegan = false;
-        else if (!KEEPS_REVIEW.includes(event.stage)) fold.reviewBegan = true;
+        else if (!WAVE_STAGES[event.stage].keepsReview) fold.reviewBegan = true;
         // A launch the runner did not record ended with it (failed, stopped): the task is plainly pending again.
         for (const task of fold.tasks) delete task.launching;
         break;
@@ -454,10 +465,10 @@ function foldUpdate(fold: WaveFold, event: Extract<WaveEvent, { kind: "update" }
 // ---- scheduling ----
 
 /** Task states by wave task key; a key missing or null means no state is known yet. */
-export type TaskStates = ReadonlyMap<string, string | null>;
+export type TaskStates = ReadonlyMap<string, State | null>;
 
 /** A wave task's state: `pending` before it started (`cancelled` when dropped), `running` once started but before its first state. */
-export function waveTaskState(task: FoldedTask, states: TaskStates): string {
+export function waveTaskState(task: FoldedTask, states: TaskStates): State | "pending" {
   if (task.taskId === null) return task.dropped ? "cancelled" : "pending";
   return states.get(task.key) ?? "running";
 }
@@ -503,7 +514,7 @@ export function stuckKeys(fold: WaveFold, states: TaskStates): string[] {
   const active = fold.tasks.some((task) => {
     if (task.taskId === null) return false;
     const state = states.get(task.key) ?? null;
-    return state === null || !RESTING_STATES.includes(state as State) || FACTORY_TURN_STATES.includes(state as State);
+    return state === null || !isResting(state) || isFactoryTurn(state);
   });
   return active ? [] : unreachable;
 }
@@ -511,7 +522,7 @@ export function stuckKeys(fold: WaveFold, states: TaskStates): string[] {
 /** Every task, started or pending, is `done` or `cancelled`, and at least one is `done`. */
 export function readyForReview(fold: WaveFold, states: TaskStates): boolean {
   const all = fold.tasks.map((task) => waveTaskState(task, states));
-  return all.every((state) => state === "done" || state === "cancelled") && all.includes("done");
+  return all.every((state) => state !== "pending" && isFinal(state)) && all.includes("done");
 }
 
 /** The wave has tasks and every one of them is `cancelled`. */
