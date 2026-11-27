@@ -20,10 +20,10 @@ import { listTasks, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, runnerSnapshot, stopWaveRunners } from "./wave-poke.ts";
 import { listWaves } from "./waves.ts";
 
-export let savedEnv: NodeJS.ProcessEnv;
+let savedEnv: NodeJS.ProcessEnv;
 export let scratch: string;
 export let fakeBin: string;
-export let piLog: string;
+let piLog: string;
 /** A runner stand-in `pgrep` finds as the task's runner; it exits as soon as the task's inbox file appears. */
 export let exitingRunner: string;
 /** A wave runner stand-in `liveWaveRunners` finds (`wave-runner.ts <id>`); it exits once `$FAKE_RUNNER_END` exists. */

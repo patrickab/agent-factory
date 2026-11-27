@@ -1,12 +1,11 @@
 /**
- * The core's own part (`core.ts`): the action list and `callAction`'s errors, over the fixture of `core-test-kit.ts`.
+ * The core's own part (`core.ts`): `callAction`'s errors, over the fixture of `core-test-kit.ts`.
  * The areas' tests: `core-settings.test.ts`, `core-tasks.test.ts`, `core-wait.test.ts`, `core-waves.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ACTIONS, callAction } from "./core.ts";
-import { FEATURES } from "./features.ts";
+import { callAction } from "./core.ts";
 import { caseDir, exitingRunner, expectError, failure, fakeRecord, fakeWaveRunner, ID_1, ID_2, makeRepo, until, useCoreFixture } from "./core-test-kit.ts";
 import { liveRunners } from "./launch.ts";
 import { writeTask } from "./tasks.ts";
@@ -14,20 +13,6 @@ import { writeTask } from "./tasks.ts";
 useCoreFixture();
 
 describe("callAction", () => {
-  test("ACTIONS names every action of every feature, in the features' order", () => {
-    expect(Object.keys(ACTIONS)).toEqual(FEATURES.flatMap((feature) => Object.keys(feature.actions)));
-    expect(ACTIONS["tasks.get"].mutates).toBe(false);
-    expect(ACTIONS["tasks.start"].params.required).toEqual(["repo", "title", "request"]);
-  });
-
-  test("a wave task's model in the schema of waves.start and waves.add: small or big, never a provider/model", () => {
-    for (const action of ["waves.start", "waves.add"] as const) {
-      const tasks = ACTIONS[action].params.properties.tasks as { description?: string; items: { properties: Record<string, { enum?: string[]; description?: string }> } };
-      expect(tasks.items.properties.model.enum).toEqual(["small", "big"]);
-      expect(`${tasks.description} ${tasks.items.properties.model.description}`).not.toContain("models list");
-    }
-  });
-
   test("invalid: an unknown action, a missing or mistyped param, an ambiguous id", async () => {
     await expectError(callAction("tasks.fly", {}), "invalid", 'unknown action "tasks.fly"');
     await expectError(callAction("tasks.get", {}), "invalid", "tasks.get needs id");

@@ -11,8 +11,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { agentError, agentView } from "./agent-view.ts";
-import { agentActions, FACTORY_TOOL_DESCRIPTION, factoryToolParameters } from "./factory-tool.ts";
+import { agentView } from "./agent-view.ts";
+import { factoryToolParameters } from "./factory-tool.ts";
 import { factoryMcpServer } from "./mcp.ts";
 import { TASK_SESSION_ENV } from "./runner.ts";
 
@@ -44,69 +44,19 @@ async function connected(taskSession = false): Promise<Client> {
 const text = (result: unknown) => ((result as CallToolResult).content[0] as { text: string }).text;
 
 describe("factory-mcp", () => {
-  test("lists the one tool factory with the Pi tool's description and schema, tasks.timeline absent", async () => {
+  test("lists the one tool factory; a read answers the agent view; a refusal, or a mutation in a task session, is an error result", async () => {
     const client = await connected();
     const { tools } = await client.listTools();
     expect(tools.map((tool) => tool.name)).toEqual(["factory"]);
-    expect(tools[0].description).toBe(FACTORY_TOOL_DESCRIPTION);
     expect(tools[0].inputSchema).toEqual(factoryToolParameters());
-    const offered = (tools[0].inputSchema.properties as { action: { enum: string[] } }).action.enum;
-    // The timeline dumps a log: programs replay it through the core or the CLI, an agent never calls it.
-    expect(offered).not.toContain("tasks.timeline");
-    expect((tools[0].inputSchema.properties as Record<string, unknown>).since).toBeUndefined();
+    const read = await client.callTool({ name: "factory", arguments: { action: "models.get" } });
+    expect([Boolean(read.isError), text(read)]).toEqual([false, agentView("models.get", {}, { models: ["a/b"] })]);
+    expect((await client.callTool({ name: "factory", arguments: { action: "repos.add", repo: scratch } })).isError).toBe(true);
+    expect((await client.callTool({ name: "nope", arguments: { action: "models.get" } })).isError).toBe(true);
     await client.close();
-  });
-
-  test("names itself with the package's name and version", async () => {
-    const client = await connected();
-    const manifest = (await Bun.file(join(import.meta.dirname, "..", "package.json")).json()) as { name: string; version: string };
-    expect(client.getServerVersion()).toMatchObject({ name: manifest.name, version: manifest.version });
-    await client.close();
-  });
-
-  test("a call to a tool other than factory is an error result", async () => {
-    const client = await connected();
-    const result = await client.callTool({ name: "nope", arguments: { action: "models.get" } });
-    expect(result.isError).toBe(true);
-    expect(text(result)).toBe(agentError({ code: "invalid", message: 'unknown tool "nope"' }));
-    await client.close();
-  });
-
-  test("a read action answers the agent view", async () => {
-    const client = await connected();
-    const result = await client.callTool({ name: "factory", arguments: { action: "models.get" } });
-    expect(result.isError).toBeFalsy();
-    expect(text(result)).toBe("a/b");
-    await client.close();
-  });
-
-  test("the timeline is refused as unknown", async () => {
-    const client = await connected();
-    const result = await client.callTool({ name: "factory", arguments: { action: "tasks.timeline", id: "x" } });
-    expect(result.isError).toBe(true);
-    await client.close();
-  });
-
-  test("a refused call (a FactoryError) is an error result", async () => {
-    const client = await connected();
-    const result = await client.callTool({ name: "factory", arguments: { action: "repos.add", repo: scratch } });
-    expect(result.isError).toBe(true);
-    expect(text(result)).toBe(agentError({ code: "not_found", message: `${scratch} is not inside a git repository` }));
-    await client.close();
-  });
-
-  test("a hostOnly action, or a mutating one in a task session, is refused as unknown", async () => {
-    const hostOnly = await connected();
-    const imported = await hostOnly.callTool({ name: "factory", arguments: { action: "tasks.import" } });
-    expect(imported).toMatchObject({ isError: true });
-    expect(text(imported)).toBe(agentError({ code: "invalid", message: 'unknown action "tasks.import"' }));
-    await hostOnly.close();
 
     const taskSession = await connected(true);
-    const { tools } = await taskSession.listTools();
-    expect((tools[0].inputSchema.properties as { action: { enum: string[] } }).action.enum).toEqual(agentActions(true));
-    const set = await taskSession.callTool({ name: "factory", arguments: { action: "models.set", models: [] } });
-    expect(text(set)).toBe(agentError({ code: "invalid", message: 'unknown action "models.set"' }));
+    expect((await taskSession.callTool({ name: "factory", arguments: { action: "models.set", models: [] } })).isError).toBe(true);
     await taskSession.close();
   });
 

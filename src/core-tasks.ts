@@ -343,14 +343,16 @@ export async function archivedSessionSummary(sessionPath: string): Promise<{ sta
 
 /** The task as clients see it. `knownWaveStage`: its wave's stage, read already; `snapshot`: the runners, looked up already. */
 export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage, snapshot?: RunnerSnapshot): Promise<TaskView> {
+  // Liveness before the state: a runner writes its last state before it exits, so a state read after a dead runner is
+  // its last one; read the other way round, a runner that wrote `done` and exited in between looks interrupted.
+  const runners = await liveRunners(record, snapshot);
+  const running = runners.length > 0;
+  const waitingForSlot = await slotWaiting(runners);
   const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
   const { last, settings, question, usage: sessionUsage, ...outcome } = await sessionSummary(sessionPath);
   let usage: TaskView["usage"] = sessionUsage === null ? null : { ...sessionUsage };
   const scouting = await scoutUsage({ kind: "task", id: record.id });
   usage = addScoutUsage(usage, scouting) as TaskView["usage"];
-  const runners = await liveRunners(record, snapshot);
-  const running = runners.length > 0;
-  const waitingForSlot = await slotWaiting(runners);
   const view: Omit<TaskView, "actions"> = {
     id: record.id,
     repo: record.repo,

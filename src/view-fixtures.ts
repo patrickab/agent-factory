@@ -124,7 +124,6 @@ export function proof(over: Partial<ProofView> = {}): ProofView {
   };
 }
 
-/** One full view per action, as `callAction` answers it. */
 export const SCOUT = {
   id: "5c0a1234-0000-4000-8000-000000000001",
   caller: { kind: "task", id: TASK_ID },
@@ -150,12 +149,7 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "models.set": { params: { models: ["anthropic/opus"] }, result: { models: ["anthropic/opus"] } },
   "repos.list": { params: {}, result: { repos: ["/home/me/git/app", "/home/me/git/bot"] } },
   "repos.add": { params: { repo: "/home/me/git/app" }, result: { repo: "/home/me/git/app", repos: ["/home/me/git/app"] } },
-  "branches.list": {
-    params: { repo: "." },
-    result: {
-      branches: [{ name: "master" }, { name: "waves" }],
-    },
-  },
+  "branches.list": { params: { repo: "." }, result: { branches: [{ name: "master" }, { name: "waves" }] } },
   "settings.get": {
     params: { repo: "." },
     result: {
@@ -188,14 +182,7 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "tasks.get": { params: { id: "4ae7" }, result: task() },
   "tasks.diff": {
     params: { id: "4ae7" },
-    result: {
-      base: "0ab12cd",
-      diff: "diff --git a/src/x.ts b/src/x.ts\n+secret patch",
-      files: [
-        { path: "src/x.ts", added: 10, removed: 2 },
-        { path: "src/x.test.ts", added: 30, removed: 0 },
-      ],
-    },
+    result: { base: "0ab12cd", diff: "diff --git a/src/x.ts b/src/x.ts\n+secret patch", files: [{ path: "src/x.ts", added: 10, removed: 2 }, { path: "src/x.test.ts", added: 30, removed: 0 }] },
   },
   "tasks.start": { params: { repo: ".", title: "t", request: "SECRET-REQUEST" }, result: task({ round: 0 }) },
   "tasks.wait": { params: { tag: "factory" }, result: { tasks: [task({ state: "done", reason: "merged", running: false })], waves: [wave({ stage: "merged", running: false })], attention: [], timedOut: false } },

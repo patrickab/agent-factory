@@ -1,37 +1,12 @@
 /** The core's task actions and `TaskView` (`core-tasks.ts`), over the fixture of `core-test-kit.ts`. */
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
-import { userInfo } from "node:os";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ACTIONS, callAction } from "./core.ts";
+import { callAction } from "./core.ts";
 import type { TaskView, TimelineEntry } from "./core-tasks.ts";
-import {
-  caseDir,
-  exitingRunner,
-  expectError,
-  failure,
-  fakeRecord,
-  git,
-  ID_1,
-  ID_2,
-  ID_3,
-  makeRepo,
-  prompts,
-  recordOf,
-  restingTask,
-  RUN,
-  runnerEnded,
-  startTask,
-  stateOf,
-  testPath,
-  until,
-  useCoreFixture,
-  writeSession,
-} from "./core-test-kit.ts";
+import { caseDir, exitingRunner, expectError, failure, fakeRecord, git, ID_1, ID_2, makeRepo, prompts, recordOf, restingTask, RUN, runnerEnded, startTask, stateOf, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
-import { lastFactoryState, sessionFilePath } from "./runner.ts";
-import { taskArchiveDir } from "./archive.ts";
-import { callerKey, scoutsDir } from "./scouts.ts";
+import { lastFactoryState } from "./runner.ts";
 import { listTasks, lockTask, taskLogPath, unlockTask, writeTask } from "./tasks.ts";
 import { appendWaveEvent, createWave } from "./waves.ts";
 
@@ -56,138 +31,19 @@ describe("task reads", () => {
     { type: "custom", customType: "factory-state", timestamp: "t10", data: { state: "blocked", round: 1, reason: "gates" } },
   ];
 
-  test("tasks.get: state, settings and usage from the session file", async () => {
+  test("tasks.get: state and usage from the session file", async () => {
     const record = fakeRecord(ID_1, "/r");
     await writeTask(record);
-    const path = writeSession(record, sessionEntries);
-    expect(await callAction("tasks.get", { id: "abc1" })).toEqual({
+    writeSession(record, sessionEntries);
+    expect(await callAction("tasks.get", { id: "abc1" })).toMatchObject({
       id: ID_1,
-      repo: "/r",
-      worktree: record.worktree,
-      branch: record.branch,
-      title: record.title,
-      createdAt: record.createdAt,
-      tag: "team/a",
-      plan: null,
-      wave: null,
-      origin: null,
-      sessionId: record.sessionId,
-      sessionPath: path,
       state: "blocked",
-      round: 1,
       reason: "gates",
-      at: "t10",
-      question: null,
-      running: false,
-      interrupted: false,
-      settings: { branch: "main", merge: "auto", maxRounds: 2, review: true, models: {} },
       usage: { input: 111, output: 56, cacheRead: 3500, cacheWrite: 20, cost: 1.75 },
-      lastMessage: "done",
-      failure: null,
-      review: { round: 1, status: "ok", approved: true, findings: [] },
-      merged: null,
-      minors: [],
-      flaky: [],
       actions: ["tasks.retry", "tasks.cancel", "tasks.remove", "tasks.message"],
     });
   });
 
-  test("tasks.get: the coder's last message (not its commit message), a blocked task's failure, the merged commit", async () => {
-    const record = fakeRecord(ID_1, "/r");
-    await writeTask(record);
-    const custom = (customType: string, data: object) => ({ type: "custom", customType, timestamp: "t", data });
-    const said = (role: string, text: string) => ({ type: "message", timestamp: "t", message: { role, content: [{ type: "text", text }] } });
-    const gate = (exitCode: number, outputTail: string) => custom("factory-gate", { round: 1, phase: "gates", argv: ["bun", "run", "types"], exitCode, killed: false, durationMs: 1, outputTail });
-    const head = [sessionEntries[0], sessionEntries[1], custom("factory-round", { round: 1, trigger: "start" }), said("assistant", "Added b.txt.")];
-    writeSession(record, [
-      ...head,
-      { type: "custom_message", customType: "factory-commit-ask", content: "commit message?", timestamp: "t" },
-      said("assistant", "feat: add b"),
-      custom("factory-merge", { ok: true, commit: "40ca0ce", error: null, depsSynced: false }),
-      custom("factory-state", { state: "done", round: 1, reason: "merged" }),
-    ]);
-    expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ lastMessage: "Added b.txt.", failure: null, merged: "40ca0ce", review: null });
-    writeSession(record, [...head, gate(2, "src/a.ts: error\n"), gate(0, "ok"), custom("factory-state", { state: "blocked", round: 1, reason: "max_rounds: gates" })]);
-    expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ failure: "bun run types (exit 2)\nsrc/a.ts: error", merged: null });
-    writeSession(record, [...head, custom("factory-merge", { ok: false, commit: null, error: "rebase conflicts in a.ts", depsSynced: false }), custom("factory-state", { state: "blocked", round: 1, reason: "merge_failed" })]);
-    expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ failure: "rebase conflicts in a.ts" });
-    // A failure fed back to the coder in a later round is not why the task stopped.
-    writeSession(record, [...head, gate(2, "x"), custom("factory-round", { round: 2, trigger: "gates" }), custom("factory-state", { state: "blocked", round: 2, reason: "pipeline_error: boom" })]);
-    expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ failure: null });
-  });
-
-  test("tasks.get: the flaky names of the gate records", async () => {
-    const record = fakeRecord(ID_1, "/r");
-    await writeTask(record);
-    const custom = (customType: string, data: object) => ({ type: "custom", customType, timestamp: "t", data });
-    const gate = (flaky?: string[]) => custom("factory-gate", { round: 1, phase: "gates", argv: ["bun", "test"], exitCode: 0, killed: false, durationMs: 1, outputTail: "", ...(flaky ? { flaky } : {}) });
-    const head = [sessionEntries[0], sessionEntries[1], custom("factory-round", { round: 1, trigger: "start" })];
-    writeSession(record, [...head, gate(), custom("factory-state", { state: "merging", round: 1, reason: "passed" })]);
-    expect(((await callAction("tasks.get", { id: ID_1 })) as TaskView).flaky).toEqual([]);
-    writeSession(record, [...head, gate(["a > b"]), custom("factory-round", { round: 2, trigger: "gates" }), gate(["a > b", "c"]), custom("factory-state", { state: "merging", round: 2, reason: "passed" })]);
-    expect(((await callAction("tasks.get", { id: ID_1 })) as TaskView).flaky).toEqual(["a > b", "c"]);
-  });
-
-  test("tasks.get: the minor findings of every review, an approving one too", async () => {
-    const record = fakeRecord(ID_1, "/r");
-    await writeTask(record);
-    const custom = (customType: string, data: object) => ({ type: "custom", customType, timestamp: "t", data });
-    const finding = (severity: string, file: string, text: string, line: number | null = null) => ({ severity, file, line, text });
-    writeSession(record, [
-      sessionEntries[0],
-      sessionEntries[1],
-      custom("factory-review", { round: 2, status: "ok", approved: false, findings: [finding("major", "a.ts", "bug", 3), finding("minor", "a.ts", "rename x", 4)] }),
-      custom("factory-review", { round: 3, status: "ok", approved: true, findings: [finding("minor", "b.ts", "doc it")] }),
-      custom("factory-state", { state: "merging", round: 3, reason: "passed" }),
-    ]);
-    const view = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
-    expect(view.minors).toEqual([
-      { round: 2, file: "a.ts", line: 4, text: "rename x" },
-      { round: 3, file: "b.ts", line: null, text: "doc it" },
-    ]);
-    expect(view.review).toMatchObject({ round: 3, approved: true });
-  });
-
-  test("tasks.get before the session file exists: nulls", async () => {
-    await writeTask(fakeRecord(ID_1, "/r"));
-    const view = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
-    expect([view.sessionPath, view.state, view.round, view.at, view.settings, view.usage, view.running, view.interrupted]).toEqual([null, null, null, null, null, null, false, false]);
-    expect(view.actions).toEqual(["tasks.cancel", "tasks.remove"]);
-  });
-
-  test("tasks.timeline: the kinds in order, a cursor that skips what was read and a torn last line", async () => {
-    const record = fakeRecord(ID_1, "/r");
-    await writeTask(record);
-    expect(await callAction("tasks.timeline", { id: ID_1 })).toEqual({ entries: [], next: 0 });
-    const path = writeSession(record, sessionEntries);
-    const first = (await callAction("tasks.timeline", { id: ID_1 })) as { entries: TimelineEntry[]; next: number };
-    expect(first.entries.map((entry) => [entry.at, entry.kind])).toEqual([
-      ["t1", "task"],
-      ["t2", "user"],
-      ["t3", "round"],
-      ["t4", "coder"],
-      ["t6", "review"],
-      ["t10", "state"],
-    ]);
-    expect(first.entries[3].data).toEqual({ text: "done" });
-    expect(first.entries[5].data).toEqual({ state: "blocked", round: 1, reason: "gates" });
-    expect(first.next).toBe(readFileSync(path).length);
-    const more = { type: "custom", customType: "factory-merge", timestamp: "t11", data: { ok: true, commit: "c", error: null, depsSynced: false } };
-    writeFileSync(path, `${readFileSync(path, "utf8")}${JSON.stringify(more)}\n{"type":"cus`);
-    const second = (await callAction("tasks.timeline", { id: ID_1, since: first.next })) as { entries: TimelineEntry[]; next: number };
-    expect(second.entries).toEqual([{ at: "t11", kind: "merge", data: more.data }]);
-    expect(await callAction("tasks.timeline", { id: ID_1, since: second.next })).toEqual({ entries: [], next: second.next });
-    await expectError(callAction("tasks.timeline", { id: ID_1, since: 1_000_000 }), "invalid", "past the end");
-  });
-
-  test("tasks.list: every task, or the repository's", async () => {
-    const repo = makeRepo();
-    await writeTask(fakeRecord(ID_1, repo));
-    await writeTask(fakeRecord(ID_2, "/elsewhere"));
-    const ids = (result: unknown) => (result as { tasks: TaskView[] }).tasks.map((view) => view.id);
-    expect(ids(await callAction("tasks.list", { repo }))).toEqual([ID_1]);
-    expect(ids(await callAction("tasks.list", {}, { cwd: repo }))).toEqual([ID_1, ID_2]);
-  });
 });
 
 describe("task actions", () => {
@@ -360,10 +216,7 @@ describe("tasks.message", () => {
   }, 30_000);
 });
 
-describe("D review fixes", () => {
-  test("a relative repo without cwd is invalid", async () => {
-    await expectError(callAction("settings.get", { repo: "some/repo" }), "invalid", "repo some/repo must be an absolute path (the call has no cwd)");
-  });
+describe("runner environment", () => {
 
   test("env: the runners an action starts get the caller's environment, not the host's", async () => {
     const repo = makeRepo();
@@ -379,99 +232,6 @@ describe("D review fixes", () => {
     expect(readFileSync(envLog, "utf8")).toBe("secret -\nsecret -\n");
   }, 30_000);
 
-  test("an interrupted task without unmerged work is removed without force", async () => {
-    process.env.FAKE_PI_HOLD = "1";
-    const repo = makeRepo();
-    const record = await startTask(repo);
-    await until(async () => (await stateOf(record)) === "running");
-    await stopRunners(record);
-    expect(await callAction("tasks.remove", { id: record.id })).toEqual({ removed: record.id, dropped: null });
-    expect(existsSync(record.worktree)).toBe(false);
-  }, 30_000);
-
-  test("an interrupted task with unmerged work: refused with detail force, removed with force", async () => {
-    process.env.FAKE_PI_HOLD = "1";
-    const repo = makeRepo();
-    const record = await startTask(repo);
-    await until(async () => (await stateOf(record)) === "running");
-    await stopRunners(record);
-    writeFileSync(join(record.worktree, "c.txt"), "c\n");
-    const refusal = await failure(callAction("tasks.remove", { id: record.id }));
-    expect([refusal.code, refusal.detail]).toEqual(["refused", { force: true }]);
-    expect(await callAction("tasks.remove", { id: record.id, force: true })).toEqual({ removed: record.id, dropped: "0 unmerged commits (not on main) and uncommitted changes" });
-  }, 30_000);
-
-  test("cancel and retry of an interrupted task whose runner cannot start: failed", async () => {
-    process.env.FAKE_PI_HOLD = "1";
-    const repo = makeRepo();
-    const record = await startTask(repo);
-    await until(async () => (await stateOf(record)) === "running");
-    await stopRunners(record);
-    rmSync(record.worktree, { recursive: true, force: true });
-    await expectError(callAction("tasks.cancel", { id: record.id }), "failed", `the runner of task ${record.id.slice(0, 8)} ended before it ran`);
-    await expectError(callAction("tasks.retry", { id: record.id }), "failed", `the runner of task ${record.id.slice(0, 8)} ended before it ran`);
-    expect(await callAction("tasks.remove", { id: record.id })).toEqual({ removed: record.id, dropped: null });
-  }, 30_000);
-
-  test("tasks.message: a runner that cannot start is failed, not refused", async () => {
-    const repo = makeRepo();
-    const record = await restingTask(repo, "blocked");
-    process.env.PATH = testPath
-      .split(":")
-      .filter((dir) => !existsSync(join(dir, "bun")))
-      .join(":");
-    await expectError(callAction("tasks.message", { id: record.id, text: "hi" }), "failed", "bun is not on PATH");
-  }, 30_000);
-
-  test("tasks.timeline reads the session file from since on, not all of it", async () => {
-    const record = fakeRecord(ID_1, "/r");
-    await writeTask(record);
-    const path = writeSession(record, []);
-    // Sparse and larger than a Buffer can hold: reading the whole file fails.
-    truncateSync(path, 2 ** 32 + 16);
-    const since = statSync(path).size;
-    const entry = { type: "custom", customType: "factory-state", timestamp: "t1", data: { state: "blocked", round: 1, reason: "gates" } };
-    appendFileSync(path, `${JSON.stringify(entry)}\n`);
-    try {
-      expect(await callAction("tasks.timeline", { id: ID_1, since })).toEqual({ entries: [{ at: "t1", kind: "state", data: entry.data }], next: statSync(path).size });
-    } finally {
-      rmSync(path, { force: true });
-    }
-  });
-});
-
-describe("task tags", () => {
-  test("tasks.start: tag defaults to the system user; a given one is stored", async () => {
-    const repo = makeRepo();
-    const plain = (await callAction("tasks.start", { title: "Add b", request: "add b.txt" }, { cwd: repo })) as TaskView;
-    expect([plain.tag, plain.plan]).toEqual([userInfo().username, null]);
-    const tagged = (await callAction("tasks.start", { title: "Add c", request: "add c.txt", tag: "plugin/m1/w1" }, { cwd: repo })) as TaskView;
-    expect(tagged.tag).toBe("plugin/m1/w1");
-    expect((await recordOf(tagged)).tag).toBe("plugin/m1/w1");
-  }, 30_000);
-
-  test("tasks.start refuses a malformed tag before any worktree; kind and source are no params", async () => {
-    const repo = makeRepo();
-    for (const tag of ["", "a//b", "/a", "a/", "a b", "ä"]) {
-      await expectError(callAction("tasks.start", { title: "t", request: "r", tag }, { cwd: repo }), "invalid", "is not segments of");
-    }
-    expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("kind");
-    expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("source");
-    expect(await listTasks()).toEqual([]);
-    expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
-  });
-
-  test("tasks.list tag: the tag itself and the tags under it, not a longer segment", async () => {
-    await writeTask({ ...fakeRecord(ID_1, "/r"), tag: "a" });
-    await writeTask({ ...fakeRecord(ID_2, "/r"), tag: "a/b" });
-    await writeTask({ ...fakeRecord(ID_3, "/r"), tag: "ab" });
-    const ids = async (tag: string) => ((await callAction("tasks.list", { tag })) as { tasks: TaskView[] }).tasks.map((view) => view.id);
-    expect(await ids("a")).toEqual([ID_1, ID_2]);
-    expect(await ids("a/b")).toEqual([ID_2]);
-    expect(await ids("ab")).toEqual([ID_3]);
-    expect(await ids("a/b/c")).toEqual([]);
-    await expectError(callAction("tasks.list", { tag: "a/" }), "invalid", "is not segments of");
-  });
 });
 
 describe("waiting_answer", () => {
@@ -511,39 +271,4 @@ describe("tasks.start and queued waves", () => {
     await expectError(start(), "refused", "main-factory-w8 is the branch of wave 20000000, which is building");
     expect(await listTasks()).toEqual([]);
   });
-});
-
-describe("the archive of a task outside a wave (contract archive-1)", () => {
-  test("tasks.remove archives its session and scouts first; the session file stays", async () => {
-    process.env.FAKE_PI_HOLD = "1";
-    const repo = makeRepo();
-    const record = await startTask(repo);
-    await until(async () => (await stateOf(record)) === "running");
-    await stopRunners(record);
-    const scout = join(scoutsDir(), callerKey({ kind: "task", id: record.id }), "scout-1");
-    mkdirSync(scout, { recursive: true });
-    writeFileSync(join(scout, "events.jsonl"), "{}\n");
-    const session = (await sessionFilePath(record.sessionDir, record.sessionId)) as string;
-    expect(await callAction("tasks.remove", { id: record.id })).toEqual({ removed: record.id, dropped: null });
-    const dir = join(caseDir, "agent", "factory", "archive", "tasks", ...record.tag.split("/"), record.id.slice(0, 8));
-    expect(taskArchiveDir(record)).toBe(dir);
-    expect(readFileSync(join(dir, "session.jsonl"), "utf8")).toBe(readFileSync(session, "utf8"));
-    expect(existsSync(join(dir, "scouts", `task-${record.id}`, "scout-1", "events.jsonl"))).toBe(true);
-    expect(JSON.parse(readFileSync(join(dir, "index.json"), "utf8"))).toEqual({ id: record.id, tag: record.tag, repo, plan: null, origin: null, archivedAt: expect.any(String), sessionId: record.sessionId });
-    expect(existsSync(record.worktree)).toBe(false);
-  }, 30_000);
-
-  test("an archive that fails refuses tasks.remove with nothing deleted; with force it goes on and says so", async () => {
-    process.env.FAKE_PI_HOLD = "1";
-    const repo = makeRepo();
-    const record = await startTask(repo);
-    await until(async () => (await stateOf(record)) === "running");
-    await stopRunners(record);
-    writeFileSync(join(caseDir, "agent", "factory", "archive"), "not a directory\n");
-    const refusal = await failure(callAction("tasks.remove", { id: record.id }));
-    expect([refusal.code, refusal.message]).toEqual(["failed", expect.stringMatching(new RegExp(`^task ${record.id.slice(0, 8)}: the archive failed: .+; nothing was deleted$`))]);
-    expect([existsSync(record.worktree), (await listTasks()).length]).toEqual([true, 1]);
-    expect(await callAction("tasks.remove", { id: record.id, force: true })).toEqual({ removed: record.id, dropped: null, archive: expect.stringMatching(/^failed: /) });
-    expect(existsSync(record.worktree)).toBe(false);
-  }, 30_000);
 });

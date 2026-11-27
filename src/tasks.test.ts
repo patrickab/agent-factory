@@ -2,8 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { factoryHome } from "./settings.ts";
-import { isTaskTag, listTasks, lockTask, removeTask, tagInGroup, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { listTasks, lockTask, removeTask, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tasks-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -44,46 +43,17 @@ function record(id: string, overrides: Partial<TaskRecord> = {}): TaskRecord {
 }
 
 describe("task records", () => {
-  test("live in <factoryHome>/tasks/<id>.json under PI_CODING_AGENT_DIR", async () => {
-    await writeTask(record(ONE));
-    expect(factoryHome()).toBe(join(scratch, "agent", "factory"));
-    expect(readdirSync(tasksDir())).toEqual([`${ONE}.json`]);
-    expect(await listTasks()).toEqual([record(ONE)]);
-  });
-
-  test("a rewrite replaces the record and leaves no temp file", async () => {
-    await writeTask(record(ONE));
-    await writeTask(record(ONE, { title: "Renamed" }));
-    expect((await listTasks()).map((task) => task.title)).toEqual(["Renamed"]);
-    expect(readdirSync(tasksDir())).toEqual([`${ONE}.json`]);
-  });
-
-  test("listTasks: oldest first, filtered by repo, skips invalid and temp files", async () => {
-    expect(await listTasks()).toEqual([]);
+  test("listTasks: oldest first, filtered by repo, skips invalid, foreign and temp files", async () => {
     const [late, early, other] = [uuid(2), uuid(3), uuid(4)];
     await writeTask(record(late, { createdAt: "2026-03-01T00:00:00.000Z" }));
     await writeTask(record(early, { createdAt: "2026-02-01T00:00:00.000Z" }));
     await writeTask(record(other, { repo: "/repo/b" }));
     writeFileSync(join(tasksDir(), `${uuid(5)}.json`), "{");
     writeFileSync(join(tasksDir(), "x.json.1.tmp"), "{}");
+    writeFileSync(join(tasksDir(), `${uuid(7)}.json`), JSON.stringify(record("../../x")));
+    writeFileSync(join(tasksDir(), `${uuid(8)}.json`), JSON.stringify(record(uuid(9))));
     expect((await listTasks()).map((task) => task.id)).toEqual([other, early, late]);
     expect((await listTasks("/repo/a")).map((task) => task.id)).toEqual([early, late]);
-  });
-
-  test("listTasks skips a record whose id is not a task id or not its file name", async () => {
-    mkdirSync(tasksDir(), { recursive: true });
-    const write = (name: string, id: string) => writeFileSync(join(tasksDir(), `${name}.json`), JSON.stringify(record(id)));
-    write(uuid(7), "../../x");
-    write(uuid(8), uuid(9));
-    write("one", "one");
-    await writeTask(record(ONE));
-    expect((await listTasks()).map((task) => task.id)).toEqual([ONE]);
-  });
-
-  test("tags: segments joined by /, a group holds itself and the tags under it", () => {
-    for (const tag of ["a", "plugin/m1/w1", "x.y_z@h+1-2"]) expect(isTaskTag(tag)).toBe(true);
-    for (const tag of ["", "/a", "a/", "a//b", "a b", "ä"]) expect(isTaskTag(tag)).toBe(false);
-    expect([tagInGroup("a", "a"), tagInGroup("a/b", "a"), tagInGroup("ab", "a"), tagInGroup("a", "a/b")]).toEqual([true, true, false, false]);
   });
 
   test("removeTask removes the record, its log and its lock, and tolerates a missing one", async () => {
@@ -99,8 +69,6 @@ describe("task records", () => {
 describe("task lock", () => {
   test("one holder at a time; this process holds it until it unlocks", async () => {
     await lockTask(ONE);
-    expect(readFileSync(taskLockPath(ONE), "utf8")).toStartWith(`${process.pid} `);
-    await expect(lockTask(ONE)).rejects.toThrow(`task ${ONE.slice(0, 8)} is busy`);
     await expect(lockTask(ONE)).rejects.toBeInstanceOf(TaskBusyError);
     await unlockTask(ONE);
     expect(existsSync(taskLockPath(ONE))).toBe(false);

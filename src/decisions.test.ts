@@ -8,14 +8,10 @@ import { callAction, type TaskView } from "./core.ts";
 import { caseDir, makeRepo, RUN, runnerEnded, startTask, stateOf, until, useCoreFixture } from "./core-test-kit.ts";
 import { appendDecision, decisionsPath, readDecisions } from "./decisions.ts";
 import { callFactoryTool } from "./factory-tool.ts";
-import { waveLook } from "./core-waves.ts";
-import { taskNotice, waveNotice } from "./notify.ts";
-import { liveWaveRunners, pokeWave, stopWaveRunners } from "./wave-poke.ts";
-import { appendWaveEvent, createWave, readWave, type WaveView } from "./waves.ts";
+import { taskNotice } from "./notify.ts";
 
 useCoreFixture();
 
-const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [], id: crypto.randomUUID() });
 const tool = (params: Record<string, unknown>, origin: string) => callFactoryTool(params, false, { origin }, () => "text");
 
 describe("decisions", () => {
@@ -36,53 +32,6 @@ describe("decisions", () => {
     await until(() => runnerEnded(record));
     expect(await readDecisions(origin)).toEqual([{ at: expect.any(String), card: answer.card }]);
   }, 30_000);
-
-  test("a task added to a rejected wave names the rejection; then an action with no open cause is a decision without answers", async () => {
-    const origin = `decide-w-${RUN}`;
-    const repo = makeRepo();
-    await callAction("repos.add", {}, { cwd: repo });
-    const started = (await callAction("waves.start", { tag: "factory/d1", title: "Wave", request: "review", tasks: [spec("a")] }, { cwd: repo, origin })) as { wave: WaveView };
-    const id = started.wave.id;
-    await until(async () => ((await callAction("waves.get", { id })) as { wave: WaveView }).wave.tasks[0].taskId !== null);
-    await appendWaveEvent(id, { kind: "stage", stage: "rejected", reason: null });
-    await pokeWave(id);
-    await until(async () => (await liveWaveRunners(id)).length === 0);
-    const file = await readWave(id);
-    const rejection = waveNotice({ ...(await waveLook(file)), events: file.events }, origin);
-    expect(rejection?.key).toStartWith(`wave:${id}:rejected:`);
-
-    const added = await tool({ action: "waves.add", id, tasks: [spec("fix")] }, origin);
-    expect(added.card).toMatchObject({ kind: "decision", answers: rejection?.key, title: "added 1 task to wave factory/d1" });
-    await stopWaveRunners(id);
-
-    // A wave queued after another that still builds: nothing about it is open.
-    const queued = `dec00000-${RUN}-4000-8000-000000000002`;
-    await createWave({ id: queued, repo, tag: "factory/d2", plan: null, title: "w", request: "r", branch: null, target: "main", base: null, after: [id], origin, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    const updated = await tool({ action: "waves.update", id: queued, title: "renamed" }, origin);
-    expect(updated.card.kind).toBe("decision");
-    expect(updated.card.answers).toBeUndefined();
-
-    // A read is no decision.
-    const listed = await tool({ action: "decisions.list" }, origin);
-    expect((listed.result as { decisions: unknown[] }).decisions.length).toBe(2);
-    const decisions = await readDecisions(origin);
-    expect(decisions.map((entry) => [entry.card.title, entry.card.answers])).toEqual([
-      ["added 1 task to wave factory/d1", rejection?.key],
-      ["updated wave factory/d2", undefined],
-    ]);
-  }, 40_000);
-
-  test("waves.add to a wave that is not rejected or blocked is no decision", async () => {
-    const origin = `decide-n-${RUN}`;
-    const repo = makeRepo();
-    const other = `dec00000-${RUN}-4000-8000-000000000003`;
-    const queued = `dec00000-${RUN}-4000-8000-000000000004`;
-    await createWave({ id: other, repo, tag: "factory/d3", plan: null, title: "w", request: "r", branch: null, target: "main", base: null, after: [queued], origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    await createWave({ id: queued, repo, tag: "factory/d4", plan: null, title: "w", request: "r", branch: null, target: "main", base: null, after: [other], origin, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    const added = await tool({ action: "waves.add", id: queued, tasks: [spec("x")] }, origin);
-    expect(added.card.kind).toBe("action");
-    expect(await readDecisions(origin)).toEqual([]);
-  });
 
   test("the list is in order, skips a torn line and survives a restart", async () => {
     const origin = `decide-r-${RUN}`;

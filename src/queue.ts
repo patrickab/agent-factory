@@ -22,9 +22,6 @@ export interface Ticket {
   name: string;
 }
 
-/** Whether the process `pid`, started at `start` (as its ticket names it), still runs. */
-export type Liveness = (pid: number, start: string) => Promise<boolean>;
-
 /** Start time of the running process `pid` from `/proc/<pid>/stat`, which a reused pid never repeats; null when it does not run. */
 export async function procStart(pid: number): Promise<string | null> {
   try {
@@ -55,7 +52,7 @@ export async function signalAlive(pid: number): Promise<boolean> {
 const HAS_PROC = existsSync("/proc/self/stat");
 
 /** `procAlive` where `/proc` exists, else `signalAlive`. */
-export const hostLiveness: Liveness = HAS_PROC ? procAlive : signalAlive;
+export const hostLiveness = HAS_PROC ? procAlive : signalAlive;
 
 /** A ticket of this process in the queue of the repository whose git common dir is `gitDir`. */
 export async function joinQueue(gitDir: string): Promise<Ticket> {
@@ -68,13 +65,13 @@ export async function joinQueue(gitDir: string): Promise<Ticket> {
 }
 
 /** How many live tickets are ahead of `ticket`, removing those whose owner no longer runs. */
-export async function queueAhead(ticket: Ticket, alive: Liveness = hostLiveness): Promise<number> {
+export async function queueAhead(ticket: Ticket): Promise<number> {
   const dir = join(ticket.path, "..");
   let ahead = 0;
   for (const name of (await readdir(dir)).sort()) {
     if (name >= ticket.name) continue;
     const [, pid = "", start = ""] = name.split("-");
-    if (!(await alive(Number(pid), start))) {
+    if (!(await hostLiveness(Number(pid), start))) {
       await rm(join(dir, name), { force: true });
       continue;
     }

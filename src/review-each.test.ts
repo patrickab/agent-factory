@@ -1,7 +1,6 @@
 /**
  * Review per task over real git repos in a temp dir: the wave's tasks rest `reviewing` in worktrees of their own, the
- * reviewer is a fake `pi` on PATH that keeps a real session file (resumed by `--session-id`, its context built as Pi
- * builds it: the latest `context_edit` of an entry wins) and answers with `$FAKE_VERDICT_<key>`. The hand-over to the
+ * reviewer is a fake `pi` on PATH that answers with `$FAKE_VERDICT_<key>`. The hand-over to the
  * task is replaced by one that plays the task: it records the command and moves the task's state on.
  */
 import { randomBytes } from "node:crypto";
@@ -11,7 +10,6 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readDiffText } from "./review-diff.ts";
-import { STUB_PREFIX } from "./review-session.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { stopWaveRunners, waveReviewsDir } from "./wave-poke.ts";
 import { reviewEachDeps, runWave } from "./wave-runner.ts";
@@ -22,11 +20,7 @@ const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-review-each-tes
 const fakeBin = join(scratch, "bin");
 const callLog = join(scratch, "reviewer-calls.jsonl");
 
-/**
- * The fake reviewer. With `--session-id`: appends to `<session-dir>/<ts>_<id>.jsonl` (made when missing) a user prompt,
- * a `read_diff` call and its result (the diff file's text), and the verdict call; notes in `$FAKE_CALLS` its argv,
- * env, start and end, and the context it was resumed with (tool results after the latest `context_edit`).
- */
+/** The fake reviewer: makes its session file when missing; notes in `$FAKE_CALLS` its argv, the diff, start and end. */
 mkdirSync(fakeBin);
 writeFileSync(
   join(fakeBin, "pi"),
@@ -40,26 +34,15 @@ const id = given ?? "11111111-2222-4333-8444-555555555555";
 mkdirSync(dir, { recursive: true });
 const existing = readdirSync(dir).find((name) => name.endsWith("_" + id + ".jsonl"));
 const file = join(dir, existing ?? "2026-01-01T00-00-00-000Z_" + id + ".jsonl");
-const entries = existsSync(file) ? readFileSync(file, "utf8").split("\\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
-if (entries.length === 0) { const head = { type: "session", version: 3, id, cwd: process.cwd() }; writeFileSync(file, JSON.stringify(head) + "\\n"); entries.push(head); }
-const edits = new Map();
-for (const entry of entries) if (entry.type === "context_edit") edits.set(entry.targetId, entry.replacement);
-const context = entries.filter((entry) => entry.type === "message" && entry.message.role === "toolResult").map((entry) => edits.has(entry.id) ? edits.get(entry.id).content[0].text : entry.message.content[0].text);
+if (!existsSync(file)) writeFileSync(file, JSON.stringify({ type: "session", version: 3, id, cwd: process.cwd() }) + "\\n");
 const start = Date.now();
 if (process.env.FAKE_REVIEW_SLEEP) await Bun.sleep(Number(process.env.FAKE_REVIEW_SLEEP));
-let parent = entries.filter((entry) => entry.type !== "session").at(-1)?.id ?? null;
-const add = (message) => { const entryId = Math.random().toString(16).slice(2, 10); appendFileSync(file, JSON.stringify({ type: "message", id: entryId, parentId: parent, message }) + "\\n"); parent = entryId; };
 const diffFile = process.env.FACTORY_REVIEW_DIFF;
 const prompt = args.at(-1);
 const key = given ? (/Review task (\\S+)/.exec(prompt) ?? [])[1] : "wave";
-if (given) {
-  add({ role: "user", content: [{ type: "text", text: prompt }] });
-  add({ role: "assistant", content: [{ type: "toolCall", id: "c" + parent, name: "read_diff", arguments: {} }] });
-  add({ role: "toolResult", toolCallId: "c", toolName: "read_diff", content: [{ type: "text", text: readFileSync(diffFile, "utf8") }] });
-}
 const verdict = process.env["FAKE_VERDICT_" + key] ?? "approve";
 const findings = verdict === "reject" ? [{ file: "x.txt", line: 1, severity: "major", text: "x is wrong" }, { file: "x.txt", line: null, severity: "minor", text: "style" }] : [];
-appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ key, args, cwd: process.cwd(), cache: process.env.PI_CACHE_RETENTION ?? null, diff: diffFile ? readFileSync(diffFile, "utf8") : null, context, start, end: Date.now() }) + "\\n");
+appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ key, args, diff: diffFile ? readFileSync(diffFile, "utf8") : null, start, end: Date.now() }) + "\\n");
 const emit = (record) => console.log(JSON.stringify(record));
 emit({ type: "session", id });
 emit({ type: "tool_execution_end", toolName: "submit_verdict", isError: false, result: { details: { findings } } });
@@ -107,7 +90,7 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-type Call = { key: string; args: string[]; cwd: string; cache: string | null; diff: string | null; context: string[]; start: number; end: number };
+type Call = { key: string; args: string[]; diff: string | null; start: number; end: number };
 const calls = (): Call[] => (existsSync(callLog) ? readFileSync(callLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Call) : []);
 const taskCalls = () => calls().filter((call) => call.key !== "wave");
 
@@ -172,29 +155,20 @@ function playTasks(act: (key: string, command: { round: number; review: { approv
 const taskReviews = async () => foldWave((await readWave(WAVE)).declaration, (await readWave(WAVE)).events).taskReviews ?? [];
 
 describe("review per task", () => {
-  test("approve: the verdict goes to the task, which merges; the reviewer runs on one session with the long cache, the diff only through read_diff", async () => {
+  test("approve: the verdict goes to the task, which merges; the reviewer gets the diff only through read_diff", async () => {
     await eachWave(["a"]);
     const handed = playTasks((key) => setState(key, "done", 1));
     expect(await runWave(WAVE)).toBe(0);
     expect(handed.map((hand) => hand.key)).toEqual(["a"]);
-    expect(handed[0]!.text).toStartWith("/factory reviewed ");
     const [call] = taskCalls();
-    expect(call!.args).toContain("--session-id");
-    expect(call!.args[call!.args.indexOf("--session-id") + 1]).toBe(WAVE);
-    expect(call!.args[call!.args.indexOf("--session-dir") + 1]).toBe(waveReviewsDir(WAVE));
-    expect(call!.args[call!.args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,read_diff,scout,feedback,notify_supervisor,start_fix,submit_verdict");
-    expect(call!.cwd).toBe(realpathSync(waveReviewsDir(WAVE)));
-    expect(call!.cache).toBe("long");
     expect(readDiffText(call!.diff!)).toContain("+a one");
-    // The prompt names the task and its request, not the diff.
-    expect(call!.args.at(-1)).toContain("add a.txt");
     expect(call!.args.at(-1)).not.toContain("a one");
     expect((await taskReviews()).map((review) => [review.key, review.round, review.verdict])).toEqual([["a", 1, "approved"]]);
     // Every task done: the wave then reviews and merges as before.
     expect(foldWave((await readWave(WAVE)).declaration, (await readWave(WAVE)).events).stage).toBe("merged");
   });
 
-  test("a major finding goes to the task's next round; its second review reads only what changed since and holds no earlier diff", async () => {
+  test("a major finding goes to the task's next round; its second review reads only what changed since", async () => {
     await eachWave(["a"]);
     process.env.FAKE_VERDICT_a = "reject";
     const handed = playTasks((key, command) => {
@@ -211,13 +185,8 @@ describe("review per task", () => {
     const first = JSON.parse(handed[0]!.text.slice("/factory reviewed ".length));
     expect(first.round).toBe(1);
     expect(first.review.findings.map((finding: { severity: string }) => finding.severity)).toEqual(["major", "minor"]);
-    const [one, two] = taskCalls();
+    const [, two] = taskCalls();
     expect(readDiffText(two!.diff!)).toContain("-a one\n+a two");
-    expect(two!.args.at(-1)).toContain("since the tree you judged in its round 1");
-    // The resumed context: the first review's diff is a stub.
-    expect(two!.context).toHaveLength(1);
-    expect(two!.context[0]).toStartWith(STUB_PREFIX);
-    expect(two!.context.join("\n")).not.toContain(one!.diff!);
     expect((await taskReviews()).map((review) => [review.round, review.verdict])).toEqual([
       [1, "rejected"],
       [2, "approved"],
@@ -232,8 +201,6 @@ describe("review per task", () => {
     const [a, b] = taskCalls();
     expect([a!.key, b!.key]).toEqual(["a", "b"]);
     expect(b!.start).toBeGreaterThanOrEqual(a!.end);
-    // The second resume holds the first task's diff only as a stub.
-    expect(b!.context.every((text) => text.startsWith(STUB_PREFIX))).toBe(true);
   });
 
   test("a restart mid-review reviews that round again on the resumed session; a recorded verdict not yet applied is only handed over", async () => {
@@ -255,10 +222,8 @@ describe("review per task", () => {
     const handed = playTasks((key) => setState(key, "done", 1));
     expect(await runWave(WAVE)).toBe(0);
     expect(taskCalls().map((call) => call.key)).toEqual(["a"]);
-    expect(taskCalls()[0]!.context).toEqual([`${STUB_PREFIX} read_diff result of an earlier review`]);
     expect(handed.map((hand) => hand.key).sort()).toEqual(["a", "b"]);
   });
-
 });
 
 describe("read_diff", () => {

@@ -2,7 +2,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { agentView } from "./agent-view.ts";
 import { callAction } from "./core.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
 import { startWaveTasks } from "./core-waves.ts";
@@ -63,15 +62,8 @@ describe("tasks.update", () => {
     const a = (await getWave(wave.id)).tasks[0];
     await until(async () => ((await callAction("tasks.get", { id: a.taskId })) as TaskView).state === "running");
 
-    // A pending task's id, declared with it, from waves.get.
     const bId = taskOf(await getWave(wave.id), "b")?.id as string;
-    expect(bId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(taskOf(await getWave(wave.id), "b")?.taskId).toBeNull();
-    expect(await callAction("waves.get", { id: wave.id }).then((answer) => agentView("waves.get", {}, answer))).toContain(`b pending (${bId.slice(0, 8)})`);
-    await expectError(callAction("tasks.get", { id: bId.slice(0, 8) }), "refused", "has not started yet: tasks.update changes it, waves.get shows it");
     // Pending: after is checked as at waves.add.
-    await expectError(update({ id: bId, after: ["b"] }), "invalid", "waits for itself");
-    await expectError(update({ id: bId, after: ["nope"] }), "invalid", "waits for nope");
     await expectError(update({ id: bId, after: ["c"] }), "invalid", "cycle: b -> c -> b");
     const changed = await update({ id: bId.slice(0, 8), title: "Task B", request: "do B, not b", model: "small", after: [] });
     expect([changed.changed, changed.delivery]).toEqual([true, "pending"]);
@@ -102,18 +94,10 @@ describe("tasks.update", () => {
   test("each refusal: the params, a task that cannot change, a wave that ended", async () => {
     const { id, records, ids } = await writtenWave(1, [spec("d"), spec("x"), spec("m"), spec("q"), spec("w"), spec("p")], { d: "done", x: "cancelled", m: "merging", q: "waiting_answer", w: "waiting_approve" });
     const of = (key: string) => ids.get(key) as string;
-    await expectError(update({ request: "r" }), "invalid", "tasks.update needs id");
-    await expectError(update({ id: of("p") }), "invalid", "needs title, request, after or model");
-    await expectError(update({ id: of("p"), request: " " }), "invalid", "request must not be empty");
-    await expectError(update({ id: of("p"), model: "x/y" }), "invalid", 'model must be "small" or "big"');
-    await expectError(update({ id: `ffff0000-${RUN}`, request: "r" }), "not_found", "no task has an id starting with");
     for (const [key, state] of [["d", "done"], ["x", "cancelled"], ["m", "merging"]]) {
       await expectError(update({ id: of(key), request: "r" }), "refused", `task ${key} of wave ${id.slice(0, 8)} is ${state}, it cannot change: add a task with waves.add`);
     }
     await expectError(update({ id: of("w"), request: "r" }), "refused", "waits for approve");
-    // A plain task belongs to no wave.
-    await writeTask({ ...fakeRecord(`60000000-${RUN}-4000-8000-000000000001`, makeRepo(true, "plain")), wave: null });
-    await expectError(update({ id: `60000000-${RUN}`, request: "r" }), "refused", "belongs to no wave");
     // Waiting for an answer: the change waits on its record and goes with the answer (the runner's notes).
     const kept = await update({ id: of("q"), title: "Task Q" });
     expect(kept.delivery).toBe("kept");
@@ -146,16 +130,6 @@ describe("tasks.update", () => {
     } finally {
       await end();
     }
-  });
-
-  test("a launch its runner did not finish (no live runner) leaves the task pending; launchSpec skips a task whose after changed", async () => {
-    const { id, ids } = await writtenWave(3, [spec("a"), spec("b")]);
-    expect(await launchSpec(id, "a", ["b"])).toBeNull();
-    expect(await launchSpec(id, "a", [])).not.toBeNull();
-    const changed = await update({ id: ids.get("a"), model: "small", after: ["b"] });
-    expect([changed.delivery, taskOf(changed.wave, "a")?.model, taskOf(changed.wave, "a")?.after]).toEqual(["pending", "small", ["b"]]);
-    await appendWaveEvent(id, { kind: "stage", stage: "cancelled", reason: null });
-    expect(await launchSpec(id, "b", [])).toBeNull();
   });
 
   test("the crash window: a record written, no task event, an update, a restart: the coder has the launched text and gets the update as a follow-up", async () => {

@@ -37,18 +37,18 @@ if (command === "create") {
   data.dirs = [...new Set([...(data.dirs ?? []), ...rest])];
   writeFileSync(file, JSON.stringify(data));
 } else if (command === "ls") {
-  const dir = rest[0];
-  const under = [...Object.keys(data.memories), ...Object.keys(data.docs)].filter((path) => path.startsWith(dir + "/"));
-  if (under.length === 0) {
-    console.error("error: not_found: no directory " + dir);
+  const prefix = rest[0] === undefined ? "" : rest[0] + "/";
+  const under = [...Object.keys(data.memories), ...Object.keys(data.docs)].filter((path) => path.startsWith(prefix));
+  if (under.length === 0 && prefix !== "") {
+    console.error("error: not_found: no directory " + rest[0]);
     process.exit(1);
   }
   const dirs = new Set();
   const memories = [];
   const docs = [];
   for (const path of under) {
-    const tail = path.slice(dir.length + 1);
-    if (tail.includes("/")) dirs.add(dir + "/" + tail.split("/")[0]);
+    const tail = path.slice(prefix.length);
+    if (tail.includes("/")) dirs.add(prefix + tail.split("/")[0]);
     else if (path in data.docs) docs.push(path);
     else memories.push(path);
   }

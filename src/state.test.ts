@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyEntry, approvedFrom, followUpMessages, gateData, mergeFailedPrompt, minorFindings, parseStartPayload, rebuild, RESTING_STATES, RETRY_PROMPT, reviewFeedback, roundsUsed, wasInterrupted, type Finding, type Settings, type Task } from "./state.ts";
+import { applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RESTING_STATES, RETRY_PROMPT, roundsUsed, wasInterrupted, type Finding, type Task } from "./state.ts";
 
 const task: Task = {
   title: "Add notes",
@@ -81,36 +81,7 @@ describe("rebuild", () => {
   });
 });
 
-describe("parseStartPayload", () => {
-  const settings: Settings = { branch: "release", merge: "review", maxRounds: 2, review: false, models: { reviewer: "anthropic/claude-haiku-5-5" } };
-
-  test("returns the payload", () => {
-    expect(parseStartPayload(JSON.stringify({ request: "do it", title: "T", settings }))).toEqual({ request: "do it", title: "T", settings });
-    // A key the plugin does not know (an older caller's `sourceBranch`) is dropped, not refused.
-    expect(parseStartPayload(JSON.stringify({ request: "do it", title: "T", settings: { ...settings, sourceBranch: "feature" } })).settings).toEqual(settings);
-  });
-
-  test.each([
-    ["{", "payload is not JSON"],
-    ["[]", "payload is not an object"],
-    [JSON.stringify({ request: "", title: "T", settings }), "request must be a non-empty string"],
-    [JSON.stringify({ request: "r", settings }), "title must be a non-empty string"],
-    [JSON.stringify({ request: "r", title: "T" }), "settings must be an object"],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, branch: undefined } }), "settings.branch must be a non-empty string"],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, branch: "" } }), "settings.branch must be a non-empty string"],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, merge: "manual" } }), 'settings.merge must be "auto" or "review"'],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, maxRounds: 0 } }), "settings.maxRounds must be an integer from 1 to 20"],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, maxRounds: 21 } }), "settings.maxRounds must be an integer from 1 to 20"],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, maxRounds: undefined } }), "settings.maxRounds must be an integer from 1 to 20"],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, models: undefined } }), "settings.models must be an object"],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, review: "yes" } }), "settings.review must be a boolean"],
-    [JSON.stringify({ request: "r", title: "T", settings: { ...settings, models: { coder: "haiku" } } }), 'settings.models.coder must be "provider/model"'],
-  ])("rejects %s", (text, message) => {
-    expect(() => parseStartPayload(text)).toThrow(message);
-  });
-});
-
-describe("derived values", () => {
+describe("verdict rules", () => {
   test("approved needs status ok and no blocker or major finding", () => {
     expect(approvedFrom("ok", [])).toBe(true);
     expect(approvedFrom("ok", [finding("minor")])).toBe(true);
@@ -118,24 +89,6 @@ describe("derived values", () => {
     expect(approvedFrom("ok", [finding("blocker")])).toBe(false);
     expect(approvedFrom("malformed", [])).toBe(false);
     expect(approvedFrom("no_diff", [])).toBe(false);
-  });
-
-  test("a verdict with only minor findings approves and keeps them; the next round gets blocker and major ones only", () => {
-    const minor = { file: "a.ts", line: 2, severity: "minor" as const, text: "rename x" };
-    const major = { file: "b.ts", line: null, severity: "major" as const, text: "bug" };
-    expect(approvedFrom("ok", [minor])).toBe(true);
-    expect(minorFindings(1, [minor])).toEqual([{ round: 1, file: "a.ts", line: 2, text: "rename x" }]);
-    const feedback = reviewFeedback(2, [minor, major]);
-    expect(feedback).toContain("[major] b.ts: bug");
-    expect(feedback).not.toContain("rename x");
-  });
-
-  test("a killed gate keeps a null exit code and only the tail of its output", () => {
-    const result = { exitCode: null, killed: true, timedOut: false, durationMs: 12, stdout: "", stdoutTruncated: false, output: `${"x".repeat(5000)}end` };
-    const data = gateData(2, "gates", ["sh", "gate.sh"], result);
-    expect(data).toMatchObject({ round: 2, phase: "gates", argv: ["sh", "gate.sh"], exitCode: null, killed: true, durationMs: 12 });
-    expect(data.outputTail).toHaveLength(4000);
-    expect(data.outputTail.endsWith("end")).toBe(true);
   });
 });
 

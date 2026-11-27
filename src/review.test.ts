@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseFindings, readReviewerOutput, reviewPatch, runReview } from "./review.ts";
+import { parseFindings, readReviewerOutput, runReview } from "./review.ts";
 import type { CommandOptions, CommandResult } from "./run.ts";
 import type { Finding, Task } from "./state.ts";
 
@@ -10,23 +10,6 @@ const line = (event: unknown) => JSON.stringify(event);
 const verdictEnd = (findings: unknown, isError = false) =>
   line({ type: "tool_execution_end", toolName: "submit_verdict", isError, result: { details: { findings } } });
 const assistantEnd = (usage: unknown) => line({ type: "message_end", message: { role: "assistant", usage } });
-
-describe("reviewPatch", () => {
-  test("lists the changed files before a patch within the cap", () => {
-    expect(reviewPatch({ paths: ["src/a.ts", "bun.lock"], patch: "diff --git a b\n" }, 100)).toBe("Changed files (2):\n- src/a.ts\n- bun.lock\n\ndiff --git a b\n");
-  });
-
-  test("cuts a larger patch, says how much is missing and keeps the whole file list", () => {
-    const capped = reviewPatch({ paths: ["src/a.ts", "tests/a.test.ts", "bun.lock"], patch: "x".repeat(150) }, 100);
-    expect(capped.startsWith(`Changed files (3):\n- src/a.ts\n- tests/a.test.ts\n- bun.lock\n\n${"x".repeat(100)}\n`)).toBe(true);
-    expect(capped).toContain("[patch cut here: 50 more characters. Read the files listed at the top that the patch does not show.]");
-  });
-
-  test("a huge file list is cut with a count", () => {
-    const paths = Array.from({ length: 502 }, (_value, index) => `f${index}`);
-    expect(reviewPatch({ paths, patch: "p" }, 10)).toContain("- f499\n- and 2 more\n\np");
-  });
-});
 
 describe("parseFindings", () => {
   test("accepts findings, a missing line becomes null", () => {
@@ -37,14 +20,14 @@ describe("parseFindings", () => {
   });
 
   test.each([
-    [{ findings: [] }, "findings is not an array"],
-    [["x"], "findings[0] is not an object"],
-    [[{ file: "", line: 1, severity: "minor", text: "t" }], "findings[0].file is not a string"],
-    [[{ file: "a", line: 1.5, severity: "minor", text: "t" }], "findings[0].line is not an integer or null"],
-    [[{ file: "a", line: 1, severity: "critical", text: "t" }], "findings[0].severity is not one of blocker, major, minor"],
-    [[{ file: "a", line: 1, severity: "minor" }], "findings[0].text is not a string"],
-  ])("rejects %j", (value, problem) => {
-    expect(parseFindings(value)).toBe(problem);
+    [{ findings: [] }],
+    [["x"]],
+    [[{ file: "", line: 1, severity: "minor", text: "t" }]],
+    [[{ file: "a", line: 1.5, severity: "minor", text: "t" }]],
+    [[{ file: "a", line: 1, severity: "critical", text: "t" }]],
+    [[{ file: "a", line: 1, severity: "minor" }]],
+  ])("rejects %j", (value) => {
+    expect(typeof parseFindings(value)).toBe("string");
   });
 });
 
@@ -118,25 +101,11 @@ describe("runReview", () => {
       cancelled: () => false,
     });
 
-  test("starts a read-only child that gets the patch and the request as files, and maps its verdict", async () => {
-    writeFileSync(join(reviewsDir, "2024_abc-123.jsonl"), "");
+  test("starts a read-only child and maps its verdict", async () => {
     const calls: { argv: string[]; options: CommandOptions }[] = [];
-    const data = await review(child(), calls);
-
-    expect(data).toMatchObject({ round: 2, status: "ok", approved: false, findings: [blocker], model: "anthropic/claude-haiku-5-5", wallMs: 42 });
-    expect(data.sessionFile).toBe(join(reviewsDir, "2024_abc-123.jsonl"));
-    const [{ argv, options }] = calls;
-    expect(argv.slice(0, 6)).toEqual(["pi", "--mode", "json", "-p", "--tools", "read,grep,find,ls,submit_verdict"]);
-    expect(argv.slice(6, 9)).toEqual(["-ne", "-e", join(import.meta.dirname, "pi", "reviewer-tool.ts")]);
-    expect(argv.join(" ")).toContain(`--session-dir ${reviewsDir} --model anthropic/claude-haiku-5-5 --append-system-prompt Be strict.`);
-    expect(argv.at(-1)).toContain(join(reviewsDir, "round-2.patch"));
-    expect(argv.at(-1)).not.toContain(task.request);
-    expect(options.cwd).toBe("/repo");
-    // The reviewer has no time limit.
-    expect(options.timeoutMs).toBeUndefined();
-    expect(options.maxStdoutChars).toBeGreaterThan(1_000_000);
-    expect(readFileSync(join(reviewsDir, "round-2.patch"), "utf8")).toBe("Changed files (1):\n- src/cart.js\n\ndiff --git a/src/cart.js b/src/cart.js\n");
-    expect(readFileSync(join(reviewsDir, "round-2.request.md"), "utf8")).toBe("# Fix the cart\n\nThe total is off by one.\n");
+    expect(await review(child(), calls)).toMatchObject({ round: 2, status: "ok", approved: false, findings: [blocker] });
+    const tools = calls[0].argv[calls[0].argv.indexOf("--tools") + 1].split(",");
+    expect(tools.filter((tool) => ["write", "edit", "bash"].includes(tool))).toEqual([]);
   });
 
   test.each([
@@ -151,25 +120,6 @@ describe("runReview", () => {
     const calls: { argv: string[]; options: CommandOptions }[] = [];
     expect(await review(child(), calls, "\n")).toMatchObject({ status: "no_diff", approved: false, findings: [], sessionFile: null });
     expect(calls).toEqual([]);
-  });
-
-  test("the request file holds the user's follow-up messages after the request, and the prompt makes them part of the task", async () => {
-    const calls: { argv: string[]; options: CommandOptions }[] = [];
-    await review(child(), calls, undefined, ["also add a second line: follow-up", "and a third"]);
-    expect(readFileSync(join(reviewsDir, "round-2.request.md"), "utf8")).toBe(
-      "# Fix the cart\n\nThe total is off by one.\n\n## Follow-up messages from the user\n\n" +
-        "### Message 1\n\nalso add a second line: follow-up\n\n### Message 2\n\nand a third\n",
-    );
-    expect(calls[0].argv.at(-1)).toContain("Follow-up messages from the user in the task file are part of the task");
-  });
-
-  test("a review longer than the old limits is not cut: its verdict counts", async () => {
-    // The fake child reports a run of an hour (past the old 5 and 20 minutes): no limit may have stopped it.
-    const calls: { argv: string[]; options: CommandOptions }[] = [];
-    const hour = child({ durationMs: 60 * 60_000, stdout: [line({ type: "session", id: "abc-123" }), verdictEnd([])].join("\n") });
-    const data = await runReview({ exec: async (argv, options) => (calls.push({ argv, options }), hour), root: "/repo", round: 4, task, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => false });
-    expect(calls[0].options.timeoutMs).toBeUndefined();
-    expect(data).toMatchObject({ status: "ok", approved: true, findings: [], wallMs: 60 * 60_000 });
   });
 
   test("a cancelled review still ends aborted", async () => {

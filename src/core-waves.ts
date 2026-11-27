@@ -48,6 +48,7 @@ import {
   waveTaskState,
   type FoldedTask,
   type NewWaveEvent,
+  type WaveEvent,
   type StartedWaveFold,
   type WaveConflict,
   type WaveDeclaration,
@@ -176,7 +177,8 @@ function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["u
  * nothing else moves it (`stuckKeys`), or it is queued after a wave that was cancelled or removed (`queueLook`). A
  * stuck wave rests (its runner does too) and needs attention; it is not interrupted.
  */
-export type WaveLook = { view: WaveView; stuck: boolean };
+/** `events`: the log the view was folded from (a notice keys on it). */
+export type WaveLook = { view: WaveView; stuck: boolean; events: WaveEvent[] };
 
 /** The wave as clients see it: its fold, its tasks' states and usage, whether its runner lives. */
 async function waveView(file: WaveFile, all?: WaveFile[], read?: ListingReads): Promise<WaveView> {
@@ -277,11 +279,14 @@ export async function waveLook(file: WaveFile): Promise<WaveLook> {
 }
 
 /** `waveLook` with the waves read already (`all`: every wave), else they are read; `read`: a listing's shared reads. */
-async function lookWave(file: WaveFile, all?: readonly WaveFile[], read: ListingReads = {}): Promise<WaveLook> {
+async function lookWave(given: WaveFile, all?: readonly WaveFile[], read: ListingReads = {}): Promise<WaveLook> {
+  // Liveness before the log: a runner writes its last stage before it exits, so the log read after a dead runner is its
+  // last one. The caller's copy was read before, and a runner that wrote `merged` and exited since would look interrupted.
+  const runners = await liveWaveRunners(given.declaration.id, read.snapshot);
+  const file = await readWave(given.declaration.id);
   const full = foldWave(file.declaration, file.events);
   const { overrides: _overrides, base: _base, contracts: _contracts, conflicts: _conflicts, taskReviews: _taskReviews, ...fold } = full;
   const { states, views } = await waveTaskViews(full, read);
-  const runners = await liveWaveRunners(fold.id, read.snapshot);
   const running = runners.length > 0;
   const waitingForSlot = await slotWaiting(runners);
   const waves = all ?? (await listWaves());
@@ -316,7 +321,7 @@ async function lookWave(file: WaveFile, all?: readonly WaveFile[], read: Listing
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
   const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
   const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
-  return { view: { ...fold, reviews, minors, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, stuck };
+  return { view: { ...fold, reviews, minors, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, stuck, events: file.events };
 }
 
 /** A wave read from the archive (`archive.ts`): nothing of it runs, no action applies. */
@@ -369,7 +374,7 @@ export async function archivedWaves(): Promise<ArchivedWaveView[]> {
   const liveIds = new Set((await listWaves()).map((file) => file.declaration.id));
   const archives = (await archivedWaveDirs()).filter(({ index }) => !liveIds.has(index.id));
   const views = await Promise.all(
-    archives.map(async ({ dir, index }) => {
+    archives.map(async ({ dir }) => {
       const file = await readFile(join(dir, "wave.jsonl"), "utf8")
         .then((text) => parseWaveFile(text))
         .catch(() => undefined);
@@ -401,7 +406,7 @@ export async function noticeInputs(
   const all = await listWaves();
   const files = all.filter((file) => file.declaration.origin === origin && !skip.waves?.has(file.declaration.id));
   const tasks = await Promise.all(records.map((record) => taskView(record)));
-  const waves = await Promise.all(files.map(async (file) => ({ ...(await lookWave(file, all)), events: file.events })));
+  const waves = await Promise.all(files.map((file) => lookWave(file, all)));
   return { tasks, waves };
 }
 

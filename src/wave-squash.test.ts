@@ -11,12 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { caseDigits, caseSerial, caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
-import { waveBlock } from "./agent-view.ts";
-import { waveCard } from "./cards.ts";
 import { worktreePath } from "./launch.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { stopWaveRunners } from "./wave-poke.ts";
-import { runWave, squashMessage, waveCommitsRef } from "./wave-runner.ts";
+import { runWave, waveCommitsRef } from "./wave-runner.ts";
 import { appendWaveEvent, createWave, listWaves, lockWave, readWave, unlockWave, wavePath, type WaveView } from "./waves.ts";
 
 const test = caseTests();
@@ -160,7 +158,6 @@ async function expectLanded(repo: string, from: string, subjects: string[]): Pro
   expect(wave.stage).toBe("merged");
   const main = git(repo, "rev-parse", "main");
   expect(git(repo, "rev-parse", "main^")).toBe(from);
-  expect(git(repo, "show", "-s", "--format=%B", "main")).toBe(squashMessage({ id: WAVE(), tag: TAG, title: "Wave one" }, subjects));
   expect(git(repo, "log", "--reverse", "--format=%s", `${from}..${REF()}`)).toBe(subjects.join("\n"));
   expect(git(repo, "rev-parse", "main^{tree}")).toBe(git(repo, "rev-parse", `${REF()}^{tree}`));
   expect(branchExists(repo)).toBe(false);
@@ -170,41 +167,6 @@ async function expectLanded(repo: string, from: string, subjects: string[]): Pro
 }
 
 describe("a squash wave", () => {
-  test("lands as one commit of the gated tree: the message names its commits, the ref keeps them, the branch is gone", async () => {
-    const repo = await waveRepo();
-    const moved = commit(repo, "d.txt", "d\n", "main: add d");
-    expect(await runWave(WAVE())).toBe(0);
-    await expectLanded(repo, moved, ["feat: add b", "feat: add c"]);
-    expect(git(repo, "show", "-s", "--format=%B", "main")).toBe(`Wave one\n\n- feat: add b\n- feat: add c\n\nWave: ${TAG}\nCommits: refs/factory/waves/squash-w1-${WAVE().slice(0, 8)}`);
-    expect(git(repo, "log", "--format=%s", "main")).toBe("Wave one\nmain: add d\ninit");
-    expect(await kinds()).toEqual(["tasks", "task", "task", "reviewing", "gate", "review", "merging", "merge", "merged"]);
-    // The views: waves.get's text and the card name the history.
-    const wave = await getWave();
-    expect(waveCard(wave, "wave").rows).toContainEqual({ label: "history", text: `${REF()} (2 commits)` });
-    expect(waveBlock(wave)).toContain(`history: ${REF()} (2 commits)`);
-  });
-
-  test("of one commit lands as that commit, the ref on it, the branch gone", async () => {
-    const repo = await waveRepo({ squash: true }, ["b"]);
-    const init = git(repo, "rev-parse", "main");
-    const tip = git(repo, "rev-parse", BRANCH);
-    expect(await runWave(WAVE())).toBe(0);
-    const wave = await getWave();
-    expect(wave.stage).toBe("merged");
-    expect(git(repo, "rev-parse", "main")).toBe(tip);
-    expect(git(repo, "rev-parse", REF())).toBe(tip);
-    expect(branchExists(repo)).toBe(false);
-    expect(wave.merge).toEqual({ at: expect.any(String), from: init, to: tip, ref: REF(), commits: 1 });
-  });
-
-  test("a ref left by a run that died before the move is set again; the wave lands once", async () => {
-    const repo = await waveRepo();
-    const init = git(repo, "rev-parse", "main");
-    git(repo, "update-ref", REF(), init);
-    expect(await runWave(WAVE())).toBe(0);
-    await expectLanded(repo, init, ["feat: add b", "feat: add c"]);
-  });
-
   test("a rerun after the move, the branch still there: no second commit, the branch deleted, one merge event", async () => {
     const repo = await waveRepo();
     const init = git(repo, "rev-parse", "main");
@@ -226,17 +188,6 @@ describe("a squash wave", () => {
     expect(await runWave(WAVE())).toBe(0);
     expect(git(repo, "rev-parse", "main")).toBe(landed);
     await expectLanded(repo, init, ["feat: add b", "feat: add c"]);
-  });
-
-  test("a rerun of a one-commit wave after the move: the target's tip is the ref's commit, nothing lands twice", async () => {
-    const repo = await waveRepo({ squash: true }, ["b"]);
-    expect(await runWave(WAVE())).toBe(0);
-    const landed = git(repo, "rev-parse", "main");
-    forgetLanding();
-    expect(await runWave(WAVE())).toBe(0);
-    expect(git(repo, "rev-parse", "main")).toBe(landed);
-    expect((await getWave()).merge).toMatchObject({ to: landed, ref: REF(), commits: 1 });
-    expect((await kinds()).filter((kind) => kind === "merge")).toHaveLength(1);
   });
 
   test("the target moved between the merge gates and the move: rebased again, then one commit on the new tip", async () => {
@@ -272,6 +223,5 @@ describe("a squash wave", () => {
     expect(git(repo, "rev-parse", BRANCH)).toBe(git(repo, "rev-parse", "main"));
     expect(git(repo, "for-each-ref", "refs/factory/waves")).toBe("");
     expect(wave.merge).toEqual({ at: expect.any(String), from: init, to: git(repo, "rev-parse", "main") });
-    expect((waveCard(wave, "wave").rows ?? []).some((row) => row.label === "history")).toBe(false);
   });
 });

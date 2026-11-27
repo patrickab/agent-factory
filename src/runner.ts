@@ -171,7 +171,7 @@ const START_PREFIX = "/factory start ";
  * which an extension such as `@xynogen/pix-models` answers by writing `defaultProvider`/`defaultModel` into
  * `<worktree>/.pi/settings.json`, and the factory's commit of the worktree then took that file).
  */
-export function piArgs(sessionDir: string, sessionId: string, message: string): string[] {
+function piArgs(sessionDir: string, sessionId: string, message: string): string[] {
   const args = ["--mode", "rpc", "--session-dir", sessionDir, "--session-id", sessionId];
   const text = message.trimStart();
   if (!text.startsWith(START_PREFIX)) return args;

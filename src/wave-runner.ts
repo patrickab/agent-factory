@@ -151,7 +151,7 @@ const DIRTY_PATHS_SHOWN = 20;
  * `detail` as the stage event stores it: no path (invariant 10). The review worktree is named by its wave, a path in
  * the repository is made relative, any other absolute path is `<path>`; the text with its paths goes to the log.
  */
-export function pathFree(declaration: WaveDeclaration, detail: string): string {
+function pathFree(declaration: WaveDeclaration, detail: string): string {
   const relative = detail
     .split(reviewWorktree(declaration))
     .join(`the review worktree of wave ${declaration.id.slice(0, 8)}`)

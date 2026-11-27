@@ -44,7 +44,6 @@ export type WaveTaskSpec = { key: string; title: string; request: string; after?
  */
 export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: ModelSize; id: string };
 
-export const WAVE_STAGES: readonly WaveStage[] = ["queued", "building", "reviewing", "rejected", "merging", "waiting_approve", "merged", "blocked", "cancelled"];
 /** `queued` too: no runner drives a wave that waits for others, a merge of one of them pokes it (`queuedWaves`). */
 export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["queued", "rejected", "waiting_approve", "merged", "blocked", "cancelled"];
 

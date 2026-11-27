@@ -11,7 +11,7 @@
  *   `runnerSpawn` puts it in a systemd user scope when `systemd-run` is on PATH) that takes over the task lock its caller holds;
  *   `messageTask`: a message to the coder in any state but merging (`taskInboxPath` of a live runner, else a new
  *   runner); a state refusal is a `MessageRefusedError`
- * - Provides `defaultBranch`, `localBranchExists` and `startCommand` (the payload `parseStartPayload` accepts)
+ * - Provides `defaultBranch` and `localBranchExists`
  * - Provides `liveRunners`/`stopRunners` (a task's runner processes: `pgrep -f`, then the session id as a whole argument
  *   of the command line and the caller's marker, `ownRunner` of `spawn.ts`), `unmergedWork` and
  *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another)
@@ -27,7 +27,7 @@ import { inboxReadPath, lastFactoryState, taskMainBranch } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
 import type { ModelSize, Settings, StartPayload } from "./state.ts";
-import { onPath, ownRunners, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
+import { onPath, ownRunners, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { TASK_WAVE_ENV, type RunnerSnapshot } from "./wave-poke.ts";
 import { outputTail } from "./util.ts";
@@ -39,7 +39,7 @@ const HOOK_TIMEOUT_MS = 10 * 60_000;
 /** How long `stopRunners` waits for a runner to end after SIGTERM, then after SIGKILL. */
 const STOP_WAIT_MS = 10_000;
 
-export { runnerSpawn, type RunnerEnv };
+export type { RunnerEnv };
 
 export async function localBranchExists(repo: string, branch: string): Promise<boolean> {
   const result = await runCommand(["git", "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo });
@@ -57,7 +57,7 @@ export async function defaultBranch(repo: string): Promise<string> {
 }
 
 /** The prompt that starts a task in its session; `prefix` (its contracts) goes before the request in the coder's first message only. */
-export function startCommand(title: string, request: string, settings: Settings, prefix?: string): string {
+function startCommand(title: string, request: string, settings: Settings, prefix?: string): string {
   const payload: StartPayload = { request, title, settings, ...(prefix === undefined ? {} : { prefix }) };
   return `/factory start ${JSON.stringify(payload)}`;
 }

@@ -27,7 +27,7 @@ import { scoutBlock } from "../scout-view.ts";
 import { listTasks } from "../tasks.ts";
 import { isRecord } from "../util.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
-import { createScoutTracker, SCOUT_TOOL_NAME, type ScoutCore } from "./scout-tool.ts";
+import { createScoutTracker, SCOUT_TOOL_NAME } from "./scout-tool.ts";
 
 export const REVIEW_WAVE_ENV = "FACTORY_REVIEW_WAVE";
 export const REVIEW_TASK_ENV = "FACTORY_REVIEW_TASK";
@@ -42,33 +42,14 @@ export interface ReviewerIds {
   plan: string | null;
 }
 
-/** How the tools reach the factory: tests replace them. */
-export interface ReviewerCore {
-  fix(wave: string, fix: { title: string; request: string; model?: "small" | "big" }): Promise<string>;
-  note(wave: string, text: string, task: string | null): Promise<void>;
-  /** Where a scout explores: the task's worktree, else the wave's review worktree. */
-  scoutDir(ids: ReviewerIds): Promise<string>;
-  scouts?: ScoutCore;
-  scoutPollMs?: number;
-}
-
-const CORE: ReviewerCore = {
-  fix: (wave, fix) => startReviewerFix(wave, fix),
-  note: noteToSupervisor,
-  async scoutDir(ids) {
-    const record = ids.task === null ? undefined : (await listTasks()).find((task) => task.id === ids.task);
-    return record?.worktree ?? waveReviewWorktree((await findWave(ids.wave)).declaration);
-  },
-};
-
 type ToolResult = { content: { type: "text"; text: string }[]; details: unknown; isError?: boolean };
 const text = (value: string, details: unknown = undefined): ToolResult => ({ content: [{ type: "text", text: value }], details });
 const failed = (error: unknown): ToolResult => ({ ...text(factoryToolError(error)), isError: true });
 const nonEmptyString = (value: unknown): string | undefined => (typeof value === "string" && value.trim() !== "" ? value : undefined);
 
 /** `scout`, `feedback`, `notify_supervisor` and `start_fix` of a wave's reviewer; none ends the review. */
-export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds, core: ReviewerCore = CORE): void {
-  const tracker = createScoutTracker({ isCoder: () => true, holds: () => false, core: core.scouts, pollMs: core.scoutPollMs });
+export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds): void {
+  const tracker = createScoutTracker({ isCoder: () => true, holds: () => false });
   const { properties, required } = ACTIONS["scouts.start"].params as { properties: Record<string, unknown>; required: string[] };
   const { wait: _wait, repo: _repo, ...scoutProperties } = properties;
   pi.registerTool({
@@ -80,7 +61,9 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds, core: 
     parameters: { type: "object", required, properties: scoutProperties } as never,
     async execute(_toolCallId, params: unknown, signal, _onUpdate, ctx: ExtensionContext) {
       try {
-        const repo = await core.scoutDir(ids);
+        const record = ids.task === null ? undefined : (await listTasks()).find((task) => task.id === ids.task);
+        // The task's worktree, else the wave's review worktree.
+        const repo = record?.worktree ?? waveReviewWorktree((await findWave(ids.wave)).declaration);
         const { text: answer, result } = await tracker.call({ ...(isRecord(params) ? params : {}), repo, wait: true }, signal, ctx);
         if (result.timedOut) return text(`${scoutBlock(result.scout, true)}\nits report did not arrive in time: go on without it`, result);
         return text(answer, result);
@@ -105,7 +88,7 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds, core: 
       const value = nonEmptyString(isRecord(params) ? params.text : undefined);
       if (value === undefined) return { ...text(`${NOTIFY_TOOL}: text must not be empty`), isError: true };
       try {
-        await core.note(ids.wave, value, ids.task);
+        await noteToSupervisor(ids.wave, value, ids.task);
         return text("The supervisor gets the notice. Go on with the review.");
       } catch (error) {
         return failed(error);
@@ -132,7 +115,7 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds, core: 
       if (title === undefined || request === undefined) return { ...text(`${FIX_TOOL}: title and request must not be empty`), isError: true };
       try {
         const model = isRecord(params) && (params.model === "small" || params.model === "big") ? params.model : undefined;
-        const key = await core.fix(ids.wave, { title, request, ...(model ? { model } : {}) });
+        const key = await startReviewerFix(ids.wave, { title, request, ...(model ? { model } : {}) });
         return text(`Task ${key} added to the wave; it starts at once. Go on with the review.`, { key });
       } catch (error) {
         return failed(error);

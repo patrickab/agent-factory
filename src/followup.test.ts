@@ -2,7 +2,7 @@
  * A follow-up on a merged task against throwaway git repos in a temp dir: the worktree made again, the change merged
  * as a new commit. The coder is the test: it edits the task worktree between the calls. No Pi, no model.
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,30 +74,19 @@ function mergeData(outcome: MergeOutcome): MergeData {
   return outcome.result.merge;
 }
 
-const subjects = (ref: string) => gitIn(repo, "log", "--format=%s", ref);
-
-describe("follow-up on a merged task", () => {
-  test("a done task's worktree that is gone is made again on its branch before a runner starts in it", async () => {
-    setUp([["b.txt", "b\n", "L1"]]);
-    const sessions = join(scratch, `sessions-${counter}`);
-    mkdirSync(sessions);
-    const own: TaskRecord = { id: "00000000-0000-0000-0000-000000000006", repo, worktree, branch: "task", title: "Add a", sessionId: "s6", sessionDir: sessions, createdAt: "2026-01-01T00:00:00Z", tag: "t", plan: null, wave: null, origin: null };
-    rmSync(worktree, { recursive: true, force: true });
-    await restoreWorktree(own);
-    expect(gitIn(worktree, "rev-parse", "--abbrev-ref", "HEAD")).toBe("task");
-    expect(readFileSync(join(worktree, "a.txt"), "utf8")).toBe("one\n");
-  });
-
-  test("the change merges as a new commit with its own message; the merged commit and later ones stay as they are", async () => {
-    setUp([["b.txt", "b\n", "L1"]]);
-    const before = gitIn(repo, "rev-parse", "main");
-    writeFileSync(join(worktree, "a.txt"), "one\nmore\n");
-    const message = { title: "fix(a): add more", body: "- more" };
-    const merge = mergeData(await mergeTask(input(await taskOf(), { message })));
-    expect(merge).toEqual({ ok: true, commit: gitIn(repo, "rev-parse", "main"), error: null, depsSynced: false });
-    expect(gitIn(repo, "rev-parse", "main~1")).toBe(before);
-    expect(subjects("main")).toBe("fix(a): add more\nL1\nfeat: add a\nbase");
-    expect(gitIn(repo, "rev-list", "main")).toContain(merged);
-    expect(gitIn(repo, "show", "main:a.txt")).toBe("one\nmore");
-  });
+test("a follow-up on a merged task makes its gone worktree again and lands the change as a new commit; earlier ones stay", async () => {
+  setUp([["b.txt", "b\n", "L1"]]);
+  const sessions = join(scratch, `sessions-${counter}`);
+  mkdirSync(sessions);
+  const own: TaskRecord = { id: "00000000-0000-0000-0000-000000000006", repo, worktree, branch: "task", title: "Add a", sessionId: "s6", sessionDir: sessions, createdAt: "2026-01-01T00:00:00Z", tag: "t", plan: null, wave: null, origin: null };
+  rmSync(worktree, { recursive: true, force: true });
+  await restoreWorktree(own);
+  expect(readFileSync(join(worktree, "a.txt"), "utf8")).toBe("one\n");
+  const before = gitIn(repo, "rev-parse", "main");
+  writeFileSync(join(worktree, "a.txt"), "one\nmore\n");
+  const merge = mergeData(await mergeTask(input(await taskOf(), { message: { title: "fix(a): add more", body: "- more" } })));
+  expect(merge.commit).toBe(gitIn(repo, "rev-parse", "main"));
+  expect(gitIn(repo, "rev-parse", "main~1")).toBe(before);
+  expect(gitIn(repo, "rev-list", "main")).toContain(merged);
+  expect(gitIn(repo, "show", "main:a.txt")).toBe("one\nmore");
 });

@@ -62,7 +62,7 @@ const SYSTEMD_USER_ENV = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"];
  * command as it is (detached by `spawnDetached`). `systemd-run --scope` execs the command, so the spawned pid and its
  * command line are the runner's (`liveRunners` finds it).
  */
-export function runnerSpawn(command: string[], env: RunnerEnv, hostEnv: RunnerEnv, systemdRun: string | null): { argv: string[]; env: RunnerEnv } {
+function runnerSpawn(command: string[], env: RunnerEnv, hostEnv: RunnerEnv, systemdRun: string | null): { argv: string[]; env: RunnerEnv } {
   if (systemdRun === null || (env.XDG_RUNTIME_DIR ?? hostEnv.XDG_RUNTIME_DIR) === undefined) return { argv: command, env };
   const scopeEnv = { ...env };
   for (const key of SYSTEMD_USER_ENV) if (scopeEnv[key] === undefined && hostEnv[key] !== undefined) scopeEnv[key] = hostEnv[key];

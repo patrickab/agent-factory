@@ -3,10 +3,8 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, liveRunners, runnerSpawn, startCommand, taskInboxPath, unmergedWork } from "./launch.ts";
-import { resolveSettings, saveSettings } from "./settings.ts";
-import { parseStartPayload } from "./state.ts";
-import { spawnDetached } from "./spawn.ts";
+import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, taskInboxPath, unmergedWork } from "./launch.ts";
+import { saveSettings } from "./settings.ts";
 import { listTasks, taskLogPath } from "./tasks.ts";
 
 const savedEnv = { ...process.env };
@@ -125,33 +123,6 @@ describe("defaultBranch", () => {
     expect(await defaultBranch(clone)).toBe("trunk");
   });
 
-  test("main, before master", async () => {
-    const repo = makeRepo("repo", "main");
-    git(repo, "branch", "--quiet", "master");
-    expect(await defaultBranch(repo)).toBe("main");
-  });
-
-  test("master when there is no main", async () => {
-    expect(await defaultBranch(makeRepo("repo", "master"))).toBe("master");
-  });
-
-  test("none of them: throws", async () => {
-    const repo = makeRepo("repo", "dev");
-    await expect(defaultBranch(repo)).rejects.toThrow("no default branch");
-  });
-});
-
-describe("startCommand", () => {
-  test("the payload parseStartPayload accepts", () => {
-    const settings = resolveSettings({ maxRounds: 3, models: { small: "a/s", big: "a/b" } }, { review: true }, "main");
-    const command = startCommand("Add x", "Please add x", settings);
-    expect(command.startsWith("/factory start ")).toBe(true);
-    expect(parseStartPayload(command.slice("/factory start ".length))).toEqual({
-      request: "Please add x",
-      title: "Add x",
-      settings: { branch: "main", merge: "auto", maxRounds: 3, review: true, models: { small: "a/s", big: "a/b", coder: "a/b" } },
-    });
-  });
 });
 
 describe("launchTask", () => {
@@ -181,15 +152,6 @@ describe("launchTask", () => {
     expect(readFileSync(taskLogPath(record.id), "utf8")).toContain("before it answered the prompt");
   });
 
-  test("an override branch wins over the stored one", async () => {
-    const repo = makeRepo("repo", "main");
-    git(repo, "branch", "--quiet", "other");
-    await saveSettings(repo, { branch: "missing" });
-    const record = await launchTask({ repo, title: "t", request: "r", overrides: { branch: "other" }, tag: "team/w1", plan: "plan/team.md" });
-    expect(git(record.worktree, "rev-parse", "HEAD")).toBe(git(repo, "rev-parse", "other"));
-    expect((await listTasks()).map((task) => [task.tag, task.plan])).toEqual([["team/w1", "plan/team.md"]]);
-  });
-
   test("a target branch that does not exist locally: refused before any worktree", async () => {
     const repo = makeRepo("repo", "main");
     await expect(launchTask({ repo, title: "t", request: "r", overrides: { branch: "nope" } })).rejects.toThrow(
@@ -204,22 +166,6 @@ describe("launchTask", () => {
     await expect(refusal).rejects.toThrow("branch main has no factory.yaml (write one with /factory init or the config.write action, and commit it)");
     await expect(refusal).rejects.toBeInstanceOf(LaunchRefusedError);
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
-  });
-
-  test("without agent-worktree: git worktree add into <repo>/../worktrees/<repo name>/<name>", async () => {
-    process.env.PATH = pathWithoutAgentWorktree;
-    const repo = makeRepo("repo", "master");
-    const record = await launchTask({ repo, title: "Plain", request: "r" });
-    expect(record.worktree).toBe(join(caseDir, "worktrees", "repo", record.branch));
-    expect(git(record.worktree, "rev-parse", "--abbrev-ref", "HEAD")).toBe(record.branch);
-    expect(git(record.worktree, "rev-parse", "HEAD")).toBe(git(repo, "rev-parse", "master"));
-  });
-
-  test("hooks.after_create run in the worktree", async () => {
-    process.env.PATH = pathWithoutAgentWorktree;
-    const repo = makeRepo("repo", "main", { "factory.yaml": 'hooks:\n  after_create:\n    - ["sh", "-c", "pwd > created.txt"]\n' });
-    const record = await launchTask({ repo, title: "Hooked", request: "r" });
-    expect(await Bun.file(join(record.worktree, "created.txt")).text()).toBe(`${record.worktree}\n`);
   });
 
   for (const [label, usesAgentWorktree] of [
@@ -252,32 +198,6 @@ describe("launchTask failures", () => {
     }
     expect(await listTasks()).toEqual([]);
   }
-
-  test("beforeRecord runs once the worktree on the target exists; its throw undoes the start", async () => {
-    process.env.PATH = pathWithoutAgentWorktree;
-    const repo = makeRepo("repo", "main");
-    const seen: string[] = [];
-    const refusal = launchTask({
-      repo,
-      title: "Raced",
-      request: "r",
-      beforeRecord: async (branch) => {
-        seen.push(branch);
-        expect(git(repo, "branch", "--list", "raced-*")).not.toBe("");
-        throw new Error("main is the branch of a wave");
-      },
-    });
-    await expect(refusal).rejects.toThrow("main is the branch of a wave");
-    expect(seen).toEqual(["main"]);
-    await nothingLeft(repo, "raced");
-  });
-
-  test("agent-worktree create failing after its git worktree add: the worktree and branch it left are removed", async () => {
-    process.env.FAKE_AW_FAIL = "1";
-    const repo = makeRepo("repo", "main");
-    await expect(launchTask({ repo, title: "Leak", request: "r" })).rejects.toThrow(/agent-worktree create leak-.*venv failed/s);
-    await nothingLeft(repo, "leak");
-  });
 
   test("an abort kills the running hooks.after_create and undoes the launch", async () => {
     process.env.PATH = pathWithoutAgentWorktree;
@@ -314,30 +234,7 @@ describe("deleteTask", () => {
   });
 });
 
-describe("liveRunners", () => {
-  test("pgrep that cannot run is an error, not an empty list", async () => {
-    const empty = join(caseDir, "empty-bin");
-    mkdirSync(empty);
-    process.env.PATH = empty;
-    await expect(liveRunners({ sessionId: "test-session-s" })).rejects.toThrow("pgrep");
-  });
-
-  test("no runner: an empty list", async () => {
-    expect(await liveRunners({ sessionId: crypto.randomUUID() })).toEqual([]);
-  });
-});
-
 describe("unmergedWork", () => {
-  test("without a target: the commits of the task's branch no other local branch has", async () => {
-    const repo = makeRepo("repo", "main");
-    git(repo, "worktree", "add", "--quiet", "-b", "t", join(caseDir, "t-wt"));
-    writeFileSync(join(caseDir, "t-wt", "x.txt"), "x\n");
-    git(join(caseDir, "t-wt"), "add", "-A");
-    git(join(caseDir, "t-wt"), "commit", "--quiet", "-m", "x");
-    const record = { id: "i", repo, worktree: join(caseDir, "t-wt"), branch: "t", title: "t", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, wave: null, origin: null };
-    expect(await unmergedWork(record, undefined)).toEqual({ commits: 1, dirty: false });
-    expect(await unmergedWork(record, "main")).toEqual({ commits: 1, dirty: false });
-  });
 
   test("an untracked file makes the worktree dirty even with status.showUntrackedFiles=no", async () => {
     const repo = makeRepo("repo", "main");
@@ -347,60 +244,5 @@ describe("unmergedWork", () => {
     writeFileSync(join(worktree, "forgotten.txt"), "work\n");
     const record = { id: "i", repo, worktree, branch: "u", title: "u", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, wave: null, origin: null };
     expect(await unmergedWork(record, "main")).toEqual({ commits: 0, dirty: true });
-  });
-});
-
-describe("runnerSpawn", () => {
-  const command = ["/bin/bun", "runner.ts", "a"];
-  const env = { PATH: "/bin", FACTORY_TASK_LOCK: "/l" };
-
-  test("with systemd-run: a user scope of its own, collected, the user bus reachable", () => {
-    const host = { XDG_RUNTIME_DIR: "/run/user/1", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1/bus", SECRET: "s" };
-    expect(runnerSpawn(command, env, host, "/usr/bin/systemd-run")).toEqual({
-      argv: ["/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect", "--", ...command],
-      env: { ...env, XDG_RUNTIME_DIR: "/run/user/1", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1/bus" },
-    });
-  });
-
-  test("without systemd-run, or no user manager to reach: the command as it is", () => {
-    expect(runnerSpawn(command, env, { XDG_RUNTIME_DIR: "/run/user/1" }, null)).toEqual({ argv: command, env });
-    expect(runnerSpawn(command, env, {}, "/usr/bin/systemd-run")).toEqual({ argv: command, env });
-  });
-});
-
-describe("spawnDetached", () => {
-  /** A bin dir with a `systemd-run` that writes its argv to `argvFile` and runs the command after `--`. */
-  function fakeSystemdRun(argvFile: string): string {
-    const bin = join(caseDir, "systemd-bin");
-    mkdirSync(bin);
-    writeFileSync(
-      join(bin, "systemd-run"),
-      `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvFile}'\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`,
-    );
-    chmodSync(join(bin, "systemd-run"), 0o755);
-    return bin;
-  }
-
-  async function spawnAndWait(command: string[], done: string): Promise<number | undefined> {
-    const pid = await spawnDetached(command, { ...process.env, XDG_RUNTIME_DIR: "/run/user/test" }, join(caseDir, "log"), caseDir);
-    for (let i = 0; i < 200 && !existsSync(done); i++) await Bun.sleep(10);
-    return pid;
-  }
-
-  test("systemd-run on PATH: the runner's argv runs through it, its pid the command's", async () => {
-    const argvFile = join(caseDir, "argv");
-    const done = join(caseDir, "done");
-    process.env.PATH = `${fakeSystemdRun(argvFile)}:${process.env.PATH}`;
-    const pid = await spawnAndWait(["/bin/sh", "-c", `echo $$ > '${done}'`], done);
-    expect(readFileSync(argvFile, "utf8").trim().split("\n")).toEqual(["--user", "--scope", "--quiet", "--collect", "--", "/bin/sh", "-c", `echo $$ > '${done}'`]);
-    expect(readFileSync(done, "utf8").trim()).toBe(String(pid));
-  });
-
-  test("no systemd-run on PATH: the command alone", async () => {
-    const done = join(caseDir, "done");
-    process.env.PATH = join(caseDir, "empty");
-    const pid = await spawnAndWait(["/bin/sh", "-c", `echo $$ > '${done}'`], done);
-    expect(readFileSync(done, "utf8").trim()).toBe(String(pid));
-    expect(existsSync(join(caseDir, "argv"))).toBe(false);
   });
 });

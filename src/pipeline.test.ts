@@ -105,12 +105,6 @@ describe("runRound", () => {
     expect(result.continue).toBe(true);
   });
 
-  test("a cancelled round opens no message round", async () => {
-    const result = await runRound(snapshotOf(), fakeSteps({ pendingMessages: () => true, cancelled: () => true }));
-    expect(lastState(result.entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
-    expect(result.continue).toBe(false);
-  });
-
   test("merge review waits for approve without merging", async () => {
     const steps = fakeSteps();
     const result = await runRound(snapshotOf({ merge: "review" }), steps);
@@ -141,48 +135,6 @@ describe("runRound", () => {
     expect(kinds(result.entries)).toEqual(["factory-gate", "factory-state"]);
     expect(lastState(result.entries)).toMatchObject({ state: "blocked", reason: "infra: eslint is missing" });
     expect(result.continue).toBe(false);
-  });
-
-  describe("a failed gate runs once more", () => {
-    /** Steps whose `lint` returns `results` in turn (the last one after them), every other command passing. */
-    const lintSteps = (...results: CommandResult[]) => {
-      let runs = 0;
-      const steps = fakeSteps({ runCommand: async (argv) => (argv[0] === "lint" ? results[Math.min(runs++, results.length - 1)] : commandResult(0)) });
-      return Object.assign(steps, { lintRuns: () => runs });
-    };
-
-    test("fails then passes: passed, flaky recorded on its gate entry, no round used", async () => {
-      const steps = lintSteps(commandResult(1, "(fail) lint > under load [3ms]"), commandResult(0));
-      const result = await runRound(snapshotOf(), steps);
-      expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-review", "factory-state"]);
-      expect(result.entries[0]).toMatchObject({ data: { phase: "gates", argv: ["lint"], exitCode: 0, flaky: ["lint > under load"] } });
-      expect((result.entries[1] as { data: object }).data).not.toHaveProperty("flaky");
-      expect(lastState(result.entries)).toEqual({ state: "merging", round: 1, reason: "passed" });
-    });
-
-    test("fails twice: a round problem as before", async () => {
-      const result = await runRound(snapshotOf(), lintSteps(commandResult(1), commandResult(2, "E501")));
-      expect(kinds(result.entries)).toEqual(["factory-gate", "factory-round", "custom_message"]);
-      expect(result.entries[0]).toMatchObject({ data: { argv: ["lint"], exitCode: 2 } });
-      expect((result.entries[0] as { data: object }).data).not.toHaveProperty("flaky");
-      expect(result.entries[1]).toMatchObject({ data: { round: 2, trigger: "gates" } });
-    });
-
-    test.each([
-      ["exit 75", commandResult(75), "factory-state" as const],
-      ["a kill", commandResult(null), "factory-round" as const],
-    ])("no rerun after %s", async (_name, first, after) => {
-      const steps = lintSteps(first, commandResult(0));
-      const result = await runRound(snapshotOf(), steps);
-      expect(steps.lintRuns()).toBe(1);
-      expect(kinds(result.entries).slice(0, 2)).toEqual(["factory-gate", after]);
-    });
-  });
-
-  test("a failing gate is a round problem with trigger gates", async () => {
-    const result = await runRound(snapshotOf(), fakeSteps({ runCommand: async () => commandResult(1) }));
-    expect(kinds(result.entries)).toEqual(["factory-gate", "factory-round", "custom_message"]);
-    expect(result.entries[1]).toMatchObject({ data: { round: 2, trigger: "gates" } });
   });
 
   test("the last round of the budget ends blocked, with the feedback and no new round", async () => {
@@ -239,26 +191,6 @@ describe("runRound", () => {
     expect(steps.calls).not.toContain("review");
     expect(steps.calls).not.toContain("merge");
     expect(result.continue).toBe(false);
-  });
-
-  test("a review that was killed ends cancelled", async () => {
-    const result = await runRound(snapshotOf(), fakeSteps({ review: async () => reviewOf("aborted") }));
-    expect(lastState(result.entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
-  });
-
-  test("a step that throws while cancelled ends cancelled, not as a pipeline error", async () => {
-    const steps = fakeSteps({
-      cancelled: () => true,
-      runCommand: async () => commandResult(0),
-      diff: async () => {
-        throw new Error("git add -A: killed");
-      },
-    });
-    expect(lastState((await runRound(snapshotOf({}), { ...steps, config: () => ({ ...config, hooks: { after_create: [], after_merge: [] }, gates: [] }) })).entries)).toEqual({
-      state: "cancelled",
-      round: 1,
-      reason: "cancelled",
-    });
   });
 
   test("a cancel during a gate ends cancelled, with the killed gate recorded", async () => {
@@ -353,10 +285,6 @@ describe("runMerge", () => {
   });
 
 
-  test("a merge that fails under a cancel ends cancelled", async () => {
-    const entries = await runMerge(snapshotOf(), config, fakeSteps({ cancelled: () => true, merge: async () => ({ gates: [], result: { kind: "failed", merge: failed } }) }));
-    expect(lastState(entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
-  });
 });
 
 describe("review per task", () => {

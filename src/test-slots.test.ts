@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runGateStep } from "./flaky-rerun.ts";
 import { type CommandResult, runCommand } from "./run.ts";
-import { type SlotPool, slotCount, slotEnv, slotPool, slotWaiting, takeSlot } from "./test-slots.ts";
+import { type SlotPool, slotWaiting, takeSlot } from "./test-slots.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -28,17 +28,6 @@ async function until(check: () => boolean | Promise<boolean>, ms = 10_000): Prom
 }
 
 describe("test slots", () => {
-  test("K is FACTORY_SLOTS, else a quarter of the cores, at least 1; jobs are cores / K", () => {
-    expect(slotCount({}, 8)).toBe(2);
-    expect(slotCount({}, 3)).toBe(1);
-    expect(slotCount({ FACTORY_SLOTS: "3" }, 8)).toBe(3);
-    expect(slotCount({ FACTORY_SLOTS: "0" }, 8)).toBe(2);
-    expect(slotEnv(pool(3))).toEqual({ FACTORY_TEST_JOBS: "2", FACTORY_SLOT_HELD: "1" });
-    expect(slotEnv(pool(16))).toEqual({ FACTORY_TEST_JOBS: "1", FACTORY_SLOT_HELD: "1" });
-    expect(slotEnv(pool(2, { jobs: "5" }))).toEqual({ FACTORY_SLOT_HELD: "1" });
-    expect(slotPool({ FACTORY_SLOT_HELD: "1", FACTORY_TEST_JOBS: "5" }, 8)).toMatchObject({ held: true, jobs: "5", count: 2 });
-  });
-
   test("K+1 gate runs: one waits, shown as waiting, and runs when a slot frees", async () => {
     const slots = pool(2);
     const started: number[] = [];

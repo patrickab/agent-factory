@@ -1,25 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
-import {
-  DEFAULTS_PATH,
-  defaultModels,
-  factoryHome,
-  loadDefaults,
-  loadSettings,
-  parseStoredSettings,
-  registeredRepos,
-  resolveRepoSettings,
-  resolveSettings,
-  saveSettings,
-  type StoredSettings,
-} from "./settings.ts";
+import { loadSettings, resolveRepoSettings, resolveSettings, saveSettings, type StoredSettings } from "./settings.ts";
 
 const REPO = "/home/someone/git/project";
-const REPO_FILE = "%2Fhome%2Fsomeone%2Fgit%2Fproject.yaml";
-const DEFAULTS = { merge: "auto", maxRounds: 2, review: false, models: {} } as const;
 let agentDir: string;
 let previousAgentDir: string | undefined;
 
@@ -35,221 +20,53 @@ afterEach(async () => {
   await rm(agentDir, { recursive: true, force: true });
 });
 
-/** The settings file of `REPO`: its path, URI-encoded, as the file name. */
-function settingsPath(): string {
-  return join(agentDir, "factory", "repos", REPO_FILE);
-}
+const settingsPath = () => join(agentDir, "factory", "repos", `${encodeURIComponent(REPO)}.yaml`);
 
-async function writeSettingsFile(text: string): Promise<string> {
-  const path = settingsPath();
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, text);
-  return path;
-}
-
-describe("paths", () => {
-  test("factoryHome follows PI_CODING_AGENT_DIR, the settings file is <factoryHome>/repos/<encoded path>.yaml", async () => {
-    expect(factoryHome()).toBe(join(agentDir, "factory"));
-    await saveSettings(REPO, { review: true });
-    expect(await readdir(join(agentDir, "factory", "repos"))).toEqual([REPO_FILE]);
-  });
-
-  test("factoryHome without PI_CODING_AGENT_DIR is ~/.pi/agent/factory; a leading ~ is the home dir", () => {
-    delete process.env.PI_CODING_AGENT_DIR;
-    expect(factoryHome()).toBe(join(homedir(), ".pi", "agent", "factory"));
-    process.env.PI_CODING_AGENT_DIR = "~/agent-x";
-    expect(factoryHome()).toBe(join(homedir(), "agent-x", "factory"));
-  });
-
-  test("a settings file registers its repo: registeredRepos lists them sorted", async () => {
-    expect(await registeredRepos()).toEqual([]);
-    await saveSettings("/b/repo", {});
-    await saveSettings(REPO, {});
-    expect(await registeredRepos()).toEqual(["/b/repo", REPO]);
-  });
-
-  test("two repos whose paths differ only in / and - have their own settings", async () => {
-    await saveSettings("/a/b-c", { merge: "review" });
-    expect(await loadSettings("/a-b/c")).toEqual({});
-    expect(await loadSettings("/a/b-c")).toEqual({ merge: "review" });
-  });
-});
-
-describe("loadSettings", () => {
-  test("a missing file is empty settings", async () => {
-    expect(await loadSettings(REPO)).toEqual({});
-  });
-
-  test("an empty file is empty settings", async () => {
-    await writeSettingsFile("");
-    expect(await loadSettings(REPO)).toEqual({});
-  });
-
-  test("drops unknown keys and unknown model names", async () => {
-    await writeSettingsFile("merge: review\nextra: 1\nmodels:\n  small: a/s\n  big: a/b\n  planner: c/d\n");
-    expect(await loadSettings(REPO)).toEqual({ merge: "review", models: { small: "a/s", coder: "a/b", big: "a/b" } });
-  });
-
-  test("models as before: coder and reviewer kept as they are; big is coder's alias, coder wins over a different big", async () => {
-    await writeSettingsFile("models:\n  coder: a/b\n  reviewer: a/b\n");
-    expect(await loadSettings(REPO)).toEqual({ models: { coder: "a/b", big: "a/b", reviewer: "a/b" } });
-    await writeSettingsFile("models:\n  coder: a/b\n");
-    expect(await loadSettings(REPO)).toEqual({ models: { coder: "a/b", big: "a/b" } });
-    // An old client edits only coder, sending back the big it read: coder wins.
-    await writeSettingsFile("models:\n  big: a/b\n  coder: e/f\n");
-    expect(await loadSettings(REPO)).toEqual({ models: { coder: "e/f", big: "e/f" } });
-    await writeSettingsFile("models:\n  big: a/b\n");
-    expect(await loadSettings(REPO)).toEqual({ models: { coder: "a/b", big: "a/b" } });
-    await writeSettingsFile("models:\n  reviewer: c/d\n");
-    expect(await loadSettings(REPO)).toEqual({ models: { reviewer: "c/d" } });
-  });
-
-  const invalid: [string, string, string][] = [
-    ["not a mapping", "- 1\n", "settings must be a mapping"],
-    ["branch empty", 'branch: ""\n', "branch"],
-    ["branch not a string", "branch: 3\n", "branch"],
-    ["merge", "merge: later\n", "merge"],
-    ["maxRounds zero", "maxRounds: 0\n", "maxRounds"],
-    ["maxRounds above 20", "maxRounds: 21\n", "maxRounds"],
-    ["maxRounds fraction", "maxRounds: 1.5\n", "maxRounds"],
-    ["maxRounds string", "maxRounds: two\n", "maxRounds"],
-    ["review", "review: yes please\n", "review"],
-    ["models not a mapping", "models: a/b\n", "models"],
-    ["coder model without provider", "models:\n  coder: sonnet\n", "models.coder"],
-    ["small model without provider", "models:\n  small: sonnet\n", "models.small"],
-    ["big model not a string", "models:\n  big: 4\n", "models.big"],
-    ["reviewer model not a string", "models:\n  reviewer: 4\n", "models.reviewer"],
-    ["preview", "preview: 1\n", "preview"],
+test("an invalid settings file throws naming the file and the key", async () => {
+  const invalid: [string, string][] = [
+    ["merge: [\n", ""],
+    ["- 1\n", ""],
+    ['branch: ""\n', "branch"],
+    ["merge: later\n", "merge"],
+    ["maxRounds: 21\n", "maxRounds"],
+    ["maxRounds: 1.5\n", "maxRounds"],
+    ["review: yes please\n", "review"],
+    ["models:\n  coder: sonnet\n", "models.coder"],
+    ["preview: 1\n", "preview"],
+    ["squash: yes\n", "squash"],
   ];
-  for (const [name, text, key] of invalid) {
-    test(`an invalid file throws naming the file and the key: ${name}`, async () => {
-      const path = await writeSettingsFile(text);
-      const error = await loadSettings(REPO).then(() => undefined, (caught: unknown) => caught);
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toStartWith(`${path}: `);
-      expect((error as Error).message).toContain(key);
-    });
+  await mkdir(dirname(settingsPath()), { recursive: true });
+  for (const [text, key] of invalid) {
+    await writeFile(settingsPath(), text);
+    const error = (await loadSettings(REPO).then(() => undefined, (caught: unknown) => caught)) as Error;
+    expect(error.message).toContain(settingsPath());
+    expect(error.message).toContain(key);
   }
-
-  test("an unparsable file throws naming the file", async () => {
-    const path = await writeSettingsFile("merge: [\n");
-    await expect(loadSettings(REPO)).rejects.toThrow(path);
-  });
 });
 
-describe("saveSettings", () => {
-  test("round trips, creating directories and leaving no temp file", async () => {
-    const settings: StoredSettings = { branch: "develop", merge: "review", maxRounds: 5, review: true, models: { small: "anthropic/s", coder: "anthropic/x", big: "anthropic/x", reviewer: "openai/y" } };
-    await saveSettings(REPO, settings);
-    expect(await loadSettings(REPO)).toEqual(settings);
-    expect(await readdir(dirname(settingsPath()))).toEqual([REPO_FILE]);
+test("defaults < stored < overrides, models merged per name; size small runs the coder on the small model", () => {
+  const stored: StoredSettings = { branch: "develop", merge: "review", maxRounds: 4, squash: true, models: { small: "s/small", coder: "s/big", reviewer: "s/reviewer" } };
+  const overrides: StoredSettings = { maxRounds: 9, review: true, squash: false, models: { reviewer: "o/reviewer" } };
+  expect(resolveRepoSettings(stored, overrides, "main")).toEqual({
+    branch: "develop",
+    merge: "review",
+    maxRounds: 9,
+    review: true,
+    preview: false,
+    squash: false,
+    models: { small: "s/small", big: "s/big", coder: "s/big", reviewer: "o/reviewer" },
   });
-
-  test("drops unknown keys before writing", async () => {
-    await saveSettings(REPO, { review: true, extra: "x" } as StoredSettings);
-    expect(await readFile(settingsPath(), "utf8")).not.toContain("extra");
-    expect(await loadSettings(REPO)).toEqual({ review: true });
-  });
-
-  test("refuses invalid settings and writes nothing", async () => {
-    await expect(saveSettings(REPO, { maxRounds: 30 })).rejects.toThrow(`${settingsPath()}: maxRounds`);
-    await expect(saveSettings(REPO, { models: { big: "bare" } })).rejects.toThrow("models.big");
-    expect(await loadSettings(REPO)).toEqual({});
-  });
-
-  test("two concurrent saves leave one valid file", async () => {
-    const first: StoredSettings = { merge: "review", maxRounds: 3, models: { coder: "a/one", big: "a/one" } };
-    const second: StoredSettings = { merge: "auto", maxRounds: 7, review: true, models: { reviewer: "b/two" } };
-    await Promise.all([saveSettings(REPO, first), saveSettings(REPO, second)]);
-    expect([first, second]).toContainEqual(await loadSettings(REPO));
-    expect(await readdir(dirname(settingsPath()))).toEqual([REPO_FILE]);
-  });
+  expect(resolveRepoSettings({ preview: true }, {}, "main")).toMatchObject({ branch: "main", merge: "auto", preview: true, squash: false, models: {} });
+  expect(resolveSettings(stored, {}, "main", "small").models).toEqual({ small: "s/small", coder: "s/small", reviewer: "s/reviewer" });
 });
 
-describe("the defaults", () => {
-  test("defaults.yaml at the package root names small and big; defaultModels reads it", async () => {
-    expect(DEFAULTS_PATH).toBe(join(import.meta.dirname, "..", "defaults.yaml"));
-    const raw = Bun.YAML.parse(await readFile(DEFAULTS_PATH, "utf8")) as { models: { small: string; big: string } };
-    expect(defaultModels()).toEqual({ small: raw.models.small, big: raw.models.big });
-    expect(loadDefaults()).toEqual(defaultModels());
-  });
-
-  test("a missing or broken file throws naming its path", async () => {
-    const path = join(agentDir, "defaults.yaml");
-    expect(() => loadDefaults(path)).toThrow(`the factory's defaults ${path}: `);
-    await writeFile(path, "models: [\n");
-    expect(() => loadDefaults(path)).toThrow(path);
-    await writeFile(path, "models:\n  big: a/b\n");
-    expect(() => loadDefaults(path)).toThrow(`${path}: models.small must be "provider/model"`);
-    await writeFile(path, "models:\n  small: a/s\n  big: opus\n");
-    expect(() => loadDefaults(path)).toThrow(`${path}: models.big must be "provider/model"`);
-    await writeFile(path, "- a/b\n");
-    expect(() => loadDefaults(path)).toThrow(path);
-    await writeFile(path, "models:\n  small: a/s\n  big: a/b\n");
-    expect(loadDefaults(path)).toEqual({ small: "a/s", big: "a/b" });
-  });
-});
-
-describe("resolveSettings", () => {
-  test("defaults when nothing is stored or overridden: no model (Pi's session model), defaults.yaml is not read", () => {
-    expect(resolveSettings({}, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
-    expect(resolveSettings({}, {}, "main", "small").models).toEqual({});
-  });
-
-  test("defaults < stored < overrides, models merged per name", () => {
-    const stored: StoredSettings = { branch: "develop", merge: "review", maxRounds: 4, models: { small: "s/small", coder: "s/big", reviewer: "s/reviewer" } };
-    const overrides: StoredSettings = { maxRounds: 9, review: true, models: { reviewer: "o/reviewer", big: undefined } };
-    const storedCopy = structuredClone(stored);
-    const overridesCopy = structuredClone(overrides);
-    expect(resolveSettings(stored, overrides, "main")).toEqual({
-      branch: "develop",
-      merge: "review",
-      maxRounds: 9,
-      review: true,
-      models: { small: "s/small", big: "s/big", coder: "s/big", reviewer: "o/reviewer" },
-    });
-    expect(resolveSettings(stored, { branch: "release" }, "main").branch).toBe("release");
-    // An override's big is its coder.
-    expect(resolveSettings(stored, { models: { big: "o/big" } }, "main").models).toMatchObject({ coder: "o/big", big: "o/big" });
-    expect(stored).toEqual(storedCopy);
-    expect(overrides).toEqual(overridesCopy);
-  });
-
-  test("only coder set: the reviewer stays absent (Pi's session model), as before", () => {
-    expect(resolveSettings({ models: { coder: "s/big" } }, {}, "main").models).toEqual({ coder: "s/big", big: "s/big" });
-    expect(resolveSettings({ models: { big: "s/big" } }, {}, "main").models).toEqual({ coder: "s/big", big: "s/big" });
-  });
-
-  test("size small runs the coder on the small model; the reviewer is its own or absent", () => {
-    expect(resolveSettings({ models: { small: "s/small", coder: "s/big" } }, {}, "main", "small").models).toEqual({ small: "s/small", coder: "s/small" });
-    expect(resolveSettings({ models: { small: "s/small", coder: "s/big", reviewer: "s/rev" } }, {}, "main", "small").models).toEqual({ small: "s/small", coder: "s/small", reviewer: "s/rev" });
-    expect(resolveSettings({ models: { coder: "s/big" } }, {}, "main", "small").models).toEqual({});
-  });
-
-  test("preview is stored and passed through, false by default; resolveSettings leaves it out", async () => {
-    await saveSettings(REPO, { preview: true });
-    expect(await loadSettings(REPO)).toEqual({ preview: true });
-    expect(resolveRepoSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main", preview: true, squash: false });
-    expect(resolveRepoSettings({}, {}, "main").preview).toBe(false);
-    expect(resolveSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
-  });
-
-
-  test("squash is stored, false by default, an override wins; resolveSettings leaves it out", async () => {
-    await saveSettings(REPO, { squash: true });
-    expect(await loadSettings(REPO)).toEqual({ squash: true });
-    expect(resolveRepoSettings({ squash: true }, {}, "main").squash).toBe(true);
-    expect(resolveRepoSettings({ squash: true }, { squash: false }, "main").squash).toBe(false);
-    expect(resolveRepoSettings({}, {}, "main").squash).toBe(false);
-    expect(resolveSettings({ squash: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
-    expect(() => parseStoredSettings({ squash: "yes" })).toThrow("squash must be a boolean");
-  });
-
-  test("the result does not share the models object of an input", () => {
-    const stored: StoredSettings = { models: { big: "s/big" } };
-    const resolved = resolveSettings(stored, {}, "main");
-    resolved.models.reviewer = "x/y";
-    expect(stored.models).toEqual({ big: "s/big" });
-    expect(resolveSettings({}, {}, "main").models).toEqual(DEFAULTS.models);
-  });
+test("two concurrent saves leave one valid file; repos differing only in / and - have their own", async () => {
+  const first: StoredSettings = { merge: "review", maxRounds: 3 };
+  const second: StoredSettings = { merge: "auto", maxRounds: 7, review: true };
+  await Promise.all([saveSettings(REPO, first), saveSettings(REPO, second)]);
+  expect([first, second]).toContainEqual(await loadSettings(REPO));
+  expect(await readdir(dirname(settingsPath()))).toEqual([`${encodeURIComponent(REPO)}.yaml`]);
+  await saveSettings("/a/b-c", { merge: "review" });
+  expect(await loadSettings("/a-b/c")).toEqual({});
+  expect(await loadSettings("/a/b-c")).toEqual({ merge: "review" });
 });

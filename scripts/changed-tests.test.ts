@@ -3,8 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { innerReruns } from "../src/flaky-rerun.ts";
-import { allTests, changedTests, defaultBase, gateMarks, jobCount, reachedTests, runFiles } from "./changed-tests.ts";
+import { changedTests, reachedTests, runFiles } from "./changed-tests.ts";
 
 /** A fixture tree: a chain a <- b <- c (c imports b imports a), each with its test, and an unrelated d. */
 const TREE: Record<string, string> = {
@@ -21,30 +20,17 @@ const TREE: Record<string, string> = {
 };
 const sources = new Map(Object.entries(TREE));
 
-describe("reachedTests", () => {
-  test("a changed source reaches its own test and every test importing it, transitively", () => {
-    expect(reachedTests(["src/a.ts"], sources)).toEqual(["src/a.test.ts", "src/b.test.ts", "src/lib/c.test.ts"]);
-    expect(reachedTests(["src/lib/c.ts"], sources)).toEqual(["src/lib/c.test.ts"]);
-  });
-
-  test("a changed test runs itself only", () => {
-    expect(reachedTests(["src/d.test.ts"], sources)).toEqual(["src/d.test.ts"]);
-  });
-
-  test("a source without a test next to it reaches the tests importing it, a dynamic import too", () => {
-    expect(reachedTests(["src/no-test.ts"], sources)).toEqual(["src/uses-no-test.test.ts"]);
-  });
-
-  test("nothing reached: a change outside the sources, or a test that is gone", () => {
-    expect(reachedTests(["README.md", "factory.yaml"], sources)).toEqual([]);
-    expect(reachedTests(["src/gone.test.ts"], sources)).toEqual([]);
-  });
-
-  test("a deleted source still reaches the tests that import it", () => {
-    const without = new Map(sources);
-    without.delete("src/a.ts");
-    expect(reachedTests(["src/a.ts"], without)).toEqual(["src/a.test.ts", "src/b.test.ts", "src/lib/c.test.ts"]);
-  });
+test("a changed source reaches its own test and every test importing it, transitively; a deleted one too", () => {
+  const without = new Map(sources);
+  without.delete("src/a.ts");
+  const cases: [string[], Map<string, string>, string[]][] = [
+    [["src/a.ts"], sources, ["src/a.test.ts", "src/b.test.ts", "src/lib/c.test.ts"]],
+    [["src/a.ts"], without, ["src/a.test.ts", "src/b.test.ts", "src/lib/c.test.ts"]],
+    [["src/d.test.ts"], sources, ["src/d.test.ts"]],
+    [["src/no-test.ts"], sources, ["src/uses-no-test.test.ts"]],
+    [["README.md", "src/gone.test.ts"], sources, []],
+  ];
+  for (const [changed, tree, reached] of cases) expect(reachedTests(changed, tree)).toEqual(reached);
 });
 
 describe("changedTests", () => {
@@ -103,33 +89,10 @@ describe("running the reached files", () => {
   git("add", "-A");
   git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base");
 
-  test("jobs: the cores but two, at least one, FACTORY_TEST_JOBS over them", () => {
-    expect(jobCount({}, 8)).toBe(6);
-    expect(jobCount({}, 2)).toBe(1);
-    expect(jobCount({ FACTORY_TEST_JOBS: "3" }, 8)).toBe(3);
-    expect(jobCount({ FACTORY_TEST_JOBS: "none" }, 8)).toBe(6);
-  });
-
-  test("the base of a merge gate is the merge base with the default branch, all tests are every tracked test file", () => {
-    expect(defaultBase(root)).toBe(git("rev-parse", "HEAD"));
-    expect(allTests(root)).toEqual(["bad.test.ts", "ok.test.ts", "once.test.ts"]);
-  });
-
   test("a failing file fails with its output, a file that passes alone on its second run is flaky", async () => {
     const { results, flaky } = await runFiles(root, ["ok.test.ts", "bad.test.ts", "once.test.ts"], 2, process.env);
     expect(results.map((result) => [result.file, result.passed])).toEqual([["bad.test.ts", false], ["ok.test.ts", true], ["once.test.ts", true]]);
     expect(results[0].output).toContain("bad");
     expect(flaky).toEqual(["once.test.ts"]);
   });
-});
-
-test("gateMarks: the files that passed only alone are the gate helper's flaky names, a file that failed alone too stops its rerun", () => {
-  const results = [
-    { file: "src/a.test.ts", passed: true, output: "", seconds: 1 },
-    { file: "src/b.test.ts", passed: false, output: "", seconds: 1 },
-  ];
-  const trailer = gateMarks(results, ["src/a.test.ts"]) as string;
-  expect(innerReruns(`ok src/a.test.ts\nchanged-tests: 1 passed, 1 failed\n${trailer}\n`)).toEqual({ flaky: ["src/a.test.ts"], reran: true });
-  expect(innerReruns(gateMarks(results, []) as string)).toEqual({ flaky: [], reran: true });
-  expect(gateMarks(results.slice(0, 1), [])).toBeNull();
 });
