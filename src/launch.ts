@@ -25,11 +25,11 @@ import { contractsForLaunch } from "./contracts.ts";
 import { git, primaryCheckout } from "./git.ts";
 import { inboxReadPath, lastFactoryState, taskMainBranch } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
-import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
-import type { ModelSize, Settings, StartPayload } from "./state.ts";
+import { factoryHome, loadSettings, resolveSettings, taskModels, type ModelSize, type StoredSettings } from "./settings.ts";
+import type { Settings, StartPayload } from "./state.ts";
 import { onPath, ownRunners, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
-import { TASK_WAVE_ENV, type RunnerSnapshot } from "./wave-poke.ts";
+import { TASK_WAVE_ENV, waveDir, type RunnerSnapshot } from "./wave-poke.ts";
 import { outputTail } from "./util.ts";
 
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory, and a runner would not start.
@@ -181,7 +181,8 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
     (await defaultBranch(repo).catch(() => {
       throw new LaunchRefusedError(`${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
     }));
-  const settings = resolveSettings(stored, overrides, fallback, input.size);
+  const { branch, merge, maxRounds, review, models } = resolveSettings([stored, overrides], fallback);
+  const settings: Settings = { branch, merge, maxRounds, review, models: taskModels(models, input.size) };
   if (!(await localBranchExists(repo, settings.branch))) throw new LaunchRefusedError(`${repo}: branch ${settings.branch} does not exist locally`);
   const config = await runCommand(["git", "cat-file", "-e", `refs/heads/${settings.branch}:factory.yaml`], { cwd: repo });
   if (config.exitCode !== 0) {
@@ -212,7 +213,7 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
         branch: name,
         title: input.title,
         sessionId: crypto.randomUUID(),
-        sessionDir: join(factoryHome(), "sessions", repoDirName(repo)),
+        sessionDir: input.wave === undefined ? join(factoryHome(), "sessions", repoDirName(repo)) : join(waveDir(input.wave), "sessions"),
         createdAt: new Date().toISOString(),
         tag: input.tag ?? systemUser(),
         plan: input.plan ?? null,
@@ -383,7 +384,7 @@ export async function unmergedWork(record: TaskRecord, target: string | undefine
 
 /**
  * Removes the task's worktree, its own branch (through git), its record,
- * its runner log, its lock and its inbox. The session file stays; the archive (`archive.ts`) is the caller's step before it.
+ * its runner log, its lock and its inbox. The session file stays.
  */
 export async function deleteTask(record: TaskRecord): Promise<void> {
   const { branch } = record;

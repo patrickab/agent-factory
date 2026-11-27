@@ -2,7 +2,7 @@
  * What every area of the core (`core.ts`) shares: the error clients see, the context a handler runs in, and the
  * helpers of the params (ids, repositories, tags).
  *
- * - `FactoryError`: one sentence with a code (`core.ts` names them); `oneLine` makes git's output one
+ * - `oneLine` makes git's output one line
  * - A `repo` param is a path inside the repository, relative to the caller's `cwd`; `primaryOf` is its primary checkout
  * - A `Handler` is one action's body: the checked params and the caller's context, resolving with plain JSON
  * - Imports no area module (only their types): every area module and `waves.ts` may import it
@@ -13,22 +13,7 @@ import { primaryCheckout } from "./git.ts";
 import type { RunnerEnv } from "./launch.ts";
 import { runCommand } from "./run.ts";
 import { isTaskTag, type TaskRecord } from "./tasks.ts";
-
-export type FactoryErrorCode = "invalid" | "not_found" | "busy" | "refused" | "failed";
-
-/** `{force: true}`: a refused `tasks.remove` that `force: true` would carry out. */
-export type FactoryErrorDetail = { force: true };
-
-export class FactoryError extends Error {
-  readonly code: FactoryErrorCode;
-  readonly detail: FactoryErrorDetail | undefined;
-  constructor(code: FactoryErrorCode, message: string, detail?: FactoryErrorDetail) {
-    super(message);
-    this.name = "FactoryError";
-    this.code = code;
-    this.detail = detail;
-  }
-}
+import { FactoryError } from "./util.ts";
 
 export const SHORT_ID_CHARS = 8;
 
@@ -41,6 +26,18 @@ export interface CallContext {
   signal: AbortSignal | undefined;
   env: RunnerEnv | undefined;
   origin: string | undefined;
+}
+
+/** The item whose id is `id` or starts with it; an empty id is `invalid`, none `not_found`, several `invalid`. */
+export function byId<T>(items: readonly T[], idOf: (item: T) => string, id: unknown, noun: string): T {
+  const wanted = nonEmpty(id)?.trim();
+  if (wanted === undefined) throw new FactoryError("invalid", `the id of a ${noun} must not be empty`);
+  const exact = items.find((item) => idOf(item) === wanted);
+  if (exact !== undefined) return exact;
+  const matches = items.filter((item) => idOf(item).startsWith(wanted));
+  if (matches.length === 0) throw new FactoryError("not_found", `no ${noun} has an id starting with "${wanted}"`);
+  if (matches.length > 1) throw new FactoryError("invalid", `"${wanted}" matches ${matches.length} ${noun}s (${matches.map(idOf).join(", ")}), give more of the id`);
+  return matches[0];
 }
 
 export function shortId(record: TaskRecord): string {

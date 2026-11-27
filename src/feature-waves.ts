@@ -4,7 +4,8 @@ import { afterNames, plural, short, waveBlock, waveList, waveReceipt } from "./a
 import type { Params } from "./core-shared.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
 import { waveCause } from "./decisions.ts";
-import { feature, REPO, SETTINGS_PROPERTIES, spec, SQUASH, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
+import { feature, REPO, spec, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
+import { schemaOf } from "./settings.ts";
 import type { Handlers } from "./feature.ts";
 import type { WaveView } from "./waves.ts";
 
@@ -37,7 +38,7 @@ export const WAVES = feature({
           description:
             "Contracts (memory-store directories run/contract/<name>/ or documents run/contract/<name>.md in plan) the wave's coders work by; core is added when it exists. Needs plan and memory-store on PATH",
         },
-        overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, squash: SQUASH } },
+        overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: schemaOf("wave") },
       },
       ["repo", "tag", "title", "request", "tasks"],
       true,
@@ -51,7 +52,7 @@ export const WAVES = feature({
       ["id", "tasks"],
       true,
     ),
-    "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage; a removed wave from its archive. Answers {wave}", { id: WAVE_ID }, ["id"], false),
+    "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage. Answers {wave}", { id: WAVE_ID }, ["id"], false),
     "waves.list": spec(
       "Every wave, or the repository's, or those under a tag, or a session's, or the open ones (filters combine). Answers {waves}",
       {
@@ -104,7 +105,7 @@ export const WAVES = feature({
       ]),
     "waves.approve": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
     "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
-    "waves.remove": (_params, result: { removed: string; archive?: string }) => `removed wave ${short(result.removed)}${result.archive ? `\narchive: ${result.archive}` : ""}`,
+    "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
   },
   decides: {
     "waves.add": (params) => waveCause(params.id, ["rejected", "blocked"]),
@@ -130,8 +131,7 @@ export const WAVES = feature({
     },
     "waves.approve": (_params, result: { wave: WaveView }) => waveCard(result.wave, `approved wave ${result.wave.tag}`),
     "waves.cancel": (_params, result: { wave: WaveView }) => decision(waveCard(result.wave, ""), `cancelled wave ${result.wave.tag}`),
-    "waves.remove": (_params, result: { removed: string; archive?: string }) =>
-      card("action", "quiet", `removed wave ${shortId(result.removed)}`, { id: shortId(result.removed), ...(result.archive ? { rows: [{ label: "archive", text: result.archive }] } : {}) }),
+    "waves.remove": (_params, result: { removed: string }) => card("action", "quiet", `removed wave ${shortId(result.removed)}`, { id: shortId(result.removed) }),
   },
   toolBlurb:
     '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, each task reviewed, then the whole, merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',

@@ -8,6 +8,9 @@
  * - Provides `read_diff({paths?})` when the factory names a diff file (`REVIEW_DIFF_ENV`, a `TaskDiff` as JSON, written
  *   by `review-each.ts` per review): the only way the diff reaches a task's reviewer. Lockfiles last, cut as the review
  *   patch is (`reviewPatch`); `paths` keeps only those files (or directories)
+ * - A wave's reviewer session is resumed for every review: each tool result older than this process (an earlier review,
+ *   one cut short included) reaches the model as a `STUB_PREFIX` line through Pi's `context` hook. The session keeps it
+ *   unchanged; the same stubs at every request keep the cached prefix
  * - A wave's reviewer (`REVIEW_WAVE_ENV` set, with `REVIEW_TASK_ENV` and `REVIEW_PLAN_ENV`: the factory plugin is not
  *   loaded here) also gets `registerReviewerTools`:
  *   - `scout`: always waits for the report; it explores the worktree of the task under review (else the wave's review
@@ -22,7 +25,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ACTIONS } from "../core.ts";
 import { findWave, noteToSupervisor, REVIEWER_FIX_CAP, startReviewerFix, waveReviewWorktree } from "../core-waves.ts";
 import { factoryToolError } from "../factory-tool.ts";
-import { REVIEW_DIFF_ENV, readDiffText } from "../review-diff.ts";
+import { REVIEW_DIFF_ENV, readDiffText, STUB_PREFIX } from "../review-diff.ts";
 import { scoutBlock } from "../scout-view.ts";
 import { listTasks } from "../tasks.ts";
 import { isRecord } from "../util.ts";
@@ -75,7 +78,6 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds): void 
   registerFeedbackTool(pi, {
     role: "reviewer",
     context: async () => ({ task: ids.task, wave: ids.wave, plan: ids.plan }),
-    keep: () => {},
   });
   pi.registerTool({
     name: NOTIFY_TOOL,
@@ -153,6 +155,16 @@ const parameters = {
 };
 
 export default function (pi: ExtensionAPI) {
+  const started = Date.now();
+  pi.on("context", (event) => {
+    let changed = false;
+    const messages = event.messages.map((message) => {
+      if (message.role !== "toolResult" || message.timestamp >= started) return message;
+      changed = true;
+      return { ...message, content: [{ type: "text" as const, text: `${STUB_PREFIX} ${message.toolName} result of an earlier review` }] };
+    });
+    return changed ? { messages } : undefined;
+  });
   const diffFile = process.env[REVIEW_DIFF_ENV];
   if (diffFile) {
     pi.registerTool({

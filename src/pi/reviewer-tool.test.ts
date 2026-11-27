@@ -47,7 +47,7 @@ describe("reviewer tools", () => {
       const saved = { ...process.env };
       Object.assign(process.env, env);
       const registered: string[] = [];
-      defaultExtension({ registerTool: (tool: { name: string }) => registered.push(tool.name) } as unknown as ExtensionAPI);
+      defaultExtension({ registerTool: (tool: { name: string }) => registered.push(tool.name), on: () => {} } as unknown as ExtensionAPI);
       for (const key of Object.keys(env)) if (saved[key] === undefined) delete process.env[key];
       return registered;
     };

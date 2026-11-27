@@ -132,12 +132,12 @@ describe("waves", () => {
     expect(taskOf(wave, "other").model).toBe("big");
     await until(async () => (await getWave(wave.id)).tasks.every((task) => task.taskId !== null));
     const settingsOf = async (key: string) => ((await callAction("tasks.get", { id: taskOf(await getWave(wave.id), key).taskId })) as TaskView).settings?.models;
-    expect(await settingsOf("cheap")).toEqual({ small: "c/d", coder: "c/d" });
-    expect(await settingsOf("other")).toEqual({ ...models, coder: "a/b" });
+    expect(await settingsOf("cheap")).toEqual({ coder: "c/d" });
+    expect(await settingsOf("other")).toEqual({ coder: "a/b" });
     const [tasks] = (await readWave(wave.id)).events;
     expect(tasks).toMatchObject({ kind: "tasks", tasks: [{ key: "cheap", model: "small" }, { key: "other" }] });
     expect(tasks.kind === "tasks" && "model" in tasks.tasks[1]).toBe(false);
-    expect((await readWave(wave.id)).declaration.overrides.models).toEqual({ ...models, coder: "a/b" });
+    expect((await readWave(wave.id)).declaration.overrides.models).toEqual(models);
   });
 
   test("every validation error of waves.start, and none leaves a branch or a wave", async () => {
@@ -157,7 +157,7 @@ describe("waves", () => {
     await expectError(start({ tasks: [spec("a", ["b"])] }), "invalid", "waits for b");
     await expectError(start({ tasks: [spec("a", ["b"]), spec("b", ["a"])] }), "invalid", "cycle");
     await expectError(start({ overrides: { maxRounds: 0 } }), "invalid", "maxRounds");
-    await expectError(start({ overrides: { models: { coder: "x/y" } } }), "refused", "x/y");
+    await expectError(start({ overrides: { models: { big: "x/y" } } }), "refused", "x/y");
     await expectError(start({ overrides: { branch: "nope" } }), "not_found", "no local branch nope");
     const unregistered = makeRepo(true, "other");
     await expectError(start({}, unregistered), "not_found", "is not registered");
@@ -528,11 +528,13 @@ describe("waiting on waves and the wave actions", () => {
     expect(await refusal()).toBeNull();
   });
 
-  test("waves.cancel stops the wave's runner and its running tasks, the branch stays; then nothing moves", async () => {
+  test("waves.cancel stops the wave's runner and its running tasks, the branch stays; then nothing moves; its home stays", async () => {
     process.env.FAKE_PI_HOLD = "1";
     const repo = makeRepo();
     await callAction("repos.add", {}, { cwd: repo });
-    const started = ((await callAction("waves.start", { tag: "factory/w1", title: "w", request: "r", tasks: [spec("a"), spec("b")] }, { cwd: repo })) as { wave: WaveView }).wave;
+    const plan = `plan-${crypto.randomUUID()}`;
+    mkdirSync(join(String(process.env.MEMORY_STORE_ROOT), plan), { recursive: true });
+    const started = ((await callAction("waves.start", { tag: "factory/w1", title: "w", request: "r", plan, tasks: [spec("a"), spec("b")] }, { cwd: repo })) as { wave: WaveView }).wave;
     await until(async () => (await getWave(started.id)).tasks.every((task) => task.taskId !== null));
     const records = (await listTasks()).filter((record) => record.wave === started.id);
     for (const record of records) await until(async () => (await stateOf(record)) === "running");
@@ -555,11 +557,9 @@ describe("waiting on waves and the wave actions", () => {
     expect(await callAction("waves.remove", { id: started.id })).toEqual({ removed: started.id });
     expect((await listTasks()).filter((record) => record.wave === started.id)).toEqual([]);
     for (const record of records) expect(existsSync(record.worktree)).toBe(false);
-    expect(existsSync(join(caseDir, "agent", "factory", "waves", `${started.id}.jsonl`))).toBe(false);
     expect(git(repo, "branch", "--list", started.branch ?? "")).toBe(started.branch ?? "");
-    // A removed wave answers from its archive (contract archive-1).
-    const archived = (await callAction("waves.get", { id: started.id })) as { wave: WaveView & { archived?: true } };
-    expect([archived.wave.archived, archived.wave.stage, archived.wave.actions]).toEqual([true, "cancelled", []]);
+    const home = readdirSync(join(String(process.env.MEMORY_STORE_ROOT), plan, "run", "waves", "factory", "w1", started.id.slice(0, 8)), { recursive: true }).map(String);
+    expect(["wave.jsonl", ...records.map((record) => record.sessionId)].every((name) => home.some((file) => file.includes(name)))).toBe(true);
   }, 60_000);
 
   test("waves.remove: refused for a waiting question and unmerged work without force; a merged wave's branch is deleted", async () => {

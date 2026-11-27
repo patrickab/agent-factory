@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_PROTECTED, type FactoryConfig } from "./config.ts";
-import { LOCKFILES, taskGit } from "./git.ts";
+import { taskGit } from "./git.ts";
 import { restoreWorktree } from "./launch.ts";
 import { mergeTask, type MergeInput, type MergeOutcome } from "./merge.ts";
 import { CommandRunner } from "./run.ts";
@@ -23,7 +23,7 @@ process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const runner = new CommandRunner();
-const noGates: FactoryConfig = { hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
+const noGates: FactoryConfig = { hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED };
 
 function gitIn(repo: string, ...args: string[]): string {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();

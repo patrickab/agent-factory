@@ -4,7 +4,8 @@ import type { TaskView } from "./core-tasks.ts";
 import { card, decision, shortId, taskCard, taskCardState } from "./cards.ts";
 import { TASK_HANDLERS } from "./core-tasks.ts";
 import { taskCause } from "./decisions.ts";
-import { feature, ID, REPO, SETTINGS_PROPERTIES, spec, TAG, TAG_FILTER } from "./feature.ts";
+import { feature, ID, REPO, spec, TAG, TAG_FILTER } from "./feature.ts";
+import { schemaOf } from "./settings.ts";
 import type { Handlers } from "./feature.ts";
 
 export const TASKS = feature({
@@ -25,7 +26,7 @@ export const TASKS = feature({
         repo: REPO,
         title: { type: "string", description: "A short title of the task" },
         request: { type: "string", description: "The full, self-contained task for the coder" },
-        overrides: { type: "object", description: "Settings over the repository's stored ones", properties: SETTINGS_PROPERTIES },
+        overrides: { type: "object", description: "Settings over the repository's stored ones", properties: schemaOf("task") },
         tag: { ...TAG, description: `${String(TAG.description)}. Default: the system user` },
       },
       ["repo", "title", "request"],
@@ -65,8 +66,8 @@ export const TASKS = feature({
     "tasks.approve": (_params, result: TaskView) => taskHeader(result),
     "tasks.retry": (_params, result: TaskView) => taskHeader(result),
     "tasks.cancel": (_params, result: TaskView) => taskHeader(result),
-    "tasks.remove": (_params, result: { removed: string; dropped: string | null; archive?: string }) =>
-      [`removed task ${short(result.removed)}`, ...(result.dropped ? [`dropped: ${result.dropped}`] : [])].join(" · ") + (result.archive ? `\narchive: ${result.archive}` : ""),
+    "tasks.remove": (_params, result: { removed: string; dropped: string | null }) =>
+      [`removed task ${short(result.removed)}`, ...(result.dropped ? [`dropped: ${result.dropped}`] : [])].join(" · "),
     "tasks.message": (_params, task: TaskView) => {
       return fields(`sent to task ${short(task.id)}`, taskState(task), task.round === null ? null : `round ${task.round}`);
     },
@@ -92,11 +93,8 @@ export const TASKS = feature({
     "tasks.approve": (_params, result: TaskView) => taskCard(result, `approved task ${shortId(result.id)}`),
     "tasks.retry": (_params, result: TaskView) => decision(taskCard(result, ""), `retried task ${shortId(result.id)}`),
     "tasks.cancel": (_params, result: TaskView) => decision(taskCard(result, ""), `cancelled task ${shortId(result.id)}`),
-    "tasks.remove": (_params, result: { removed: string; dropped: string | null; archive?: string }) =>
-      card("action", "quiet", `removed task ${shortId(result.removed)}`, {
-        id: shortId(result.removed),
-        rows: [...(result.dropped ? [{ label: "dropped", text: result.dropped }] : []), ...(result.archive ? [{ label: "archive", text: result.archive }] : [])],
-      }),
+    "tasks.remove": (_params, result: { removed: string; dropped: string | null }) =>
+      card("action", "quiet", `removed task ${shortId(result.removed)}`, { id: shortId(result.removed), rows: result.dropped ? [{ label: "dropped", text: result.dropped }] : [] }),
     // A decision only when it answers a question or a block: `actionCard` makes it one with the key it answers.
     "tasks.message": (params, result: TaskView) => ({ ...decision(taskCard(result, ""), `sent to task ${shortId(result.id)}`, String(params.text ?? "")), kind: "action" }),
   },

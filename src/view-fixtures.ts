@@ -153,13 +153,13 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "settings.get": {
     params: { repo: "." },
     result: {
-      stored: { merge: "review", models: { coder: "anthropic/opus", big: "anthropic/opus" } },
+      stored: { merge: "review", models: { big: "anthropic/opus" } },
       resolved: {
         branch: "master",
         merge: "review",
         maxRounds: 3,
         review: true,
-        models: { small: "anthropic/sonnet", big: "anthropic/opus", coder: "anthropic/opus", reviewer: "openai/gpt" },
+        models: { small: "anthropic/sonnet", big: "anthropic/opus", reviewer: "openai/gpt" },
         preview: false,
       },
       defaults: {
@@ -167,7 +167,7 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
         merge: "auto",
         maxRounds: 3,
         review: true,
-        models: { small: "anthropic/sonnet", big: "openai/gpt", coder: "openai/gpt", reviewer: "openai/gpt" },
+        models: { small: "anthropic/sonnet", big: "openai/gpt", reviewer: "openai/gpt" },
         preview: false,
       },
     },

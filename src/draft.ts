@@ -41,7 +41,6 @@ export const GATES_SCRIPT = "factory/gates.sh";
 const PLAIN = /^[A-Za-z0-9_./=:@%+-]+$/;
 /** Plain scalars a YAML 1.1 reader (the backend's) turns into a bool, null or number. */
 const NOT_A_STRING = /^(y|n|yes|no|on|off|true|false|null|~|=|<<)$|^[-+.]?\d|^[-?:]$|^[@%]|:$/i;
-const SHELL_SYNTAX = /&&|\|\||[|;<>$`(){}*?\n]/;
 
 const CI_RESERVED = new Set(["stages", "variables", "default", "include", "workflow", "image", "services", "cache", "before_script", "after_script", "pages"]);
 const LINT_STAGE = /lint|check|static|format|style|quality|analy|type|validate|verify|sast/i;
@@ -73,48 +72,6 @@ function tryParse<T>(parse: () => T): T | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** POSIX word splitting (Python's `shlex.split`), undefined for an unbalanced quote or a trailing backslash. */
-function shlexSplit(line: string): string[] | undefined {
-  const words: string[] = [];
-  let word = "";
-  let inWord = false;
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index]!;
-    if (char === "'" || char === '"') {
-      const end = (() => {
-        for (let at = index + 1; at < line.length; at++) {
-          if (char === '"' && line[at] === "\\" && '"\\'.includes(line[at + 1] ?? "")) at++;
-          else if (line[at] === char) return at;
-        }
-        return -1;
-      })();
-      if (end < 0) return undefined;
-      const body = line.slice(index + 1, end);
-      word += char === '"' ? body.replace(/\\(["\\])/g, "$1") : body;
-      inWord = true;
-      index = end;
-    } else if (char === "\\") {
-      if (index + 1 >= line.length) return undefined;
-      word += line[++index];
-      inWord = true;
-    } else if (/\s/.test(char)) {
-      if (inWord) words.push(word);
-      word = "";
-      inWord = false;
-    } else {
-      word += char;
-      inWord = true;
-    }
-  }
-  if (inWord) words.push(word);
-  return words;
-}
-
-function scriptArgv(line: string): Argv {
-  const words = SHELL_SYNTAX.test(line) ? undefined : shlexSplit(line);
-  return words && words.length > 0 ? words : ["bash", "-c", line];
 }
 
 function scriptLines(value: unknown): string[] {
@@ -158,7 +115,7 @@ function gitlabCi(files: RepoFiles): Found | undefined {
   for (const { stage, lines } of jobs.sort((a, b) => a.rank - b.rank)) {
     if (DEPLOY_STAGE.test(stage) || lines.some((line) => DEPLOY_LINE.test(line) || CI_VARIABLE.test(line))) continue;
     const target = LINT_STAGE.test(stage) ? quick : TEST_STAGE.test(stage) ? tests : undefined;
-    for (const line of lines.map((line) => line.trim())) if (target && line && !SETUP_LINE.test(line)) target.push(scriptArgv(line));
+    for (const line of lines.map((line) => line.trim())) if (target && line && !SETUP_LINE.test(line)) target.push(["bash", "-c", line]);
   }
   return quick.length > 0 || tests.length > 0 ? found(".gitlab-ci.yml", quick, tests) : undefined;
 }

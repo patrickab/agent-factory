@@ -19,10 +19,10 @@ process.env.FAKE_STORE_ROOT = root;
 process.env.FAKE_STORE_LOG = calls;
 
 type Result = { isError?: boolean; content: { text: string }[]; terminate?: boolean };
-function tool(kept: FeedbackEntry[], plan: string | null) {
+function tool(plan: string | null) {
   let execute: ((...args: unknown[]) => Promise<Result>) | undefined;
   const pi = { registerTool: (t: { execute: typeof execute }) => (execute = t.execute) };
-  registerFeedbackTool(pi as unknown as ExtensionAPI, { role: "coder", context: async () => ({ task: "task-1", wave: "wave-1", plan }), keep: (entry) => kept.push(entry) });
+  registerFeedbackTool(pi as unknown as ExtensionAPI, { role: "coder", context: async () => ({ task: "task-1", wave: "wave-1", plan }) });
   return (params: unknown) => execute!("call", params, undefined, undefined, {});
 }
 
@@ -37,24 +37,20 @@ const entries = (name: string) => (readStore(root, name).memories[FEEDBACK_PATH]
 describe("feedback", () => {
   test("an entry lands in the store with its task, wave and role, and the turn goes on", async () => {
     store("plan", ["run"]);
-    const kept: FeedbackEntry[] = [];
-    const result = await tool(kept, "plan")({ kind: "context", what: "read 40 files", cost: "2 rounds" });
+    const result = await tool("plan")({ kind: "context", what: "read 40 files", cost: "2 rounds" });
     expect(result.isError).toBeUndefined();
     expect(result.terminate).toBeUndefined();
     const [stored] = entries("plan");
     expect(stored).toMatchObject({ kind: "context", what: "read 40 files", cost: "2 rounds", task: "task-1", wave: "wave-1", role: "coder" });
-    await tool(kept, "plan")({ kind: "runtime", what: "waited" });
+    await tool("plan")({ kind: "runtime", what: "waited" });
     expect((await waveFeedback("plan", "wave-1")).map((entry) => entry.what)).toEqual(["read 40 files", "waited"]);
     expect(await waveFeedback("plan", "other")).toEqual([]);
   });
 
-  test("without a store it stays on the task", async () => {
-    const kept: FeedbackEntry[] = [];
-    const call = tool(kept, null);
+  test("without a store the result holds it", async () => {
+    const call = tool(null);
     expect((await call({ kind: "runtime", what: "waited" })).isError).toBeUndefined();
-    expect(kept.map((entry) => entry.what)).toEqual(["waited"]);
-    const missing = tool(kept, "no-such-store");
+    const missing = tool("no-such-store");
     expect((await missing({ kind: "tools", what: "guessed" })).isError).toBeUndefined();
-    expect(kept).toHaveLength(2);
   });
 });

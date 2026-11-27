@@ -35,12 +35,12 @@
  * - Imports nothing outside node built-ins and the plain plugin modules: the deployed plugin has no `node_modules`
  */
 import { spawn } from "node:child_process";
-import { readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { contractCheck } from "./contracts.ts";
 import { RESTING_STATES, type StateData } from "./state.ts";
 import { handLockFile } from "./tasks.ts";
-import { errorText, isRecord } from "./util.ts";
+import { errorText, ifMissing, isRecord, readJsonl, writeAtomic } from "./util.ts";
 import { pokeWave, TASK_WAVE_ENV } from "./wave-poke.ts";
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
@@ -53,14 +53,7 @@ export const TASK_SESSION_ENV = "FACTORY_TASK_SESSION";
 
 /** The session file Pi writes for `sessionId` in `sessionDir` (`<timestamp>_<sessionId>.jsonl`), if it exists yet. */
 export async function sessionFilePath(sessionDir: string, sessionId: string): Promise<string | undefined> {
-  let names: string[];
-  try {
-    names = await readdir(sessionDir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-  const name = names.find((file) => file.endsWith(".jsonl") && file.includes(sessionId));
+  const name = (await ifMissing(readdir(sessionDir), [])).find((file) => file.endsWith(".jsonl") && file.includes(sessionId));
   return name === undefined ? undefined : join(sessionDir, name);
 }
 
@@ -78,18 +71,7 @@ export interface FactoryStates {
 async function customEntryData(sessionDir: string, sessionId: string, customType: string): Promise<unknown[]> {
   const path = await sessionFilePath(sessionDir, sessionId);
   if (path === undefined) return [];
-  const data: unknown[] = [];
-  for (const line of (await readFile(path, "utf8")).split("\n")) {
-    if (!line.includes(`"${customType}"`)) continue;
-    let entry: unknown;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (isRecord(entry) && entry.type === "custom" && entry.customType === customType) data.push(entry.data);
-  }
-  return data;
+  return (await readJsonl(path)).filter((entry) => entry.type === "custom" && entry.customType === customType).map((entry) => entry.data);
 }
 
 /** The `factory-state` entries of the session file, none before the file exists. */
@@ -123,23 +105,15 @@ async function readInboxOffset(inboxPath: string): Promise<number> {
   return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
 }
 
-/** Temp file and rename: a reader never sees a torn offset. */
+/** Atomic: a reader never sees a torn offset. */
 async function writeInboxOffset(inboxPath: string, offset: number): Promise<void> {
-  const path = inboxReadPath(inboxPath);
-  const temp = `${path}.${process.pid}.tmp`;
-  await writeFile(temp, `${offset}\n`, "utf8");
-  await rename(temp, path);
+  await writeAtomic(inboxReadPath(inboxPath), `${offset}\n`);
 }
 
 /** The complete lines of the inbox after `offset` (a line still being written stays), and the offset after them. */
 async function unreadInboxLines(inboxPath: string, offset: number): Promise<{ texts: string[]; next: number }> {
-  let bytes: Buffer;
-  try {
-    bytes = await readFile(inboxPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { texts: [], next: offset };
-    throw error;
-  }
+  const bytes = await ifMissing(readFile(inboxPath), null);
+  if (bytes === null) return { texts: [], next: offset };
   const end = bytes.lastIndexOf(0x0a) + 1;
   if (end <= offset) return { texts: [], next: offset };
   const texts: string[] = [];

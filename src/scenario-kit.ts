@@ -6,9 +6,9 @@
  *   repo as cwd and the case's origin), `until`, the notices its origin got, the model calls seen. The environment
  *   (`PI_CODING_AGENT_DIR`, `HOME`, git identity, `PI_OFFLINE`) is the case's while the body runs, restored after; its
  *   runners are stopped and the server closed
- * - The model: a request that ends on a tool result is answered "done" (the turn ends); any other asks the script,
- *   with the role (`reviewer` when `submit_verdict` is offered) and the text of the last message. A script that returns
- *   nothing ends the turn
+ * - The model: a request that ends on a tool result asks `Setup.afterTool`, else is answered "done" (the turn ends); any
+ *   other asks the script, with the role (`reviewer` when `submit_verdict` is offered), the text of the last message and
+ *   the request. A script that returns nothing ends the turn
  */
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -29,6 +29,8 @@ export interface ModelCall {
   role: Role;
   /** The text of the last message (the prompt, a feedback, a notice). */
   prompt: string;
+  /** The request's body as sent. */
+  request: string;
 }
 export type ToolCall = { name: string; args: Record<string, unknown> };
 /** One assistant message: tool calls, or text that ends the turn. */
@@ -69,20 +71,23 @@ function lastText(messages: { role: string; content: unknown }[]): string {
   return Array.isArray(content) ? content.map((part: { text?: string }) => part.text ?? "").join("") : "";
 }
 
-function serveModel(script: Script, calls: ModelCall[]) {
+function serveModel(script: Script, calls: ModelCall[], afterTool?: Script) {
   let n = 0;
   const chunk = (delta: unknown, finish: string | null) =>
     `data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta, finish_reason: finish }], ...(finish ? { usage: { prompt_tokens: 1000, completion_tokens: 100 } } : {}) })}\n\n`;
   return Bun.serve({
     port: 0,
     async fetch(request) {
-      const body = (await request.json()) as { messages: { role: string; content: unknown }[]; tools?: { function: { name: string } }[] };
-      let reply: Reply | undefined = "done";
-      if (body.messages.at(-1)?.role !== "tool") {
-        const call = { role: (body.tools ?? []).some((tool) => tool.function.name === "submit_verdict") ? "reviewer" : "coder", prompt: lastText(body.messages) } as const;
+      const text = await request.text();
+      const body = JSON.parse(text) as { messages: { role: string; content: unknown }[]; tools?: { function: { name: string } }[] };
+      const call = { role: (body.tools ?? []).some((tool) => tool.function.name === "submit_verdict") ? "reviewer" : "coder", prompt: lastText(body.messages), request: text } as const;
+      let reply: Reply | undefined;
+      if (body.messages.at(-1)?.role === "tool") reply = await afterTool?.(call);
+      else {
         calls.push(call);
-        reply = (await script(call)) ?? "done";
+        reply = await script(call);
       }
+      reply ??= "done";
       const events =
         typeof reply === "string"
           ? [chunk({ role: "assistant", content: reply }, null), chunk({}, "stop")]
@@ -129,6 +134,8 @@ export interface Setup {
   factory?: string;
   /** The memory store `plan`, behind a fake `memory-store` CLI on PATH. */
   store?: FakeStore;
+  /** Answers a request that ends on a tool result (default: "done"). */
+  afterTool?: Script;
 }
 
 /** A test that runs `body` in a case of its own with the model answering from `script`. */
@@ -140,7 +147,7 @@ export function scenario(name: string, script: Script, body: (c: Case) => Promis
       const dir = realpathSync(mkdtempSync(join(tmpdir(), "factory-scenario-")));
       const calls: ModelCall[] = [];
       const notices: Notice[] = [];
-      const server = serveModel(script, calls);
+      const server = serveModel(script, calls, setup.afterTool);
       const agent = join(dir, "agent");
       mkdirSync(join(agent, "factory"), { recursive: true });
       writeFileSync(

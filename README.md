@@ -98,8 +98,6 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
   priority; a file that fails beside the others runs once more alone: passing then, it passes. The files it reran are
   in its `gate-reruns:` trailer. So the gate records a flaky one `flaky` and never runs the suite again
 - `protected`: globs the coder must not change. Default: `factory.yaml`, `.factory/**`
-- `lockfiles`: file names that trigger `after_merge` and go last in the review patch. Default:
-  `uv.lock`, `package-lock.json`, `bun.lock`, `bun.lockb`
 - Role prompts: `.factory/agents/coder.md`, `.factory/agents/reviewer.md`
 - See `src/factory.template.yaml` for a commented example
 
@@ -174,8 +172,6 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - `tasks.remove`: deletes the record, log, worktree and the task's own branch (through git) of a task that is not
   running (an interrupted task counts as not running) and not in `waiting_answer`. It refuses a task with commits its target branch lacks or
   uncommitted changes (untracked files count whatever `status.showUntrackedFiles` says); with `force: true` it removes it anyway and names what it dropped.
-  A task outside a wave is archived first (see "Where state lives"); when that fails the removal is refused with nothing deleted
-  (`the archive failed: <why>; nothing was deleted`), and with `force: true` it goes on and the answer has `archive: "failed: <why>"`
 - `overrides` and stored settings: `merge` (`auto` | `review`), `maxRounds` (1..20), `review` (bool), `branch`,
   `models.coder`, `models.reviewer`, `models.big`, `models.small` (`provider/model`). `coder` and `reviewer` mean
   what they always did: each the stored or overridden one, else Pi's session model (no reviewer is implied by the
@@ -210,9 +206,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `task_gates`, commit and merge. Minor findings never start a round: they are stored on the review (`minors`, listed by
   `tasks.get` and `waves.get`). A conflict task is reviewed like any task
 - One reviewer session per wave: `--session-id` = the wave's, fixed cwd and `--session-dir`, the same model, prompt and
-  tools at every resume, `PI_CACHE_RETENTION=long`, one process per review. Before each resume the factory appends
-  `context_edit` entries to the session file that replace every earlier review's tool results by a stub starting with
-  `[reviewed]`: no earlier diff stays in context. The diff reaches the reviewer only through `read_diff {paths?}` (the
+  tools at every resume, `PI_CACHE_RETENTION=long`, one process per review. The diff reaches the reviewer only through `read_diff {paths?}` (the
   task's diff since the commit it last judged for that task; lockfiles last, large files cut); the request and the wave's
   contracts (read fresh) are in the prompt
 - The reviewer's tools, the same in every pass: `read`, `grep`, `find`, `ls`, `read_diff`, `submit_verdict`, `scout`
@@ -247,10 +241,8 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   Answers `{wave}`
 - `waves.remove {id, force?}`: refused while the wave's runner lives or one of its tasks runs or waits for an answer;
   removes its tasks as `tasks.remove` does (refused, before anything is deleted, for unmerged work without `force`),
-  then its record, lock, log and reviews. The wave is archived first (this covers a cancelled wave and a runner that died
-  before archiving); if that fails nothing is deleted and the removal is refused, unless `force: true`, which goes on and
-  adds `archive: "failed: <why>"` to the answer. The wave's branch is deleted only when the wave is `merged`. Answers
-  `{removed: id, archive?}`
+  then its link, lock and runner log; its home stays. The wave's branch is deleted only when the wave is `merged`. Answers
+  `{removed: id}`
 - `WaveView.actions` lists exactly the `waves.*` actions valid now
 - The record `waves/<id>.jsonl` is an event log, append-only: line 1 the declaration, then one event per line
   (`tasks`, `task`, `stage`, `gate`, `review`, `merge`); the wave's state is their fold plus its tasks' states
@@ -332,8 +324,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - Every step appends its event (`stage`, `gate`, `review` with the reviewer's session id, model, findings, usage and
   wall time, `merge`). The review worktree is removed when the wave leaves review and merge (unless it is dirty: then
   it stays). A runner started on a wave in `reviewing` or `merging` runs that step again from its start
-- `waves.get {id}` / `waves.list {repo?, tag?, origin?, open?}` (`waves.get` of a removed wave answers from the archive,
-  `archived: true` in its view, `actions: []`, its cost computed from the archived log, sessions and scouts, none stored; tag: equal or prefix + `/`; origin: the declaring Pi
+- `waves.get {id}` / `waves.list {repo?, tag?, origin?, open?}` (tag: equal or prefix + `/`; origin: the declaring Pi
   session's id; `open: true`: not merged or cancelled; filters combine) answer `WaveView`s: the declaration
   (without `overrides`), `stage`, `detail` (the last `stage` event's why, else null), each task's `state` (`pending`
   before it started) and `usage`, `counts` (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus
@@ -529,13 +520,16 @@ Commands (inside a task's own Pi session):
 - `tasks/<id>.json`: the task record (repo, worktree, branch, title, session id and dir, tag, plan, wave); `tasks/<id>.log`: runner
   output; `tasks/<id>.lock`: `<pid> <start time>` of whoever acts on the task (a dead holder's lock is taken over); `tasks/<id>.inbox`:
   messages for the live runner (`<inbox>.read`: how far it sent them)
-- `sessions/<repo dir name>/` (`/a/b` -> `--a-b--`): the Pi session files of a repository's tasks, apart from
+- `sessions/<repo dir name>/` (`/a/b` -> `--a-b--`): the Pi session files of a repository's tasks outside a wave, apart from
   Pi's own sessions (`pi -r` does not list them). The task's truth is its `factory-*` session entries
 - `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models` (`coder` with its alias `big`, `reviewer`, `small`), `preview`, `squash`); the file registers the repo
 - `models.yaml`: the factory models, a YAML list of `provider/model` ids
-- `waves/<id>.jsonl`: a wave, append-only: line 1 its declaration, every later line one event; `waves/<id>.lock` its
-  runner's lock, `.log.lock` the append lock, `.poke` an unseen poke, `.log` the runner's output, `.reviews/` its reviewer's
-  sessions and patch files
+- `waves/<id>`: a link to the wave's home, `<memory-store root>/<plan>/run/waves/<tag>/<first 8 of its id>/` when the
+  plan's store exists at `waves.start` (root = `MEMORY_STORE_ROOT`, else `~/.pi/memory_store`), else
+  `<factory home>/homes/<tag>/<first 8 of its id>/`. The home holds `wave.jsonl` (append-only: line 1 its declaration,
+  every later line one event), `reviews/` (its reviewer's sessions and patch files) and `sessions/` (its tasks' Pi
+  sessions); `waves.remove` leaves it. `waves/<id>.lock` its runner's lock, `.log.lock` the append lock, `.poke` an
+  unseen poke, `.log` the runner's output
 - `refs/factory/waves/<tag>-<wave id, 8>` in the repo: the task commits of a wave landed with `squash`; the factory never deletes it
 - `scouts/<caller kind>-<caller id>/<id>/`: a scout (`scout.json`, `events.jsonl`, `report.md`, `written.jsonl`)
 - `proofs/<id>.jsonl`: a gate proof, append-only, written by its runner: line 1 its declaration, then one `step` per
@@ -544,17 +538,6 @@ Commands (inside a task's own Pi session):
 - `cache/sessions/<session file name>.json`: what a finished task's (`done`, `cancelled`) session file says (state,
   usage, outcome), with the file's size and mtime; read instead of the session while both match. Only a cache: deleting
   it costs one read per session
-- `cache/sessions/archive/<sha256 of the file's path>.json`: the same for an archived session file (kept whatever its
-  state; archives share file names, so the path is the key)
-- The archive: `<archive root>/` is `<memory-store root>/<plan>/run/sessions` when the plan's store directory exists
-  (root = `MEMORY_STORE_ROOT`, else `~/.pi/memory_store`; `memory-store` ignores that directory), else `<factory home>/archive`.
-  A wave: `<root>/<tag>/<first 8 of its id>/` with `wave.jsonl` (its log), `reviews/`, `tasks/<key>.jsonl` (each task's session
-  file), `scouts/<caller kind>-<id>/` (those of the wave and of its tasks) and `index.json` (`{id, tag, repo, plan, origin,
-  archivedAt, tasks: {<key>: {id, sessionId}}}`; no cost is stored). A task outside a wave: `<root>/tasks/<tag>/<first 8 of
-  its id>/` with `session.jsonl`, `scouts/`, `index.json`. Files are copies (mtimes kept, written under a temp name and
-  renamed); archiving again replaces what grew and is otherwise a no-op; the live files stay where they are. A wave is
-  archived after it merges (an error is logged and never fails the merge) and before `waves.remove` deletes anything; a task
-  outside a wave before `tasks.remove`. Pruning is deleting a directory there
 - Reviews: `<agent dir>/factory-reviews/<session id>/`. Merge lock and queue: in the repo's git common dir
 
 ## Entry protocol

@@ -27,7 +27,7 @@ import {
 } from "./scouts.ts";
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText } from "./util.ts";
-import { memoryStoreRoot } from "./archive.ts";
+import { memoryStoreRoot } from "./wave-poke.ts";
 
 const POLL_MS = Number(process.env.FACTORY_SCOUT_POLL_MS) || 1_000;
 

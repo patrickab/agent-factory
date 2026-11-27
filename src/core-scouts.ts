@@ -11,15 +11,16 @@
  */
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import { FactoryError, nonEmpty, primaryOf, repoPath, stringsParam, type Handler } from "./core-shared.ts";
+import { memoryStore } from "./contracts.ts";
+import { byId, nonEmpty, primaryOf, repoPath, stringsParam, type Handler } from "./core-shared.ts";
 import { defaultSmallModel } from "./core-settings.ts";
 import { waveReviewWorktree } from "./core-waves.ts";
 import { git } from "./git.ts";
 import { runCommand } from "./run.ts";
-import { cancelScouts, findScoutDir, FINAL_SCOUT_STATES, SCOUT_ID_ENV, scoutView, startScout, type ScoutCaller, type ScoutView } from "./scouts.ts";
+import { cancelScouts, scoutDirs, FINAL_SCOUT_STATES, SCOUT_ID_ENV, scoutView, startScout, type ScoutCaller, type ScoutView } from "./scouts.ts";
 import { loadSettings } from "./settings.ts";
 import { listTasks } from "./tasks.ts";
-import { errorText } from "./util.ts";
+import { errorText, FactoryError } from "./util.ts";
 import { listWaves } from "./waves.ts";
 
 export { cancelScouts };
@@ -60,7 +61,7 @@ async function smallModel(repo: string, waveId: string | null): Promise<string |
 }
 
 async function requireStore(store: string, cwd: string): Promise<void> {
-  const result = await runCommand(["memory-store", "ls", store], { cwd });
+  const result = await memoryStore(["ls", store], cwd);
   if (result.exitCode === null) throw new FactoryError("failed", "memory-store could not run: a scout needs it on PATH");
   if (result.exitCode !== 0) throw new FactoryError("refused", `memory store ${store} does not exist: a scout writes the map of an existing store`);
 }
@@ -76,12 +77,7 @@ async function waitForScout(dir: string, signal: AbortSignal | undefined): Promi
 }
 
 async function scoutDirOf(id: unknown): Promise<string> {
-  const wanted = nonEmpty(id)?.trim();
-  if (wanted === undefined) throw new FactoryError("invalid", "the id of a scout must not be empty");
-  const found = await findScoutDir(wanted);
-  if ("dir" in found) return found.dir;
-  if (found.error === "not_found") throw new FactoryError("not_found", `no scout has an id starting with "${wanted}"`);
-  throw new FactoryError("invalid", `"${wanted}" matches ${found.matches} scouts, give more of the id`);
+  return byId(await scoutDirs(), (dir) => dir.split("/").at(-1) ?? "", id, "scout");
 }
 
 export const SCOUT_HANDLERS = {

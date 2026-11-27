@@ -1,10 +1,11 @@
 /** `decisions.list`: a session's decisions in order (`decisions.ts`, contract `cards`). */
 import { plural, short } from "./agent-view.ts";
 import { card } from "./cards.ts";
-import { FactoryError, nonEmpty } from "./core-shared.ts";
+import { nonEmpty } from "./core-shared.ts";
 import { readDecisions, type DecisionEntry } from "./decisions.ts";
 import { feature, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
+import { FactoryError } from "./util.ts";
 
 type Listed = { decisions: DecisionEntry[] };
 

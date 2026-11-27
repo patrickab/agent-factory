@@ -10,7 +10,6 @@ const config: FactoryConfig = {
   merge_gates: [["lint"], ["test"]],
   task_gates: [],
   protected: DEFAULT_PROTECTED,
-  lockfiles: [],
 };
 
 function snapshotOf(settings: Partial<Settings> = {}, round = 1, runFirstRound = 1): Snapshot {

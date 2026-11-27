@@ -6,7 +6,7 @@
  *   moved nothing, or when the rebased commit is the one they already passed on: `MergeInput.gated`), then
  *   under the merge lock (a cancel ends the wait for it, never the update): a target checked out in a worktree (the
  *   primary or another one) is fast-forwarded there, and `hooks.after_merge` run when that is the primary and the
- *   merge changed a lockfile (`config.lockfiles`); a target checked out nowhere is moved with a compare-and-swap
+ *   merge changed a lockfile (`LOCKFILES`); a target checked out nowhere is moved with a compare-and-swap
  *   `update-ref`, no hooks
  * - A conflicting rebase is aborted and reported with its files (`MergeResult` `conflict`), not as a failure. A merge
  *   gate that fails on the rebased branch is reported with its command (`MergeResult` `gate_failed`): the rebase stays,
@@ -33,6 +33,7 @@ import {
   addAllArgs,
   assertCheckoutReady,
   git,
+  LOCKFILES,
   nulList,
   primaryCheckout,
   rebaseInProgress,
@@ -331,7 +332,7 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
     // Hooks install into the primary only: another worktree, or a target checked out nowhere, gets none.
     if (moved !== "primary") return merged(commit, null, false);
     const changed = (await git(cleanup, primary, ["diff", "--name-only", before, commit])).split("\n");
-    if (!changed.some((path) => config.lockfiles.includes(basename(path)))) return merged(commit, null, false);
+    if (!changed.some((path) => LOCKFILES.includes(basename(path)))) return merged(commit, null, false);
     for (const argv of config.hooks.after_merge) {
       status(`after_merge ${argv.join(" ")}`);
       // Under the merge lock, so two tasks never install into the primary checkout at once. `-o`: a process the hook

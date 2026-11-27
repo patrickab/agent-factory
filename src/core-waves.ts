@@ -10,22 +10,21 @@
  * - `noticeInputs`: the tasks and waves a Pi session started, for its notifications (`notify.ts`)
  */
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { archivedScoutUsage, archivedWaveDirs, archiveWave } from "./archive.ts";
+import { realpath, rm } from "node:fs/promises";
 import { waveContracts } from "./core-contracts.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
-import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
-import { branchHasConfig, defaultSmallModel, requireFactoryModels, wantedModels } from "./core-settings.ts";
-import { archivedSessionSummary, cancelTask, cents, droppedWork, FINAL_STATES, rawUsage, removable, requireRemovable, retryRestingTask, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
+import { byId, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler } from "./core-shared.ts";
+import { branchHasConfig, defaultSmallModel, wantedModels } from "./core-settings.ts";
+import { cancelTask, cents, droppedWork, FINAL_STATES, rawUsage, removable, requireRemovable, retryRestingTask, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
 import { git, mergeTrees, uncommittedFiles } from "./git.ts";
 import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchExists, type RunnerEnv, worktreePath } from "./launch.ts";
 import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
-import { DEFAULT_SETTINGS, loadSettings, modelChoice, registeredRepos, resolveSettings, type StoredSettings } from "./settings.ts";
-import { minorFindings, normalizeModels, parseSettingsFields, type MinorFinding, type ModelSize } from "./state.ts";
+import { requireModels } from "./models.ts";
+import { checkSettings, loadSettings, registeredRepos, resolveSettings, type ModelSize, type StoredSettings } from "./settings.ts";
+import { minorFindings, type MinorFinding } from "./state.ts";
 import { listTasks, sessionTask, tagInGroup, TaskBusyError, type TaskRecord } from "./tasks.ts";
-import { errorText } from "./util.ts";
+import { errorText, FactoryError } from "./util.ts";
 import {
   appendWaveEvent,
   appendWaveEvents,
@@ -33,7 +32,6 @@ import {
   foldWave,
   listWaves,
   lockWave,
-  parseWaveFile,
   readWave,
   removeWave,
   RESTING_WAVE_STAGES,
@@ -60,7 +58,7 @@ import {
   type WaveTaskEntry,
   type WaveView,
 } from "./waves.ts";
-import { liveWaveRunners, pokeWave, runnerSnapshot, stopWaveRunners, type RunnerSnapshot } from "./wave-poke.ts";
+import { liveWaveRunners, pokeWave, runnerSnapshot, stopWaveRunners, waveDir, type RunnerSnapshot } from "./wave-poke.ts";
 import { cancelScouts, scoutUsage } from "./scouts.ts";
 import { waveFeedback } from "./feedback.ts";
 import { slotWaiting } from "./test-slots.ts";
@@ -110,15 +108,7 @@ export async function waveMergeRefusal(sessionId: string): Promise<string | null
 
 /** The wave whose id is `id` or starts with it. */
 export async function findWave(id: unknown): Promise<WaveFile> {
-  const wanted = nonEmpty(id)?.trim();
-  if (wanted === undefined) throw new FactoryError("invalid", "the id of a wave must not be empty");
-  const waves = await listWaves();
-  const exact = waves.find((wave) => wave.declaration.id === wanted);
-  if (exact) return exact;
-  const matches = waves.filter((wave) => wave.declaration.id.startsWith(wanted));
-  if (matches.length === 0) throw new FactoryError("not_found", `no wave has an id starting with "${wanted}"`);
-  if (matches.length > 1) throw new FactoryError("invalid", `"${wanted}" matches ${matches.length} waves, give more of the id`);
-  return matches[0];
+  return byId(await listWaves(), (wave) => wave.declaration.id, id, "wave");
 }
 
 /** Runs `act`, a `TaskBusyError` (the wave's log lock stayed taken) as `busy`. */
@@ -324,75 +314,6 @@ async function lookWave(given: WaveFile, all?: readonly WaveFile[], read: Listin
   return { view: { ...fold, reviews, minors, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, stuck, events: file.events };
 }
 
-/** A wave read from the archive (`archive.ts`): nothing of it runs, no action applies. */
-export type ArchivedWaveView = WaveView & { archived: true };
-
-/**
- * The view of the wave archived in `dir`: its log folded, usage summed as `lookWave` does from the archived task
- * sessions (`archivedSessionSummary`, cached by path, size and mtime), the log's reviews and the archived scouts.
- */
-async function archivedView(dir: string, file: WaveFile): Promise<ArchivedWaveView> {
-  const full = foldWave(file.declaration, file.events);
-  const { overrides: _overrides, base: _base, contracts: _contracts, conflicts: _conflicts, taskReviews: _taskReviews, ...fold } = full;
-  const states = new Map<string, string | null>();
-  const taskUsage = new Map<string, WaveView["usage"]>();
-  const taskMinors = new Map<string, MinorFinding[]>();
-  await Promise.all(
-    fold.tasks.map(async (task) => {
-      if (task.taskId === null) return;
-      const summary = await archivedSessionSummary(join(dir, "tasks", `${task.key}.jsonl`));
-      const scouts = await archivedScoutUsage(dir, { kind: "task", id: task.taskId });
-      // A task whose session says nothing never finished: it counts as cancelled, as a removed one does.
-      states.set(task.key, summary.state ?? "cancelled");
-      taskUsage.set(task.key, addUsage(summary.usage === null ? null : { ...summary.usage }, scouts));
-      taskMinors.set(task.key, summary.minors ?? []);
-    }),
-  );
-  let usage: WaveView["usage"] = null;
-  const tasks = fold.tasks.map((task) => {
-    const raw = taskUsage.get(task.key) ?? null;
-    usage = addUsage(usage, raw);
-    return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state: waveTaskState(task, states), usage: raw === null ? null : { ...raw, cost: cents(raw.cost) }, id: task.taskId ?? task.id };
-  });
-  for (const review of fold.reviews) usage = addUsage(usage, review.usage);
-  const minors: MinorFinding[] = [
-    ...fold.tasks.flatMap((task) => (taskMinors.get(task.key) ?? []).map((minor) => ({ ...minor, task: task.key }))),
-    ...fold.reviews.flatMap((review) => minorFindings(review.round, review.findings)),
-  ];
-  const waveScouting = await archivedScoutUsage(dir, { kind: "wave", id: fold.id });
-  usage = addUsage(usage, waveScouting);
-  const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
-  const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
-  return { ...fold, reviews, minors, running: false, interrupted: false, tasks, counts: waveCounts(full, states), usage: total, actions: [], archived: true };
-}
-
-/**
- * The archived waves that have no live record (`waves/<id>.jsonl`), oldest first. No number is stored: their cost is
- * computed from the archive at each call.
- */
-export async function archivedWaves(): Promise<ArchivedWaveView[]> {
-  const liveIds = new Set((await listWaves()).map((file) => file.declaration.id));
-  const archives = (await archivedWaveDirs()).filter(({ index }) => !liveIds.has(index.id));
-  const views = await Promise.all(
-    archives.map(async ({ dir }) => {
-      const file = await readFile(join(dir, "wave.jsonl"), "utf8")
-        .then((text) => parseWaveFile(text))
-        .catch(() => undefined);
-      return file === undefined ? undefined : archivedView(dir, file);
-    }),
-  );
-  return views.filter((view): view is ArchivedWaveView => view !== undefined).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-}
-
-/** The archived wave whose id starts with `id`, when no live wave has it: `waves.get` of a removed wave. */
-async function findArchivedWave(id: string): Promise<ArchivedWaveView | undefined> {
-  const matches = (await archivedWaves()).filter((view) => view.id === id || view.id.startsWith(id));
-  const exact = matches.find((view) => view.id === id);
-  if (exact) return exact;
-  if (matches.length > 1) throw new FactoryError("invalid", `"${id}" matches ${matches.length} archived waves, give more of the id`);
-  return matches[0];
-}
-
 /**
  * What notifications (`notify.ts`) judge for the Pi session `origin`: the views of the tasks it started and of the
  * waves it declared, a wave with whether it builds stuck and its log. Only those records are read; the ids in `skip`
@@ -440,7 +361,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
   const { maxRounds, review } = declaration.overrides;
   // The wave's models only (`launchTask` reads no stored models for a wave's task); a name the wave sets none for runs
   // with Pi's session model, except `small`, which a task asking for it takes from `defaults.yaml` when listed.
-  const models = normalizeModels(declaration.overrides.models ?? {});
+  const models = { ...declaration.overrides.models };
   if (models.small === undefined && fold.tasks.some((task) => task.model === "small")) {
     const small = await defaultSmallModel();
     if (small !== undefined) models.small = small;
@@ -476,9 +397,8 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
         const conflict = fold.conflicts?.find((candidate) => candidate.key === key);
         if (conflict !== undefined) await conflictBranch(fold, conflict);
         const prepare = conflict === undefined ? {} : { beforeRecord: (_branch: string, worktree: string) => leaveMarkers(worktree, conflict) };
-        // The task's size picks its coder's model of the wave's; the reviewer's stays the wave's. No small model
-        // anywhere: the task runs as a big one, with the wave's coder.
-        record = await launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model === "small" && models.small === undefined ? "big" : spec.model, id: spec.id, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...prepare, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
+        // The task's size picks its coder's model of the wave's (`taskModels`); the reviewer's stays the wave's.
+        record = await launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model, id: spec.id, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...prepare, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
@@ -604,27 +524,16 @@ export const WAVE_HANDLERS = {
     if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "waves.start: plan must not be empty");
     const specs = validateTaskSpecs(params.tasks);
     const contracts = await waveContracts(params.plan as string | undefined, params.contracts);
-    const raw = (params.overrides ?? {}) as Params;
-    if (raw.squash !== undefined && typeof raw.squash !== "boolean") throw new FactoryError("invalid", "waves.start: overrides.squash must be a boolean");
-    let target: string | undefined;
-    let overrides: WaveOverrides;
-    try {
-      const { branch, ...fields } = parseSettingsFields(raw, "overrides.");
-      target = branch;
-      overrides = { ...fields, ...(raw.squash === undefined ? {} : { squash: raw.squash as boolean }) };
-    } catch (error) {
-      throw new FactoryError("invalid", `waves.start: ${errorText(error)}`);
-    }
+    const given = checkSettings(params.overrides, "wave", "waves.start: overrides.");
+    let target = given.branch;
     const repo = await primaryOf(params.repo as string, cwd);
     if (!(await registeredRepos()).includes(repo)) throw new FactoryError("not_found", `${repo} is not registered, add it with repos.add first`);
     const stored = await loadSettings(repo);
     // Resolved once, here: the wave's tasks, review and merge read only the declaration.
-    const { merge, maxRounds, review, models } = resolveSettings(stored, overrides, "");
-    const squash = overrides.squash ?? stored.squash ?? DEFAULT_SETTINGS.squash;
-    overrides = { merge, maxRounds, review, models: modelChoice(models) };
-    // Stored only when on: a wave that does not squash keeps the declaration it had, byte for byte.
-    if (squash) overrides.squash = true;
-    await requireFactoryModels(wantedModels(models, specs));
+    const { merge, maxRounds, review, models, squash } = resolveSettings([stored, given], "");
+    // `squash` stored only when on: a wave that does not squash keeps the declaration it had, byte for byte.
+    const overrides: WaveOverrides = { merge, maxRounds, review, models, ...(squash ? { squash } : {}) };
+    await requireModels(wantedModels(models, specs));
     target ??= stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
     if (!(await localBranchExists(repo, target))) throw new FactoryError("not_found", `${repo} has no local branch ${target}`);
@@ -682,7 +591,7 @@ export const WAVE_HANDLERS = {
     // The models list is read before the log lock; the specs are checked again under it. `waves.start` checked the big
     // model; the small one the wave names only when an added task is the first to ask for it.
     if (validateTaskSpecs(params.tasks, current.tasks).some((spec) => spec.model === "small")) {
-      await requireFactoryModels({ small: file.declaration.overrides.models?.small });
+      await requireModels({ small: file.declaration.overrides.models?.small });
     }
     // Checked and appended under the log lock: a runner's stage change after it loses, never the added tasks.
     await busyAsFactoryError(() =>
@@ -703,15 +612,7 @@ export const WAVE_HANDLERS = {
   },
 
   "waves.get": async (params) => {
-    let file: WaveFile;
-    try {
-      file = await findWave(params.id);
-    } catch (error) {
-      // A removed wave answers from its archive.
-      const archived = error instanceof FactoryError && error.code === "not_found" ? await findArchivedWave(String(params.id).trim()) : undefined;
-      if (archived === undefined) throw error;
-      return { wave: { ...archived, feedback: await waveFeedback(archived.plan, archived.id) } };
-    }
+    const file = await findWave(params.id);
     const view = await waveView(file);
     return { wave: { ...view, feedback: await waveFeedback(file.declaration.plan, view.id) } };
   },
@@ -858,12 +759,6 @@ export const WAVE_HANDLERS = {
           force: true,
         });
       }
-      // Archived before anything is deleted: a failure refuses the removal, unless forced.
-      const archive = await archiveWave(foldWave(file.declaration, file.events)).then(
-        () => null,
-        (error: unknown) => oneLine(errorText(error)),
-      );
-      if (archive !== null && params.force !== true) throw new FactoryError("failed", `wave ${short}: the archive failed: ${archive}; nothing was deleted`, { force: true });
       for (const record of records) {
         await withTaskLock(
           record,
@@ -886,7 +781,7 @@ export const WAVE_HANDLERS = {
         if (deleted.exitCode !== 0) throw new FactoryError("failed", `wave ${short}: deleting its branch ${branch} failed: ${oneLine(deleted.output)}`);
       }
       await removeWave(id);
-      return archive === null ? { removed: id } : { removed: id, archive: `failed: ${archive}` };
+      return { removed: id };
     } finally {
       await unlockWave(id).catch(() => undefined);
     }
@@ -961,10 +856,11 @@ async function waveRecords(id: string): Promise<TaskRecord[]> {
   return (await listTasks()).filter((record) => record.wave === id);
 }
 
-/** Undoes a `waves.start` that failed midway: its runner, any task it started, its record and its branch. */
+/** Undoes a `waves.start` that failed midway: its runner, any task it started, its home, its record and its branch. */
 async function undoWaveStart(declaration: WaveDeclaration): Promise<void> {
   await stopWaveRunners(declaration.id).catch(() => undefined);
   for (const record of await waveRecords(declaration.id)) await deleteTask(record).catch(() => undefined);
+  await rm(await realpath(waveDir(declaration.id)), { recursive: true, force: true }).catch(() => undefined);
   await removeWave(declaration.id);
   if (declaration.branch !== null) await runCommand(["git", "branch", "-D", declaration.branch], { cwd: declaration.repo });
 }

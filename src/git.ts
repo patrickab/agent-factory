@@ -27,10 +27,7 @@ const GIT_STDOUT_MAX_CHARS = 4_000_000;
 /** What a diff keeps of its patch. The review caps it again, far lower. */
 const PATCH_KEEP_CHARS = 1_000_000;
 
-/**
- * The default of `factory.yaml` `lockfiles`: their bodies are noise in a review and go last in a patch. A change to one
- * makes a merge run `hooks.after_merge`.
- */
+/** Lockfiles: their bodies are noise in a review and go last in a patch. A change to one makes a merge run `hooks.after_merge`. */
 export const LOCKFILES = ["uv.lock", "package-lock.json", "bun.lock", "bun.lockb"];
 
 /** Stdout of `git <args>` in `cwd`, trimmed. Throws with the end of the output when git fails. */
@@ -191,13 +188,13 @@ export interface TaskDiff {
   patch: string;
 }
 
-/** The working tree of `root` against `base`, untracked files included. Files named in `lockfiles` go last in the patch. */
-export async function taskDiff(exec: Exec, root: string, base: string, lockfiles: readonly string[] = LOCKFILES): Promise<TaskDiff> {
-  return treeDiff(exec, root, base, await snapshotTree(exec, root), lockfiles);
+/** The working tree of `root` against `base`, untracked files included. `LOCKFILES` go last in the patch. */
+export async function taskDiff(exec: Exec, root: string, base: string): Promise<TaskDiff> {
+  return treeDiff(exec, root, base, await snapshotTree(exec, root));
 }
 
 /** `taskDiff` against the tree id `tree` (`snapshotTree`). */
-export async function treeDiff(exec: Exec, root: string, base: string, tree: string, lockfiles: readonly string[] = LOCKFILES): Promise<TaskDiff> {
+export async function treeDiff(exec: Exec, root: string, base: string, tree: string): Promise<TaskDiff> {
   const paths = nulList(await git(exec, root, ["diff", "--no-renames", "--name-only", "-z", base, tree]));
   // Fixed prefixes and no external diff tool: the patch must not depend on the user's git config.
   const patchOf = async (pathspecs: string[]) => {
@@ -206,8 +203,8 @@ export async function treeDiff(exec: Exec, root: string, base: string, tree: str
     if (result.exitCode !== 0 || result.killed) throw new Error(`git diff: ${outputTail(result.output)}`);
     return result.stdout;
   };
-  const source = await patchOf([".", ...lockfiles.map((name) => `:(exclude,glob)**/${name}`)]);
-  const locks = lockfiles.length === 0 ? "" : await patchOf(lockfiles.map((name) => `:(glob)**/${name}`));
+  const source = await patchOf([".", ...LOCKFILES.map((name) => `:(exclude,glob)**/${name}`)]);
+  const locks = await patchOf(LOCKFILES.map((name) => `:(glob)**/${name}`));
   return { base, paths, patch: source + locks };
 }
 

@@ -1,9 +1,11 @@
 /**
  * Where a wave's files lie, and the poke that makes its runner look at it again.
  *
- * - `wavesDir()` under the factory home: `<id>.jsonl` (the log), `<id>.log` (the runner's output), `<id>.lock` (the
- *   runner's lock: one runner per wave), `<id>.log.lock` (held around one read-check-append of the log), `<id>.poke`
- *   (the poke marker) and `<id>.reviews/` (the reviewer's sessions and patch files)
+ * - A wave's home holds what stays after a removal: `wave.jsonl` (the log), `reviews/` (the reviewer's sessions and
+ *   patch files) and `sessions/` (its tasks' Pi sessions). `waveHome` picks it once, when the wave is declared
+ * - `wavesDir()` under the factory home holds what runs: `<id>` (a link to the home), `<id>.log` (the runner's
+ *   output), `<id>.lock` (the runner's lock: one runner per wave), `<id>.log.lock` (held around one
+ *   read-check-append of the log) and `<id>.poke` (the poke marker)
  * - `pokeWave`: writes the marker, then starts `bun wave-runner.ts <id>` detached and hands it the wave's lock, unless
  *   a live runner holds that lock: that runner sees the marker and looks again before it ends (invariant 6)
  * - `liveWaveRunners`/`stopWaveRunners`: a wave's runner processes, found by `pgrep -f` on the whole wave id argument,
@@ -11,6 +13,8 @@
  * - Imports nothing outside node built-ins and the plain plugin modules: a task's runner pokes its wave when it ends
  */
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "./run.ts";
 import { factoryHome } from "./settings.ts";
@@ -39,8 +43,25 @@ export function wavesDir(): string {
   return join(factoryHome(), "waves");
 }
 
+/** Where memory-store keeps its stores: `MEMORY_STORE_ROOT`, else `~/.pi/memory_store`. */
+export function memoryStoreRoot(): string {
+  return process.env.MEMORY_STORE_ROOT || join(homedir(), ".pi", "memory_store");
+}
+
+/** A new wave's home: `<store>/run/waves/<tag>/<id 8>` when its plan's store exists, else `<factory home>/homes/<tag>/<id 8>`. */
+export function waveHome(wave: { id: string; tag: string; plan: string | null }): string {
+  const store = wave.plan ? join(memoryStoreRoot(), wave.plan) : null;
+  const root = store !== null && existsSync(store) ? join(store, "run", "waves") : join(factoryHome(), "homes");
+  return join(root, wave.tag, wave.id.slice(0, 8));
+}
+
+/** The wave's entry in `wavesDir()`: a link to its home. */
+export function waveDir(id: string): string {
+  return join(wavesDir(), id);
+}
+
 export function wavePath(id: string): string {
-  return join(wavesDir(), `${id}.jsonl`);
+  return join(waveDir(id), "wave.jsonl");
 }
 
 /** Where the detached runner of a wave writes its stdout and stderr. */
@@ -65,7 +86,7 @@ export function wavePokePath(id: string): string {
 
 /** The reviewer's sessions and patch files of the wave. */
 export function waveReviewsDir(id: string): string {
-  return join(wavesDir(), `${id}.reviews`);
+  return join(waveDir(id), "reviews");
 }
 
 /**

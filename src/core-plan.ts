@@ -11,15 +11,15 @@
  * - `waves.update`: the wave's title and reviewer instructions; a review reads them when it starts
  */
 import { withContractsLock } from "./contracts.ts";
-import { FactoryError, nonEmpty, oneLine, SHORT_ID_CHARS, type Handler, type Params } from "./core-shared.ts";
-import { requireFactoryModels } from "./core-settings.ts";
+import { nonEmpty, oneLine, SHORT_ID_CHARS, type Handler, type Params } from "./core-shared.ts";
 import { findTask, pendingWaveTask } from "./core-tasks.ts";
 import { findWave, waveLook } from "./core-waves.ts";
 import { liveRunners, messageTask, type RunnerEnv } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
-import { MODEL_SIZES, type ModelSize } from "./state.ts";
+import { requireModels } from "./models.ts";
+import { MODEL_SIZES, type ModelSize } from "./settings.ts";
 import { readTask, TaskBusyError, writeTask, type TaskRecord } from "./tasks.ts";
-import { errorText } from "./util.ts";
+import { errorText, FactoryError } from "./util.ts";
 import { liveWaveRunners, pokeWave } from "./wave-poke.ts";
 import { appendWaveEvents, foldWave, readWave, type FoldedTask, type NewWaveEvent, type WaveFold } from "./waves.ts";
 
@@ -158,7 +158,7 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   }
   const short = waveId.slice(0, SHORT_ID_CHARS);
   const file = await readWave(waveId);
-  if (model === "small") await requireFactoryModels({ small: file.declaration.overrides.models?.small });
+  if (model === "small") await requireModels({ small: file.declaration.overrides.models?.small });
   // A started task's state, read before the log lock (its session, not its log).
   const before = foldWave(file.declaration, file.events).tasks.find((task) => task.key === key);
   const startedRecord = before?.taskId ? await readTask(before.taskId).catch(() => undefined) : undefined;

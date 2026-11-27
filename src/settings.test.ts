@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { loadSettings, resolveRepoSettings, resolveSettings, saveSettings, type StoredSettings } from "./settings.ts";
+import { loadSettings, resolveSettings, saveSettings, taskModels, type StoredSettings } from "./settings.ts";
 
 const REPO = "/home/someone/git/project";
 let agentDir: string;
@@ -31,7 +31,7 @@ test("an invalid settings file throws naming the file and the key", async () => 
     ["maxRounds: 21\n", "maxRounds"],
     ["maxRounds: 1.5\n", "maxRounds"],
     ["review: yes please\n", "review"],
-    ["models:\n  coder: sonnet\n", "models.coder"],
+    ["models:\n  big: sonnet\n", "models.big"],
     ["preview: 1\n", "preview"],
     ["squash: yes\n", "squash"],
   ];
@@ -44,20 +44,18 @@ test("an invalid settings file throws naming the file and the key", async () => 
   }
 });
 
-test("defaults < stored < overrides, models merged per name; size small runs the coder on the small model", () => {
-  const stored: StoredSettings = { branch: "develop", merge: "review", maxRounds: 4, squash: true, models: { small: "s/small", coder: "s/big", reviewer: "s/reviewer" } };
+test("defaults < stored < overrides, models merged per name; a task's coder runs its size's model, big where no small is named", () => {
+  const stored: StoredSettings = { branch: "develop", merge: "review", maxRounds: 4, squash: true, models: { small: "s/small", big: "s/big", reviewer: "s/reviewer" } };
   const overrides: StoredSettings = { maxRounds: 9, review: true, squash: false, models: { reviewer: "o/reviewer" } };
-  expect(resolveRepoSettings(stored, overrides, "main")).toEqual({
-    branch: "develop",
-    merge: "review",
-    maxRounds: 9,
-    review: true,
-    preview: false,
-    squash: false,
-    models: { small: "s/small", big: "s/big", coder: "s/big", reviewer: "o/reviewer" },
-  });
-  expect(resolveRepoSettings({ preview: true }, {}, "main")).toMatchObject({ branch: "main", merge: "auto", preview: true, squash: false, models: {} });
-  expect(resolveSettings(stored, {}, "main", "small").models).toEqual({ small: "s/small", coder: "s/small", reviewer: "s/reviewer" });
+  const models = { small: "s/small", big: "s/big", reviewer: "o/reviewer" };
+  expect(resolveSettings([stored, overrides], "main")).toEqual({ branch: "develop", merge: "review", maxRounds: 9, review: true, preview: false, squash: false, models });
+  expect(resolveSettings([{ preview: true }], "main")).toEqual({ branch: "main", merge: "auto", maxRounds: 2, review: false, preview: true, squash: false, models: {} });
+  expect([taskModels(models, "small"), taskModels(models), taskModels({ big: "s/big" }, "small"), taskModels({})]).toEqual([
+    { coder: "s/small", reviewer: "o/reviewer" },
+    { coder: "s/big", reviewer: "o/reviewer" },
+    { coder: "s/big" },
+    {},
+  ]);
 });
 
 test("two concurrent saves leave one valid file; repos differing only in / and - have their own", async () => {

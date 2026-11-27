@@ -3,7 +3,7 @@
  *
  * - Returns at once and never ends the turn: no `terminate`, no wake of anyone
  * - `context` says which task, wave and plan store the entry belongs to; the entry is stored as a fact (`feedback.ts`)
- *   and `keep` also puts it on the task (the session), so it stays there without a store
+ *   and the result's `details` hold it, so it stays in the session without a store
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { FEEDBACK_KINDS, type FeedbackEntry, type FeedbackKind, storeFeedback } from "../feedback.ts";
@@ -21,8 +21,6 @@ export interface FeedbackContext {
 export interface FeedbackToolGate {
   role: string;
   context(ctx: ExtensionContext): Promise<FeedbackContext | null>;
-  /** Puts the entry on the task. */
-  keep(entry: FeedbackEntry): void;
 }
 
 export function registerFeedbackTool(pi: ExtensionAPI, gate: FeedbackToolGate): void {
@@ -52,7 +50,6 @@ export function registerFeedbackTool(pi: ExtensionAPI, gate: FeedbackToolGate): 
         const whose = await gate.context(ctx);
         if (whose === null || (!whose.task && !whose.wave)) return fail("this session holds no task");
         const entry: FeedbackEntry = { kind: kind as FeedbackKind, what, cost: optional(cost), suggestion: optional(suggestion), task: whose.task, wave: whose.wave, role: gate.role };
-        gate.keep(entry);
         const stored = await storeFeedback(whose.plan, entry);
         return { content: [{ type: "text" as const, text: stored ? "Feedback recorded." : "Feedback recorded on the task." }], details: entry };
       } catch (error) {

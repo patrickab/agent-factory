@@ -10,7 +10,7 @@
  *   (`core-tasks.ts`, `core-waves.ts`) are built only for an answer
  */
 import { stat } from "node:fs/promises";
-import { FactoryError, stringsParam, tagParam, WAIT_TIMEOUT_MS, type Handler } from "./core-shared.ts";
+import { stringsParam, tagParam, WAIT_TIMEOUT_MS, type Handler } from "./core-shared.ts";
 import { findTask, needsAttention, rests, tasksIn, taskView, type TaskView } from "./core-tasks.ts";
 import { findProof, proofNeedsAttention, proofRests, proofView, type ProofView } from "./gates-prove.ts";
 import { findWave, queueLook, queueStalled, waveLook, type WaveLook } from "./core-waves.ts";
@@ -20,6 +20,7 @@ import { FACTORY_TURN_STATES, type State } from "./state.ts";
 import { listTasks, tagInGroup, type TaskRecord } from "./tasks.ts";
 import { foldWave, listWaves, readWave, RESTING_WAVE_STAGES, stuckKeys, type WaveFile, type WaveStage, type WaveView } from "./waves.ts";
 import { liveWaveRunners } from "./wave-poke.ts";
+import { FactoryError } from "./util.ts";
 
 const WAIT_POLL_MS = 500;
 

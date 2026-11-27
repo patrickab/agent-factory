@@ -15,17 +15,15 @@
  */
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
-import { runCommand } from "./run.ts";
+import { runCommand, type CommandResult } from "./run.ts";
 import { factoryHome } from "./settings.ts";
 import { onPath } from "./spawn.ts";
-import { listTasks, lockFile, readTask, TaskBusyError, unlockFile, writeTask, type ContractStamp, type TaskRecord } from "./tasks.ts";
+import { listTasks, readTask, withLock, writeTask, type ContractStamp, type TaskRecord } from "./tasks.ts";
 import { outputTail } from "./util.ts";
 
 export const CONTRACT_DIR = "run/contract";
 const CONTRACT_NAME = /^[A-Za-z0-9._-]+$/;
 const LOCK_WAIT_MS = 30_000;
-const LOCK_RETRY_MS = 50;
 
 /** A contract's facts: path in the store -> text. */
 export type ContractFacts = Map<string, string>;
@@ -38,9 +36,10 @@ export function memoryStoreOnPath(): boolean {
   return onPath("memory-store") !== null;
 }
 
-async function memoryStore(args: string[]): Promise<{ ok: boolean; stdout: string; output: string }> {
-  const result = await runCommand(["memory-store", ...args], { cwd: "/", maxStdoutChars: 5_000_000, timeoutMs: 60_000 });
-  return { ok: result.exitCode === 0, stdout: result.stdout, output: result.output };
+/** `memory-store <args>` (in `cwd`), `ok` when it exited 0; `exitCode` null when it could not run. */
+export async function memoryStore(args: string[], cwd = "/"): Promise<CommandResult & { ok: boolean }> {
+  const result = await runCommand(["memory-store", ...args], { cwd, maxStdoutChars: 5_000_000, timeoutMs: 60_000 });
+  return { ...result, ok: result.exitCode === 0 };
 }
 
 /**
@@ -159,22 +158,7 @@ export function factChanges(before: ContractFacts, after: ContractFacts): FactCh
 
 /** Runs `act` holding the contracts lock (waits for another holder up to `LOCK_WAIT_MS`). */
 export async function withContractsLock<T>(act: () => Promise<T>): Promise<T> {
-  const path = join(factoryHome(), "contracts.lock");
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      await lockFile(path, "the contracts lock is held by another factory process");
-      break;
-    } catch (error) {
-      if (!(error instanceof TaskBusyError) || Date.now() > deadline) throw error;
-      await sleep(LOCK_RETRY_MS);
-    }
-  }
-  try {
-    return await act();
-  } finally {
-    await unlockFile(path);
-  }
+  return withLock(join(factoryHome(), "contracts.lock"), "the contracts lock is held by another factory process", LOCK_WAIT_MS, act);
 }
 
 /**

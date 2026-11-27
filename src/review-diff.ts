@@ -5,6 +5,8 @@
 import { reviewPatch } from "./review.ts";
 
 export const REVIEW_DIFF_ENV = "FACTORY_REVIEW_DIFF";
+/** How an earlier review's tool result reaches the reviewer's model (`pi/reviewer-tool.ts`). */
+export const STUB_PREFIX = "[reviewed]";
 const PATCH_MAX_CHARS = 200_000;
 
 /** The file sections of a `git diff` patch with the path each names (`diff --git a/<path> b/<path>`), in order. */

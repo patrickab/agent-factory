@@ -9,12 +9,12 @@
  *   file holds `<pid> <start time>` of its holder; a holder that no longer runs (`hostLiveness`) leaves a stale lock
  *   the next `lockTask` takes over; a lock a live process holds is a `TaskBusyError`
  */
-import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { hostLiveness, procStart } from "./queue.ts";
 import { factoryHome } from "./settings.ts";
-import { errorText } from "./util.ts";
+import { errorText, ifMissing, writeAtomic } from "./util.ts";
 
 export interface TaskRecord {
   id: string;
@@ -89,18 +89,8 @@ export function taskLockPath(id: string): string {
   return join(tasksDir(), `${id}.lock`);
 }
 
-/** Temp file in the same directory + rename: a reader sees the old record or the new one, never half of one. */
 export async function writeTask(record: TaskRecord): Promise<void> {
-  await mkdir(tasksDir(), { recursive: true });
-  const path = taskPath(record.id);
-  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-    await rename(temp, path);
-  } catch (error) {
-    await rm(temp, { force: true });
-    throw error;
-  }
+  await writeAtomic(taskPath(record.id), `${JSON.stringify(record, null, 2)}\n`);
 }
 
 /** The record in `<id>.json`. Throws an `Error` naming the file when `id` is no task id or the file is invalid. */
@@ -118,15 +108,8 @@ export async function readTask(id: string): Promise<TaskRecord> {
 
 /** Every task, oldest first; only those of `repo` when given. Files that are no valid task record are skipped. */
 export async function listTasks(repo?: string): Promise<TaskRecord[]> {
-  let names: string[];
-  try {
-    names = await readdir(tasksDir());
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
   const records: TaskRecord[] = [];
-  for (const name of names) {
+  for (const name of await ifMissing(readdir(tasksDir()), [])) {
     if (!name.endsWith(".json")) continue;
     const record = await readTask(name.slice(0, -".json".length)).catch(() => undefined);
     if (record !== undefined && (repo === undefined || record.repo === repo)) records.push(record);
@@ -154,7 +137,7 @@ async function lockOwner(pid: number): Promise<string> {
 }
 
 /** Whether the lock file's holder still runs; a missing or unreadable file has none. */
-async function lockHeld(path: string): Promise<boolean> {
+export async function lockHeld(path: string): Promise<boolean> {
   const text = await readFile(path, "utf8").catch(() => "");
   const [pid = "", start = ""] = text.trim().split(" ");
   return pid !== "" && (await hostLiveness(Number(pid), start));
@@ -188,6 +171,25 @@ export async function lockFile(path: string, busy: string): Promise<void> {
   throw new TaskBusyError(busy);
 }
 
+/** Runs `act` holding the lock file `path`, waiting up to `waitMs` for another holder; then a `TaskBusyError` `busy`. */
+export async function withLock<T>(path: string, busy: string, waitMs: number, act: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      await lockFile(path, busy);
+      break;
+    } catch (error) {
+      if (!(error instanceof TaskBusyError) || Date.now() > deadline) throw error;
+      await Bun.sleep(20);
+    }
+  }
+  try {
+    return await act();
+  } finally {
+    await unlockFile(path);
+  }
+}
+
 /** Passes the lock this process holds to the process `pid` (a runner it spawned), which removes it when it exits. */
 export async function handTaskLock(id: string, pid: number): Promise<void> {
   await handLockFile(taskLockPath(id), pid);
@@ -195,14 +197,7 @@ export async function handTaskLock(id: string, pid: number): Promise<void> {
 
 /** `handTaskLock` by the lock file's path (a runner knows only `FACTORY_TASK_LOCK`). */
 export async function handLockFile(path: string, pid: number): Promise<void> {
-  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, await lockOwner(pid), "utf8");
-    await rename(temp, path);
-  } catch (error) {
-    await rm(temp, { force: true });
-    throw error;
-  }
+  await writeAtomic(path, await lockOwner(pid));
 }
 
 /** Removes the task's lock if this process holds it; a lock handed to a runner stays. */

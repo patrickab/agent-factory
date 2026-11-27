@@ -25,6 +25,3 @@ merge_gates: []
 # merge_gates): the tests its change reaches. Env FACTORY_BASE is the commit
 # the rebased change sits on (diff FACTORY_BASE..HEAD). Unset: gates only.
 task_gates: []
-# File names (no directory) of lockfiles: a merge that changes one runs after_merge, and they go last in the
-# patch the reviewer reads. Unset means the list below.
-# lockfiles: [uv.lock, package-lock.json, bun.lock, bun.lockb]

@@ -12,16 +12,16 @@
  * - The log: `decisions/<origin>.jsonl` under the factory home, one JSON line `{at, card}` per decision (what it answers: `card.answers`),
  *   append-only; a line cut short or not a decision is skipped when read
  */
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { FactoryCard } from "./cards.ts";
-import { FactoryError } from "./core-shared.ts";
 import { findTask, pendingWaveTask, taskView, type TaskView } from "./core-tasks.ts";
 import { findWave, waveLook } from "./core-waves.ts";
 import { taskNotice, waveNotice } from "./notify.ts";
 import { factoryHome } from "./settings.ts";
 import type { TaskRecord } from "./tasks.ts";
 import { foldWave, listWaves, type WaveFile, type WaveStage } from "./waves.ts";
+import { FactoryError, readJsonl } from "./util.ts";
 
 /** What a decision answers: the notice key it settles, absent when it settles nothing open. */
 export type Cause = { answers?: string };
@@ -104,18 +104,5 @@ export async function appendDecision(origin: string, entry: DecisionEntry): Prom
 
 /** The decisions of `origin` in the order they were taken; none without a log. */
 export async function readDecisions(origin: string): Promise<DecisionEntry[]> {
-  const text = await readFile(decisionsPath(origin), "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return "";
-    throw error;
-  });
-  const entries: DecisionEntry[] = [];
-  for (const line of text.split("\n")) {
-    if (line.trim() === "") continue;
-    try {
-      entries.push(JSON.parse(line) as DecisionEntry);
-    } catch {
-      // A line a crash cut short.
-    }
-  }
-  return entries;
+  return readJsonl<DecisionEntry>(decisionsPath(origin));
 }

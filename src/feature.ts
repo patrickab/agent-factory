@@ -75,20 +75,3 @@ export const WAVE_TASK_ITEM: Schema = {
 };
 export const TAG: Schema = { type: "string", description: "A task tag: segments of A-Z a-z 0-9 . _ @ + - joined by /" };
 export const TAG_FILTER: Schema = { type: "string", description: "Only the tasks whose tag is this one or lies under it (a holds a/b, not ab)" };
-export const SETTINGS_PROPERTIES: Record<string, Schema> = {
-  merge: { type: "string", enum: ["auto", "review"], description: "auto: merge a passed round. review: wait for approve" },
-  maxRounds: { type: "integer", minimum: 1, maximum: 20 },
-  review: { type: "boolean", description: "Run the reviewer on every round" },
-  branch: { type: "string", description: "The branch the task starts from and merges into" },
-  models: {
-    type: "object",
-    properties: {
-      coder: { type: "string", description: "provider/model; absent: Pi's session model" },
-      big: { type: "string", description: "provider/model; the same as coder (either name sets both)" },
-      small: { type: "string", description: "provider/model for a wave's easy tasks (model small)" },
-      reviewer: { type: "string", description: "provider/model; absent: Pi's session model" },
-    },
-  },
-};
-
-export const SQUASH: Schema = { type: "boolean", description: "Land a wave as one commit (its title, its commits' subjects), its task commits kept under refs/factory/waves/<tag>-<id>" };

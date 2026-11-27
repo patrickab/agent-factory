@@ -8,8 +8,8 @@
  */
 import type { CommitMessage } from "./commitmsg.ts";
 import type { CommandResult } from "./run.ts";
+import { checkValue, ROLE_MODELS, SETTINGS } from "./settings.ts";
 import { isRecord } from "./util.ts";
-import type { FeedbackEntry } from "./feedback.ts";
 
 /**
  * `waiting_answer`: the coder asked the supervisor (`factory-question`); the next message answers it. `reviewing`: a
@@ -32,12 +32,8 @@ export interface Settings {
   merge: "auto" | "review";
   maxRounds: number;
   review: boolean;
-  /**
-   * The models this task's roles run with (`coder`, `reviewer`), as before; a role without a model runs with the
-   * session's. Added names: `big`, an alias of `coder` (always equal; a wave's `small` task carries none), and `small`,
-   * the project's model for a wave's easy tasks. Old task records carry only `coder` and `reviewer`.
-   */
-  models: { small?: string; big?: string; coder?: string; reviewer?: string };
+  /** The models this task's roles run with (`taskModels`); a role without one runs with the session's. */
+  models: { coder?: string; reviewer?: string };
 }
 
 export interface StartPayload {
@@ -192,7 +188,6 @@ export interface EntryData {
   "factory-commit-message": CommitMessage;
   "factory-spawn": SpawnData;
   "factory-question": QuestionData;
-  "factory-feedback": FeedbackEntry;
 }
 
 export type EntryType = keyof EntryData;
@@ -251,7 +246,6 @@ const REDUCERS: { [K in EntryType]: Reducer<K> } = {
   "factory-commit-message": (snapshot, commitMessage) => snapshot && { ...snapshot, commitMessage },
   "factory-spawn": (snapshot) => snapshot,
   "factory-question": (snapshot, { text }) => snapshot && { ...snapshot, question: text },
-  "factory-feedback": (snapshot) => snapshot,
 };
 
 export function isEntryType(value: string): value is EntryType {
@@ -394,73 +388,8 @@ export function reviewFeedback(round: number, findings: Finding[]): string {
   return `Round ${round}: the review found problems. Fix every blocker and major finding, then stop.\n\n${lines.join("\n")}`;
 }
 
-/** The highest `maxRounds` a task may run with. */
-export const MAX_ROUNDS_LIMIT = 20;
 /** The roles a task runs a model for. */
 export const ROLES = ["coder", "reviewer"] as const;
-/** The two models a project names: `big` is the alias of `coder`, `small` for a wave's easy tasks. */
-export const MODEL_SIZES = ["small", "big"] as const;
-export type ModelSize = (typeof MODEL_SIZES)[number];
-/** Every name `Settings.models` reads: the sizes and the roles. */
-const MODEL_NAMES = [...MODEL_SIZES, ...ROLES] as const;
-
-/** A project's models as stored or passed (`settings.set`, overrides): `coder` and `big` equal, both or neither. */
-export type ModelChoice = Settings["models"];
-
-/**
- * `big` and `coder` made equal (`coder` wins when both are given and differ: an old client edits only `coder`);
- * `small` and `reviewer` as given. Nothing else is implied: no reviewer from `big`.
- */
-export function normalizeModels(models: Settings["models"]): ModelChoice {
-  const coder = models.coder ?? models.big;
-  const choice: ModelChoice = {};
-  if (models.small !== undefined) choice.small = models.small;
-  if (coder !== undefined) {
-    choice.coder = coder;
-    choice.big = coder;
-  }
-  if (models.reviewer !== undefined) choice.reviewer = models.reviewer;
-  return choice;
-}
-
-/**
- * The settings keys of `raw`, checked, unknown keys dropped; an absent key stays absent. Shared by the `/factory start`
- * payload and the stored settings (`settings.ts`). Throws an `Error` naming the first wrong key after `prefix`.
- */
-export function parseSettingsFields(raw: Record<string, unknown>, prefix = ""): Partial<Settings> {
-  const fields: Partial<Settings> = {};
-  const { branch, merge, maxRounds, review, models } = raw;
-  if (branch !== undefined) {
-    if (typeof branch !== "string" || branch.trim() === "") throw new Error(`${prefix}branch must be a non-empty string`);
-    fields.branch = branch;
-  }
-  if (merge !== undefined) {
-    if (merge !== "auto" && merge !== "review") throw new Error(`${prefix}merge must be "auto" or "review"`);
-    fields.merge = merge;
-  }
-  if (maxRounds !== undefined) {
-    if (typeof maxRounds !== "number" || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > MAX_ROUNDS_LIMIT) {
-      throw new Error(`${prefix}maxRounds must be an integer from 1 to ${MAX_ROUNDS_LIMIT}`);
-    }
-    fields.maxRounds = maxRounds;
-  }
-  if (review !== undefined) {
-    if (typeof review !== "boolean") throw new Error(`${prefix}review must be a boolean`);
-    fields.review = review;
-  }
-  if (models !== undefined) {
-    if (!isRecord(models)) throw new Error(`${prefix}models must be an object`);
-    const named: Settings["models"] = {};
-    for (const name of MODEL_NAMES) {
-      const model = models[name];
-      if (model === undefined) continue;
-      if (typeof model !== "string" || !model.includes("/")) throw new Error(`${prefix}models.${name} must be "provider/model"`);
-      named[name] = model;
-    }
-    fields.models = named;
-  }
-  return fields;
-}
 
 /** The payload of `/factory start <json>`. Throws an `Error` that names the first wrong field. */
 export function parseStartPayload(text: string): StartPayload {
@@ -476,12 +405,8 @@ export function parseStartPayload(text: string): StartPayload {
   if (typeof request !== "string" || request.trim() === "") throw new Error("request must be a non-empty string");
   if (typeof title !== "string" || title.trim() === "") throw new Error("title must be a non-empty string");
   if (!isRecord(settings)) throw new Error("settings must be an object");
-  const { branch, merge, maxRounds, review, models } = parseSettingsFields(settings, "settings.");
-  // Every key is required here: the absent ones get the message of a wrong one.
-  if (branch === undefined) throw new Error("settings.branch must be a non-empty string");
-  if (merge === undefined) throw new Error('settings.merge must be "auto" or "review"');
-  if (maxRounds === undefined) throw new Error(`settings.maxRounds must be an integer from 1 to ${MAX_ROUNDS_LIMIT}`);
-  if (review === undefined) throw new Error("settings.review must be a boolean");
-  if (models === undefined) throw new Error("settings.models must be an object");
-  return { request, title, settings: { branch, merge, maxRounds, review, models }, ...(typeof prefix === "string" && prefix.trim() !== "" ? { prefix } : {}) };
+  // Every key is required here: an absent one is checked as a wrong one.
+  const [branch, merge, maxRounds, review] = (["branch", "merge", "maxRounds", "review"] as const).map((key) => checkValue(SETTINGS[key].schema, settings[key], `settings.${key}`));
+  const models = checkValue(ROLE_MODELS, settings.models, "settings.models") as Settings["models"];
+  return { request, title, settings: { branch, merge, maxRounds, review, models } as Settings, ...(typeof prefix === "string" && prefix.trim() !== "" ? { prefix } : {}) };
 }

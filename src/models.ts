@@ -8,11 +8,12 @@
  *   id offers Pi's available models
  * - Imports no npm package (core.ts imports this file; the deployed plugin has no `node_modules`)
  */
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { factoryHome } from "./settings.ts";
-import type { ModelSize, ROLES } from "./state.ts";
-import { errorText } from "./util.ts";
+import type { ModelSize } from "./settings.ts";
+import type { ROLES } from "./state.ts";
+import { errorText, FactoryError, ifMissing, writeAtomic } from "./util.ts";
 
 type Role = (typeof ROLES)[number];
 
@@ -27,9 +28,9 @@ export function modelsPath(): string {
 }
 
 function checkModels(raw: unknown): string[] {
-  if (!Array.isArray(raw)) throw new Error("models must be a list of provider/model ids");
+  if (!Array.isArray(raw)) throw new FactoryError("invalid", "models must be a list of provider/model ids");
   for (const model of raw) {
-    if (typeof model !== "string" || !MODEL_ID.test(model)) throw new Error(`${JSON.stringify(model)} is not a provider/model id`);
+    if (typeof model !== "string" || !MODEL_ID.test(model)) throw new FactoryError("invalid", `${JSON.stringify(model)} is not a provider/model id`);
   }
   return [...new Set(raw as string[])];
 }
@@ -37,13 +38,7 @@ function checkModels(raw: unknown): string[] {
 /** A missing or empty file is `[]`. An invalid file throws an `Error` naming the file. */
 export async function loadModels(): Promise<string[]> {
   const path = modelsPath();
-  let text: string;
-  try {
-    text = await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
+  const text = await ifMissing(readFile(path, "utf8"), "");
   try {
     const raw: unknown = Bun.YAML.parse(text);
     return raw === null || raw === undefined ? [] : checkModels(raw);
@@ -52,31 +47,21 @@ export async function loadModels(): Promise<string[]> {
   }
 }
 
-/** Checks each id (`provider/model`), drops repeats (first one kept), writes atomically (temp file + rename). */
+/** Checks each id (`provider/model`, else `invalid`), drops repeats (first one kept), writes atomically. */
 export async function saveModels(models: string[]): Promise<void> {
-  const checked = checkModels(models);
-  const path = modelsPath();
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, `${Bun.YAML.stringify(checked, null, 2).trimEnd()}\n`, "utf8");
-    await rename(temp, path);
-  } catch (error) {
-    await rm(temp, { force: true });
-    throw error;
-  }
+  await writeAtomic(modelsPath(), `${Bun.YAML.stringify(checkModels(models), null, 2).trimEnd()}\n`);
 }
 
 /**
- * Throws one sentence when the list is empty or a given model is not on it, naming it by its key (a role or a size).
- * A key without a model passes.
+ * Refuses (`refused`, one sentence) when the list is empty or a given model is not on it, naming it by its key (a
+ * role or a size). A key without a model passes.
  */
 export async function requireModels(models: Partial<Record<Role | ModelSize, string>> | Record<string, string | undefined>): Promise<void> {
   const allowed = await loadModels();
-  if (allowed.length === 0) throw new Error(NO_MODELS_MESSAGE);
+  if (allowed.length === 0) throw new FactoryError("refused", NO_MODELS_MESSAGE);
   for (const [role, model] of Object.entries(models)) {
     if (model !== undefined && !allowed.includes(model)) {
-      throw new Error(`the ${role} model ${model} is not a factory model (add it with /factory models add ${model})`);
+      throw new FactoryError("refused", `the ${role} model ${model} is not a factory model (add it with /factory models add ${model})`);
     }
   }
 }

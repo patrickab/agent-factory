@@ -3,7 +3,7 @@
  * registered repositories (`repos.*`), their branches, stored settings (`settings.*`) and `factory.yaml` (`config.*`).
  *
  * - The models a task or repository may use are one user-level list (`models.ts`): `models.get`/`models.set`.
- *   `settings.set` refuses a model not on it, and anything while it is empty (`requireFactoryModels`, which
+ *   `settings.set` refuses a model not on it, and anything while it is empty (`requireModels`, which
  *   `tasks.start` and the wave actions use too); reads never check it
  * - `settingsOf`: the stored settings, them resolved over the defaults, and the defaults, the branch resolved from the
  *   repository's default one
@@ -14,25 +14,14 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
-import { FactoryError, primaryOf, type Handler } from "./core-shared.ts";
+import { primaryOf, type Handler } from "./core-shared.ts";
 import { initDraft } from "./draft.ts";
 import { git } from "./git.ts";
 import { defaultBranch } from "./launch.ts";
 import { loadModels, requireModels, saveModels } from "./models.ts";
 import { runCommand } from "./run.ts";
-import {
-  DEFAULT_SETTINGS,
-  defaultModels,
-  loadSettings,
-  parseStoredSettings,
-  registeredRepos,
-  resolveRepoSettings,
-  saveSettings,
-  type ResolvedModels,
-  type ResolvedSettings,
-  type StoredSettings,
-} from "./settings.ts";
-import { errorText } from "./util.ts";
+import { checkSettings, defaultModels, loadSettings, registeredRepos, resolveSettings, saveSettings, type ResolvedSettings, type SizeModels, type StoredSettings } from "./settings.ts";
+import { errorText, FactoryError, ifMissing } from "./util.ts";
 import type { WaveTaskEntry } from "./waves.ts";
 
 export async function branchHasConfig(repo: string, branch: string): Promise<boolean> {
@@ -44,13 +33,13 @@ async function settingsOf(repo: string): Promise<{ stored: StoredSettings; resol
   const fallback = await defaultBranch(repo).catch(() => undefined);
   const branch = stored.branch ?? fallback;
   if (branch === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
-  return { stored, resolved: resolveRepoSettings(stored, {}, branch), defaults: { ...DEFAULT_SETTINGS, models: {}, branch: fallback ?? branch } };
+  return { stored, resolved: resolveSettings([stored], branch), defaults: resolveSettings([], fallback ?? branch) };
 }
 
 /** The models a wave's `specs` run with that a setting names: `big` for coders and the reviewer, `small` only when a task asks for it. */
-export function wantedModels(models: ResolvedModels, specs: readonly WaveTaskEntry[]): Record<string, string | undefined> {
-  const { coder, reviewer, small } = models;
-  return specs.some((spec) => spec.model === "small") ? { coder, reviewer, small } : { coder, reviewer };
+export function wantedModels(models: SizeModels, specs: readonly WaveTaskEntry[]): Record<string, string | undefined> {
+  const { big, reviewer, small } = models;
+  return specs.some((spec) => spec.model === "small") ? { big, reviewer, small } : { big, reviewer };
 }
 
 /**
@@ -62,34 +51,11 @@ export async function defaultSmallModel(): Promise<string | undefined> {
   return (await loadModels()).includes(small) ? small : undefined;
 }
 
-/** `requireModels` as a `refused` error. */
-export async function requireFactoryModels(models: Record<string, string | undefined>): Promise<void> {
-  try {
-    await requireModels(models);
-  } catch (error) {
-    throw new FactoryError("refused", errorText(error));
-  }
-}
-
-function storedSettingsParam(raw: unknown, prefix: string): StoredSettings {
-  try {
-    return parseStoredSettings(raw);
-  } catch (error) {
-    throw new FactoryError("invalid", `${prefix}${errorText(error)}`);
-  }
-}
-
 export const SETTINGS_HANDLERS = {
   "models.get": async () => ({ models: await loadModels() }),
 
   "models.set": async (params) => {
-    try {
-      await saveModels(params.models as string[]);
-    } catch (error) {
-      // A file system error (it has a code) is `failed`; a wrong id is the caller's.
-      if ((error as NodeJS.ErrnoException).code !== undefined) throw error;
-      throw new FactoryError("invalid", `models.set: ${errorText(error)}`);
-    }
+    await saveModels(params.models as string[]);
     return { models: await loadModels() };
   },
 
@@ -111,18 +77,15 @@ export const SETTINGS_HANDLERS = {
 
   "settings.set": async (params, { cwd }) => {
     const repo = await primaryOf(params.repo as string, cwd);
-    const settings = storedSettingsParam(params.settings, "settings.");
-    await requireFactoryModels(settings.models ?? {});
+    const settings = checkSettings(params.settings, "repo", "settings.");
+    await requireModels(settings.models ?? {});
     await saveSettings(repo, settings);
     return settingsOf(repo);
   },
 
   "config.get": async (params, { cwd }) => {
     const repo = await primaryOf(params.repo as string, cwd);
-    const text = await readFile(join(repo, "factory.yaml"), "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
+    const text = await ifMissing(readFile(join(repo, "factory.yaml"), "utf8"), null);
     if (text !== null) return { exists: true, text, draft: null, source: [] };
     const draft = initDraft(repo);
     return { exists: false, text: null, draft: draft.text, source: draft.source === "" ? [] : draft.source.split(", ") };

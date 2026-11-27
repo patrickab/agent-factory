@@ -161,9 +161,6 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
         const record = await sessionRecord(ctx);
         return record === undefined ? null : { task: record.id, wave: record.wave, plan: record.plan };
       },
-      keep: (entry) => {
-        pi.appendEntry("factory-feedback", entry);
-      },
     });
     registerAskSupervisorTool(pi, {
       refusal: () => (session.snapshot?.state === "running" ? null : "only the coder of a running task may ask"),

@@ -37,7 +37,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
 import { withoutPaths } from "./agent-view.ts";
-import { archiveWave } from "./archive.ts";
 import { loadTaskFiles, type FactoryConfig } from "./config.ts";
 import { FactoryError, oneLine, pokeQueuedAfter, startQueuedWave, startWaveTasks, waveReviewWorktree, waveTaskViews } from "./core.ts";
 import { abortLeftoverRebase, git, removeUntracked, taskBase, trackedChanges, treeDiff, uncommittedFiles } from "./git.ts";
@@ -97,7 +96,7 @@ function waveTask(declaration: StartedWaveFold): Task {
   return {
     title: declaration.title,
     request: declaration.request,
-    settings: { branch: declaration.target, merge: declaration.overrides.merge ?? "auto", maxRounds: 1, review: true, models: declaration.overrides.models ?? {} },
+    settings: { branch: declaration.target, merge: declaration.overrides.merge ?? "auto", maxRounds: 1, review: true, models: {} },
     branch: declaration.branch,
     mainBranch: declaration.target,
     baseSha: declaration.base,
@@ -353,7 +352,7 @@ async function review(fold: StartedWaveFold): Promise<boolean | void> {
     if (gate.length > 0 && (await appendWaveEvents(id, (now) => (now.stage === "reviewing" ? gate : null))) === null) return removeWorktree(fold);
 
     const base = await taskBase(runner.run, root, task);
-    const diff = await treeDiff(runner.run, root, base, await git(runner.run, root, ["rev-parse", "HEAD^{tree}"]), config.lockfiles);
+    const diff = await treeDiff(runner.run, root, base, await git(runner.run, root, ["rev-parse", "HEAD^{tree}"]));
     // Nothing differs from the target: nothing to review or merge. Unless a conflict moved the branch onto the target
     // and done tasks' change is no longer on it: that is no merge.
     if (diff.paths.length === 0) {
@@ -499,7 +498,6 @@ async function merge(fold: StartedWaveFold, gated: string | null): Promise<void>
   const landed = async (merge: { from: string; to: string; ref?: string; commits?: number }, gate: NewWaveEvent[]) => {
     if (squash) await dropBranch(fold);
     await leave("merged", null, null, [...gate, { kind: "merge", ...merge }]);
-    await archiveWave(fold).catch((error: unknown) => log(id, `the archive failed: ${oneLine(errorText(error))}`));
   };
   // A runner that died after the target moved: the landing is finished, never made twice.
   if (squash) {

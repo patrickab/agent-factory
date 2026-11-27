@@ -15,12 +15,13 @@
  *   line of its own
  * - `listWaves` skips files that are no valid wave, as `listTasks` does; `validateTaskSpecs` checks specs a wave adds
  */
-import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { FactoryError } from "./core-shared.ts";
-import { FACTORY_TURN_STATES, MODEL_SIZES, RESTING_STATES, type MinorFinding, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
-import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
-import { errorText, isRecord } from "./util.ts";
-import { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
+import { mkdir, open, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { MODEL_SIZES, type ModelSize, type StoredSettings } from "./settings.ts";
+import { FACTORY_TURN_STATES, RESTING_STATES, type MinorFinding, type State } from "./state.ts";
+import { lockFile, unlockFile, withLock } from "./tasks.ts";
+import { FactoryError, ifMissing, isRecord, jsonLines } from "./util.ts";
+import { isWaveId, waveDir, waveHome, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
 import type { FeedbackEntry } from "./feedback.ts";
 
 export { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir };
@@ -52,7 +53,7 @@ export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["queued", "rejected", 
  * them, `branch` = the wave's branch and `merge: "auto"`; `merge` is the wave's own (`review`: wait for approve), so is
  * `squash` (the wave lands as one commit, `merge.ts`; absent = off, stored only when on).
  */
-export type WaveOverrides = { models?: ModelChoice; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; squash?: boolean };
+export type WaveOverrides = Pick<StoredSettings, "models" | "maxRounds" | "merge" | "review" | "squash">;
 
 /**
  * Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. `after`:
@@ -242,58 +243,17 @@ export async function unlockWave(id: string): Promise<void> {
   await unlockFile(waveLockPath(id));
 }
 
-/** Runs `act` holding the wave's log lock, waiting up to `LOG_LOCK_WAIT_MS` for it; then a `TaskBusyError`. */
-async function withLogLock<T>(id: string, act: () => Promise<T>): Promise<T> {
-  const deadline = Date.now() + LOG_LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      await lockFile(waveLogLockPath(id), `wave ${id.slice(0, 8)} is busy: another process writes its log, try again`);
-      break;
-    } catch (error) {
-      if (!(error instanceof TaskBusyError) || Date.now() > deadline) throw error;
-      await Bun.sleep(20);
-    }
-  }
-  try {
-    return await act();
-  } finally {
-    await unlockFile(waveLogLockPath(id));
-  }
-}
-
-// ---- parsing ----
-
-/** The declaration and events of a file's text; a line that is no JSON is a torn append and is skipped. */
-export function parseWaveFile(text: string): WaveFile {
-  // A complete file ends with "\n": the last element is "" then, else it is a torn line.
-  const [head, ...rest] = text.split("\n").slice(0, -1);
-  if (head === undefined) throw new Error("the file has no declaration");
-  const events: WaveEvent[] = [];
-  for (const line of rest) {
-    try {
-      events.push(JSON.parse(line) as WaveEvent);
-    } catch {
-      // a torn append
-    }
-  }
-  return { declaration: JSON.parse(head) as WaveDeclaration, events };
-}
-
 // ---- the file ----
 
-/** Writes a new wave's file holding its declaration. Throws when the file exists. */
+/** Makes a new wave's home with its log holding its declaration, then links it from `wavesDir()`. Throws when the wave exists. */
 export async function createWave(declaration: WaveDeclaration): Promise<void> {
   if (!isWaveId(declaration.id)) throw new Error(`${declaration.id} is not a wave id`);
+  const home = waveHome(declaration);
+  await mkdir(home, { recursive: true });
+  // Written in full before the link: no reader sees a half-written log; `wx` and the link fail on an existing wave.
+  await writeFile(join(home, "wave.jsonl"), `${JSON.stringify(declaration)}\n`, { encoding: "utf8", flag: "wx" });
   await mkdir(wavesDir(), { recursive: true });
-  const path = wavePath(declaration.id);
-  // Written in full first, then linked: `link` fails on an existing file, and no reader sees a half-written one.
-  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, `${JSON.stringify(declaration)}\n`, "utf8");
-    await link(temp, path);
-  } finally {
-    await rm(temp, { force: true });
-  }
+  await symlink(home, waveDir(declaration.id));
 }
 
 /** Appends one event to an existing wave under its log lock. Returns the event as written. */
@@ -309,7 +269,7 @@ export async function appendWaveEvent(id: string, event: NewWaveEvent): Promise<
  */
 export async function appendWaveEvents(id: string, events: NewWaveEvent[] | ((fold: WaveFold) => NewWaveEvent[] | null | Promise<NewWaveEvent[] | null>)): Promise<WaveEvent[] | null> {
   if (!isWaveId(id)) throw new FactoryError("not_found", `${id} is not a wave id`);
-  return withLogLock(id, async () => {
+  return withLock(waveLogLockPath(id), `wave ${id.slice(0, 8)} is busy: another process writes its log, try again`, LOG_LOCK_WAIT_MS, async () => {
     let chosen: NewWaveEvent[] | null;
     if (typeof events === "function") {
       const file = await readWave(id);
@@ -320,13 +280,8 @@ export async function appendWaveEvents(id: string, events: NewWaveEvent[] | ((fo
     }
     const at = new Date().toISOString();
     const written = chosen.map((event) => ({ ...event, at: event.at ?? at }) as WaveEvent);
-    let handle;
-    try {
-      handle = await open(wavePath(id), "r+");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new FactoryError("not_found", `no wave ${id}`);
-      throw error;
-    }
+    const handle = await ifMissing(open(wavePath(id), "r+"), null);
+    if (handle === null) throw new FactoryError("not_found", `no wave ${id}`);
     try {
       const { size } = await handle.stat();
       const last = Buffer.alloc(1);
@@ -345,42 +300,29 @@ export async function appendWaveEvents(id: string, events: NewWaveEvent[] | ((fo
 export async function readWave(id: string): Promise<WaveFile> {
   const path = wavePath(id);
   if (!isWaveId(id)) throw new FactoryError("not_found", `${id} is not a wave id`);
-  let text: string;
-  try {
-    text = await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new FactoryError("not_found", `no wave ${id}`);
-    throw error;
-  }
-  try {
-    return parseWaveFile(text);
-  } catch (error) {
-    throw new Error(`${path}: ${errorText(error)}`);
-  }
+  const text = await ifMissing(readFile(path, "utf8"), null);
+  if (text === null) throw new FactoryError("not_found", `no wave ${id}`);
+  // Line 1 the declaration, then the events; a torn append is skipped.
+  const [declaration, ...events] = jsonLines(text);
+  if (declaration === undefined) throw new Error(`${path}: the file has no declaration`);
+  return { declaration: declaration as unknown as WaveDeclaration, events: events as unknown as WaveEvent[] };
 }
 
-/** Every wave, oldest first; only those of `repo` when given. Files that are no valid wave are skipped. */
+/** Every wave, oldest first; only those of `repo` when given. Entries that are no valid wave (a home deleted by hand) are skipped. */
 export async function listWaves(repo?: string): Promise<WaveFile[]> {
-  let names: string[];
-  try {
-    names = await readdir(wavesDir());
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
   const waves: WaveFile[] = [];
-  for (const name of names) {
-    if (!name.endsWith(".jsonl")) continue;
-    const wave = await readWave(name.slice(0, -".jsonl".length)).catch(() => undefined);
+  for (const name of await ifMissing(readdir(wavesDir()), [])) {
+    if (!isWaveId(name)) continue;
+    const wave = await readWave(name).catch(() => undefined);
     if (wave !== undefined && (repo === undefined || wave.declaration.repo === repo)) waves.push(wave);
   }
   return waves.sort((a, b) => a.declaration.createdAt.localeCompare(b.declaration.createdAt));
 }
 
-/** Removes the wave's file, its runner log, its locks, its poke marker and its reviews. Its tasks and branch stay. */
+/** Removes the wave's link, its runner log, its locks and its poke marker. Its home, tasks and branch stay. */
 export async function removeWave(id: string): Promise<void> {
   if (!isWaveId(id)) return;
-  for (const path of [wavePath(id), waveLogPath(id), waveLockPath(id), waveLogLockPath(id), wavePokePath(id), waveReviewsDir(id)]) await rm(path, { recursive: true, force: true });
+  for (const path of [waveDir(id), waveLogPath(id), waveLockPath(id), waveLogLockPath(id), wavePokePath(id)]) await rm(path, { recursive: true, force: true });
 }
 
 /**

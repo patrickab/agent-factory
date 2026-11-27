@@ -144,7 +144,7 @@ lines list only blocker and major findings: only they reject).
 | `tasks.diff` | `{id}` | `{diff, files: {path, added, removed}[]}` | file list with counts; the patch only in the full view |
 | `tasks.message` | `{id, text}` | `TaskView` | `sent to task 4ae7325b  running  round 1` |
 | `tasks.approve` · `tasks.retry` · `tasks.cancel` | `{id}` | `TaskView` | `task 4ae7325b  merging` · `... running  round 3` · `... cancelled` |
-| `tasks.remove` | `{id, force?}` | `{removed: string, dropped: string \| null, archive?: string}` | `removed task 4ae7325b` (+ ` · dropped: 1 unmerged commit ...`; + `archive: failed: <why>` when `force` removed it though its archive failed) |
+| `tasks.remove` | `{id, force?}` | `{removed: string, dropped: string \| null}` | `removed task 4ae7325b` (+ ` · dropped: 1 unmerged commit ...`) |
 | `tasks.wait` | `{ids? \| tag? \| wave?, timeoutMs?}` | `{tasks: TaskView[], waves: WaveView[], attention: string[], timedOut: boolean}` | only what needs attention (below) |
 
 ```
@@ -187,7 +187,7 @@ tasks.wait ...                       (limit reached)
 | `waves.update` | `{id, title?, request?}` | `{wave: WaveView, changed: boolean}` | the wave line, `updated, the next review reads it` · `nothing changed` |
 | `tasks.update` | `{id, title?, request?, after?, model?}` | `{wave: WaveView, key, changed: boolean, delivery: "pending"\|"sent"\|"kept"\|"starting"}` | the wave line, `task docs updated, <starts with it \| its coder was told \| its coder is told at its next turn \| its coder is told as it starts>` · `task docs: nothing changed` |
 | `contracts.apply` | `{store, name, op}` | `{store, name, changed: string[], notified, kept, done: {wave, tag, key, task}[]}` | `contract core: 1 fact changed · told: factory/w1:docs · next turn: ... · done, may need a follow-up task: ...` · `contract core: nothing changed` |
-| `waves.remove` | `{id, force?}` | `{removed: string, archive?: string}` | `removed wave 3f2a91c0` (+ `archive: failed: <why>` when `force` removed it though its archive failed) |
+| `waves.remove` | `{id, force?}` | `{removed: string}` | `removed wave 3f2a91c0` |
 
 ```
 waves.list {repo}

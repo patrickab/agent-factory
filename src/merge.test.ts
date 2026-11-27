@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_PROTECTED, protectedPaths, type FactoryConfig } from "./config.ts";
-import { abortLeftoverRebase, LOCKFILES, taskBase, taskDiff, taskGit } from "./git.ts";
+import { abortLeftoverRebase, taskBase, taskDiff, taskGit } from "./git.ts";
 import { MERGE_ATTEMPTS, mergeTask, rebaseWorktree, type MergeInput, type MergeOutcome } from "./merge.ts";
 import { joinQueue, leaveQueue, queueAhead } from "./queue.ts";
 import { runRound, type PipelineSteps } from "./pipeline.ts";
@@ -24,7 +24,7 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const runner = new CommandRunner();
 const settings: Settings = { branch: "main", merge: "auto", maxRounds: 3, review: false, models: {} };
-const noGates: FactoryConfig = { hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
+const noGates: FactoryConfig = { hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED };
 /** `noGates` whose round and merge gates are both `gates`, as a `factory.yaml` without `merge_gates` reads. */
 const gated = (gates: string[][], rest: Partial<FactoryConfig> = {}): FactoryConfig => ({ ...noGates, gates, merge_gates: gates, ...rest });
 

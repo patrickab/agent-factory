@@ -93,17 +93,15 @@ scenario("S6 a cancelled conflict task restores the wave's branch, the wave bloc
 {
   let release = () => {};
   const held = new Promise<void>((resolve) => (release = resolve));
+  const results: string[] = [];
   scenario(
-    "S9 a wave runner stopped mid-review: interrupted, one notice, attention; waves.retry lands it once",
-    async (call) => {
-      if (call.role === "reviewer") await held;
-      return writesNamed(call);
-    },
+    "S9 a wave runner stopped mid-review: interrupted, one notice, attention; waves.retry lands it once; no resumed review sees an earlier review's tool output",
+    ({ role, prompt }) => (role === "reviewer" ? [{ name: "read_diff", args: {} }] : prompt.includes("WRITE b.txt") ? [write("b.txt", "DIFF-SECRET\n")] : undefined),
     async (c) => {
       await c.act("repos.add");
       const before = c.git("rev-parse", "main");
       const { wave } = await c.act("waves.start", { tag: "s9", title: "wave", request: "review", tasks: [{ key: "x", title: "feat: add b", request: "WRITE b.txt" }] });
-      await c.until(() => c.calls.some((call) => call.role === "reviewer"));
+      await c.until(() => results.length > 0);
       await terminate(wave.id);
       const waited = await c.act("tasks.wait", { wave: wave.id, timeoutMs: 30_000 });
       expect(waited.attention).toEqual([wave.id]);
@@ -111,8 +109,23 @@ scenario("S6 a cancelled conflict task restores the wave's branch, the wave bloc
       await c.act("waves.retry", { id: wave.id });
       await c.act("tasks.wait", { wave: wave.id, timeoutMs: 60_000 });
       expect((await c.act("waves.get", { id: wave.id })).wave.stage).toBe("merged");
-      expect([c.git("rev-parse", "main~1"), c.git("show", "main:b.txt")]).toEqual([before, "b.txt"]);
+      expect([c.git("rev-parse", "main~1"), c.git("show", "main:b.txt")]).toEqual([before, "DIFF-SECRET"]);
       expect(events(c.notices)).toEqual([`wave:${wave.id}:interrupted`, `wave:${wave.id}:merged`]);
+      // The review cut short, its retry, the fit pass: each resumes the session with the earlier tool results (read_diff;
+      // read_diff and submit_verdict), never their text.
+      expect(results.every((result) => result.includes("DIFF-SECRET"))).toBe(true);
+      const reviews = c.calls.filter((call) => call.role === "reviewer").map((call) => (JSON.parse(call.request) as { messages: { role: string }[] }).messages);
+      expect(reviews.map((messages) => messages.filter((message) => message.role === "tool").length)).toEqual([0, 1, 3]);
+      for (const messages of reviews) expect(JSON.stringify(messages)).not.toContain("DIFF-SECRET");
+    },
+    {
+      afterTool: async ({ role, prompt }) => {
+        if (role !== "reviewer") return undefined;
+        results.push(prompt);
+        if (results.length > 1) return verdict();
+        await held;
+        return undefined;
+      },
     },
   );
 }

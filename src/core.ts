@@ -23,17 +23,18 @@
  * - Imports only Bun, `node:` modules and plugin modules that do the same: the deployed plugin has no `node_modules`
  * - The actions come from the features (`features.ts`): each registers its specs, handlers and views (`feature.ts`)
  * - Cut by area, this module keeps `ACTIONS`, the params check and `callAction`, and re-exports what clients import:
- *   `core-shared.ts` (`FactoryError`, the params' helpers), `core-settings.ts` (models, repos, branches, settings,
+ *   `core-shared.ts` (the params' helpers), `core-settings.ts` (models, repos, branches, settings,
  *   config), `core-tasks.ts` (`tasks.*`, `TaskView`), `core-wait.ts` (`tasks.wait`), `core-waves.ts` (`waves.*`,
  *   `WaveView`, what the wave's runner asks)
  */
-import { FactoryError, oneLine, type Handler, type Params } from "./core-shared.ts";
+import { oneLine, type Handler, type Params } from "./core-shared.ts";
 import type { ActionSpec, Feature } from "./feature.ts";
 import { FEATURES } from "./features.ts";
 import { TaskBusyError } from "./tasks.ts";
-import { errorText, isRecord } from "./util.ts";
+import { errorText, FactoryError, isRecord } from "./util.ts";
 
-export { FactoryError, oneLine, type FactoryErrorCode, type FactoryErrorDetail } from "./core-shared.ts";
+export { oneLine } from "./core-shared.ts";
+export { FactoryError, type FactoryErrorCode, type FactoryErrorDetail } from "./util.ts";
 export type { ActionSpec } from "./feature.ts";
 export type { TaskActionName, TaskView, TimelineEntry, TimelineKind } from "./core-tasks.ts";
 export { noticeInputs, pokeQueuedAfter, queueLook, startQueuedWave, startWaveTasks, taskWave, waveBranchName, waveMergeRefusal, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";

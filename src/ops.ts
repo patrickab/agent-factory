@@ -11,6 +11,7 @@ import { initDraft } from "./draft.ts";
 import {
   abortLeftoverRebase,
   git,
+  LOCKFILES,
   nulList,
   primaryCheckout,
   rebaseInProgress,
@@ -210,7 +211,7 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
     pendingMessages: () => deps.hasPendingMessages(),
     config: () => taskFilesNow.config,
     runCommand: (argv, env) => runner.run(argv, { cwd: root, ...(env ? { env } : {}) }),
-    diff: async () => taskDiff(runner.run, root, await taskBase(runner.run, root, task), taskFilesNow.config.lockfiles),
+    diff: async () => taskDiff(runner.run, root, await taskBase(runner.run, root, task)),
     review: (round, diff) =>
       runReview({
         exec: runner.run,
@@ -281,9 +282,7 @@ async function landedMerge(deps: OpsDeps, current: Snapshot): Promise<Draft[] | 
   const target = `refs/heads/${current.task.mainBranch}`;
   if ((await exec(["git", "merge-base", "--is-ancestor", intent.commit, target], { cwd: primary })).exitCode !== 0) return undefined;
   const changed = nulList(await git(exec, primary, ["diff", "--no-renames", "--name-only", "-z", intent.before, intent.commit]));
-  // The rules of the run the merge belonged to; an unreadable `factory.yaml` throws (the caller blocks the task as infra).
-  const lockfiles = (await taskFiles(deps, current.task)).config.lockfiles;
-  const error = changed.some((path) => lockfiles.includes(basename(path))) ? "after_merge did not run: the session ended during the merge" : null;
+  const error = changed.some((path) => LOCKFILES.includes(basename(path))) ? "after_merge did not run: the session ended during the merge" : null;
   const merge: MergeData = { ok: true, commit: intent.commit, error, depsSynced: false };
   return [customDraft("factory-merge", merge), stateDraft("done", current.round, error ? "merged, after_merge failed" : "merged")];
 }

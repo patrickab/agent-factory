@@ -11,13 +11,10 @@
  *   removed, and a task outside a wave never targets an open wave's branch (invariant 13); after an action that runs a
  *   wave's task again its wave's runner is poked
  */
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
-import { archiveTask } from "./archive.ts";
-import { FactoryError, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler, type Params } from "./core-shared.ts";
-import { requireFactoryModels } from "./core-settings.ts";
+import { readFile, stat, truncate } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { byId, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler } from "./core-shared.ts";
 import { diffFileCounts, git, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
 import {
   defaultBranch,
@@ -36,10 +33,11 @@ import {
 } from "./launch.ts";
 import { inboxReadPath, readFactoryStates, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { runCommand } from "./run.ts";
-import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
-import { COMMIT_ASK_TYPE, FACTORY_TURN_STATES, isFactoryPrompt, messageText, minorFindings, normalizeModels, parseSettingsFields, RESTING_STATES, type Finding, type MinorFinding, type ReviewData, type Settings, type State } from "./state.ts";
+import { requireModels } from "./models.ts";
+import { checkSettings, factoryHome, loadSettings, resolveSettings } from "./settings.ts";
+import { COMMIT_ASK_TYPE, FACTORY_TURN_STATES, isFactoryPrompt, messageText, minorFindings, RESTING_STATES, type Finding, type MinorFinding, type ReviewData, type Settings, type State } from "./state.ts";
 import { listTasks, lockTask, tagInGroup, TaskBusyError, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
-import { cents, errorText, isRecord } from "./util.ts";
+import { cents, errorText, FactoryError, isRecord, jsonLines, writeAtomic } from "./util.ts";
 import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
 import { pokeWave, type RunnerSnapshot } from "./wave-poke.ts";
 import { addScoutUsage, cancelScouts, scoutUsage } from "./scouts.ts";
@@ -109,23 +107,15 @@ export interface TimelineEntry {
 
 /** The task whose id is `id` or starts with it. */
 export async function findTask(id: unknown): Promise<TaskRecord> {
-  const wanted = nonEmpty(id)?.trim();
-  if (wanted === undefined) throw new FactoryError("invalid", "the id of a task must not be empty");
-  const tasks = await listTasks();
-  const exact = tasks.find((task) => task.id === wanted);
-  if (exact) return exact;
-  const matches = tasks.filter((task) => task.id.startsWith(wanted));
-  if (matches.length === 0) {
+  try {
+    return byId(await listTasks(), (task) => task.id, id, "task");
+  } catch (error) {
+    const wanted = nonEmpty(id)?.trim();
+    if (!(error instanceof FactoryError) || error.code !== "not_found" || wanted === undefined) throw error;
     const pending = await pendingWaveTask(wanted);
-    if (pending !== undefined) {
-      throw new FactoryError("refused", `task ${pending.id.slice(0, SHORT_ID_CHARS)} (${pending.key} of wave ${pending.wave.slice(0, SHORT_ID_CHARS)}) has not started yet: tasks.update changes it, waves.get shows it`);
-    }
-    throw new FactoryError("not_found", `no task has an id starting with "${wanted}"`);
+    if (pending === undefined) throw error;
+    throw new FactoryError("refused", `task ${pending.id.slice(0, SHORT_ID_CHARS)} (${pending.key} of wave ${pending.wave.slice(0, SHORT_ID_CHARS)}) has not started yet: tasks.update changes it, waves.get shows it`);
   }
-  if (matches.length > 1) {
-    throw new FactoryError("invalid", `"${wanted}" matches ${matches.length} tasks (${matches.map((task) => task.id).join(", ")}), give more of the id`);
-  }
-  return matches[0];
 }
 
 /** The pending task of a wave whose declared id is `wanted` or starts with it (the first such), else undefined. */
@@ -136,21 +126,6 @@ export async function pendingWaveTask(wanted: string): Promise<{ id: string; key
     }
   }
   return undefined;
-}
-
-/** The session file's entries, a torn or invalid line skipped. */
-function parseEntries(text: string): Record<string, unknown>[] {
-  const entries: Record<string, unknown>[] = [];
-  for (const line of text.split("\n")) {
-    if (line.trim() === "") continue;
-    try {
-      const entry: unknown = JSON.parse(line);
-      if (isRecord(entry)) entries.push(entry);
-    } catch {
-      // a line being written
-    }
-  }
-  return entries;
 }
 
 function numberOr0(value: unknown): number {
@@ -298,47 +273,25 @@ function summaryCachePath(sessionPath: string): string {
   return join(factoryHome(), "cache", "sessions", `${basename(sessionPath)}.json`);
 }
 
-/** Where the summary of an archived session file is kept: keyed by its whole path (archives share file names). */
-function archivedSummaryCachePath(sessionPath: string): string {
-  return join(factoryHome(), "cache", "sessions", "archive", `${createHash("sha256").update(sessionPath).digest("hex")}.json`);
-}
-
 /**
  * The summary of the session file `sessionPath` (none: empty). A finished task's (`done`, `cancelled`) is kept on disk
  * with the file's size and mtime and read from there while both are the same: a listing does not read and parse the
- * sessions of every task ever run again. `archived`: an archive's copy, kept whatever its state, keyed by its path.
+ * sessions of every task ever run again.
  */
-async function sessionSummary(sessionPath: string | null, archived = false): Promise<SessionSummary> {
+async function sessionSummary(sessionPath: string | null): Promise<SessionSummary> {
   if (sessionPath === null) return summarize([]);
   const file = await stat(sessionPath).catch(() => null);
-  if (archived && file === null) return summarize([]);
-  const cachePath = archived ? archivedSummaryCachePath(sessionPath) : summaryCachePath(sessionPath);
+  const cachePath = summaryCachePath(sessionPath);
   if (file !== null) {
     const cached: unknown = await readFile(cachePath, "utf8").then(JSON.parse, () => null).catch(() => null);
     if (isRecord(cached) && cached.size === file.size && cached.mtimeMs === file.mtimeMs && isRecord(cached.summary)) return cached.summary as unknown as SessionSummary;
   }
-  const summary = summarize(parseEntries(await readFile(sessionPath, "utf8")));
-  if (file !== null && (archived || (summary.last !== null && FINAL_STATES.includes(summary.last.state)))) {
-    const temporary = `${cachePath}.${process.pid}.${crypto.randomUUID()}`;
-    try {
-      await mkdir(dirname(cachePath), { recursive: true });
-      await writeFile(temporary, JSON.stringify({ size: file.size, mtimeMs: file.mtimeMs, summary }), "utf8");
-      await rename(temporary, cachePath);
-    } catch {
-      // Only a cache: the next listing reads the session again.
-      await rm(temporary, { force: true }).catch(() => undefined);
-    }
+  const summary = summarize(jsonLines(await readFile(sessionPath, "utf8")));
+  if (file !== null && summary.last !== null && FINAL_STATES.includes(summary.last.state)) {
+    // Only a cache: on a failure the next listing reads the session again.
+    await writeAtomic(cachePath, JSON.stringify({ size: file.size, mtimeMs: file.mtimeMs, summary })).catch(() => undefined);
   }
   return summary;
-}
-
-/**
- * What an archived task's session file (`archive.ts`) says for its wave's view: its last state (null: none), its
- * unrounded usage, its minor findings. A missing file says nothing.
- */
-export async function archivedSessionSummary(sessionPath: string): Promise<{ state: State | null; usage: TaskView["usage"]; minors: TaskView["minors"] }> {
-  const summary = await sessionSummary(sessionPath, true);
-  return { state: summary.last?.state ?? null, usage: summary.usage, minors: summary.minors };
 }
 
 /** The task as clients see it. `knownWaveStage`: its wave's stage, read already; `snapshot`: the runners, looked up already. */
@@ -568,7 +521,7 @@ async function readTimeline(record: TaskRecord, since: number): Promise<{ entrie
   const end = bytes.lastIndexOf(0x0a) + 1;
   if (end === 0) return { entries: [], next: since };
   const entries: TimelineEntry[] = [];
-  for (const entry of parseEntries(bytes.subarray(0, end).toString("utf8"))) {
+  for (const entry of jsonLines(bytes.subarray(0, end).toString("utf8"))) {
     const kind = timelineKind(entry);
     if (kind) entries.push({ at: typeof entry.timestamp === "string" ? entry.timestamp : "", ...kind });
   }
@@ -733,19 +686,11 @@ export const TASK_HANDLERS = {
     if (title === undefined) throw new FactoryError("invalid", "tasks.start needs a title that is not empty");
     if (request === undefined) throw new FactoryError("invalid", "tasks.start needs a request that is not empty");
     const tag = tagParam("tasks.start", params.tag);
-    let overrides: StoredSettings = {};
-    try {
-      if (params.overrides !== undefined) {
-        const { models, ...fields } = parseSettingsFields(params.overrides as Params, "overrides.");
-        overrides = models === undefined ? fields : { ...fields, models: normalizeModels(models) };
-      }
-    } catch (error) {
-      throw new FactoryError("invalid", errorText(error));
-    }
+    const overrides = checkSettings(params.overrides, "task", "overrides.");
     const repo = await primaryOf(params.repo as string, cwd);
     const stored = await loadSettings(repo);
-    const { coder, reviewer } = resolveSettings(stored, overrides, "").models;
-    await requireFactoryModels({ coder, reviewer });
+    const { big, reviewer } = resolveSettings([stored, overrides], "").models;
+    await requireModels({ big, reviewer });
     // The target as `launchTask` resolves it; a missing default branch is its refusal.
     const target = overrides.branch ?? stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
     if (target !== undefined) await requireNoOpenWaveBranch(repo, target);
@@ -795,11 +740,8 @@ export const TASK_HANDLERS = {
       },
       async () => {
         const dropped = await droppedWork(record, params.force === true);
-        // A task outside a wave is archived before anything is deleted (a wave's tasks go with the wave's archive).
-        const archive = record.wave !== null ? null : await archiveTask(record).then(() => null, (error: unknown) => oneLine(errorText(error)));
-        if (archive !== null && params.force !== true) throw new FactoryError("failed", `task ${shortId(record)}: the archive failed: ${archive}; nothing was deleted`, { force: true });
         await deleteTask(record);
-        return archive === null ? { removed: record.id, dropped } : { removed: record.id, dropped, archive: `failed: ${archive}` };
+        return { removed: record.id, dropped };
       },
     );
   },

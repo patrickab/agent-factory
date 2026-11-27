@@ -9,8 +9,8 @@
  *   at most `DELIVERIES` times
  * - One reviewer session per wave: `--session-id` = the wave's id, `--session-dir` and working directory its reviews
  *   directory, the model, role prompt (from the wave's base) and tools the same at every resume,
- *   `PI_CACHE_RETENTION=long`, one process per review. Before each resume `stubEarlierRounds` replaces every earlier
- *   tool result by a `[reviewed]` stub: no earlier diff stays in the context
+ *   `PI_CACHE_RETENTION=long`, one process per review. Its extension (`pi/reviewer-tool.ts`) sends every earlier tool
+ *   result as a `[reviewed]` stub: no earlier diff stays in the context
  * - The diff reaches the reviewer only through `read_diff` (`REVIEW_DIFF_ENV`): the task's worktree since the tree the
  *   reviewer last judged for it while the task's base stayed, else since its base. The prompt holds the task's request
  *   and the wave's contracts (read fresh with `readContract`; only when their text changed since the last review)
@@ -22,12 +22,10 @@ import { loadTaskFiles } from "./config.ts";
 import { readContract, stampOf, type ContractFacts } from "./contracts.ts";
 import { git, snapshotTree, treeDiff } from "./git.ts";
 import { liveRunners, messageTask, type RunnerEnv } from "./launch.ts";
-import { REVIEW_DIFF_ENV } from "./review-diff.ts";
-import { STUB_PREFIX, stubEarlierRounds } from "./review-session.ts";
+import { REVIEW_DIFF_ENV, STUB_PREFIX } from "./review-diff.ts";
 import { readReviewerOutput, VERDICT_TOOL } from "./review.ts";
 import type { Exec } from "./run.ts";
 import { lastFactoryState } from "./runner.ts";
-import { resolveModels } from "./settings.ts";
 import { approvedFrom, type Finding, type ReviewData, type ReviewStatus } from "./state.ts";
 import { listTasks, type TaskRecord } from "./tasks.ts";
 import { errorText } from "./util.ts";
@@ -116,17 +114,15 @@ interface ReviewerRun {
 }
 
 /**
- * Resumes the wave's reviewer session on `prompt` with `diffFile` behind `read_diff`, after stubbing every earlier tool
- * result; `taskId` the task under review (null: the wave's fit pass). Null when cut short.
+ * Resumes the wave's reviewer session on `prompt` with `diffFile` behind `read_diff`; `taskId` the task under review
+ * (null: the wave's fit pass). Null when cut short.
  */
 async function runWaveReviewer(fold: StartedWaveFold, prompt: string, diffFile: string, taskId: string | null, deps: ReviewEachDeps): Promise<ReviewerRun | null> {
   const { exec } = deps;
   const dir = waveReviewsDir(fold.id);
   // The wave's base: the same role prompt at every resume of the session.
   const { prompts } = await loadTaskFiles(exec, fold.repo, fold.base);
-  const existing = await sessionFile(dir, fold.id);
-  if (existing !== undefined) stubEarlierRounds(existing);
-  const model = resolveModels([fold.overrides.models]).reviewer ?? null;
+  const model = fold.overrides.models?.reviewer ?? null;
   const argv = ["pi", "--mode", "json", "-p", "--tools", REVIEWER_TOOLS, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
   argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", dir, "--session-id", fold.id);
   if (model) argv.push("--model", model);
@@ -166,13 +162,11 @@ async function reviewTask(fold: StartedWaveFold, key: string, record: TaskRecord
   await mkdir(dir, { recursive: true });
   const worktree = record.worktree;
   const base = await git(exec, worktree, ["merge-base", "HEAD", `refs/heads/${fold.branch}`]);
-  // The wave's base: the same lockfiles at every review.
-  const { config } = await loadTaskFiles(exec, fold.repo, fold.base);
   const tree = await snapshotTree(exec, worktree);
   const reviews = fold.taskReviews ?? [];
   const previous = reviews.filter((review) => review.taskId === record.id && review.round < round).at(-1);
   const sinceTree = previous !== undefined && previous.base === base ? previous.tree : base;
-  const diff = await treeDiff(exec, worktree, sinceTree, tree, config.lockfiles);
+  const diff = await treeDiff(exec, worktree, sinceTree, tree);
   const diffFile = join(dir, `${key}-round-${round}.diff.json`);
   await writeFile(diffFile, JSON.stringify({ base: diff.base, paths: diff.paths, patch: diff.patch }));
   const contracts = await contractsText(fold);

@@ -3,7 +3,8 @@ import { SETTINGS_HANDLERS } from "./core-settings.ts";
 import { card, type CardRow } from "./cards.ts";
 import { plural } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
-import { feature, REPO, SETTINGS_PROPERTIES, spec, SQUASH } from "./feature.ts";
+import { feature, REPO, spec } from "./feature.ts";
+import { schemaOf } from "./settings.ts";
 import type { Handlers } from "./feature.ts";
 
 type SettingsAnswer = { stored: Record<string, unknown>; resolved: Record<string, unknown>; defaults: Record<string, unknown> };
@@ -18,7 +19,7 @@ function settingsRows(lines: string[]): CardRow[] {
 
 const fencedYaml = (text: string | null): string | undefined => (text === null || text.trim() === "" ? undefined : `\`\`\`yaml\n${text.trimEnd()}\n\`\`\``);
 
-/** `key: value`, `models.coder: x`; `(default)` after a value not stored. */
+/** `key: value`, `models.big: x`; `(default)` after a value not stored. */
 function settingsLines(answer: SettingsAnswer, only?: Set<string>): string[] {
   const lines: string[] = [];
   for (const [key, value] of Object.entries(answer.resolved)) {
@@ -28,8 +29,6 @@ function settingsLines(answer: SettingsAnswer, only?: Set<string>): string[] {
       const entries = Object.entries(value as Record<string, unknown>);
       if (entries.length === 0) lines.push(`${key}: none${key in answer.stored ? "" : " (default)"}`);
       for (const [inner, innerValue] of entries) {
-        // `big` only repeats `coder` (its alias).
-        if (key === "models" && inner === "big") continue;
         lines.push(`${key}.${inner}: ${String(innerValue)}${inner in stored ? "" : " (default)"}`);
       }
       continue;
@@ -55,7 +54,7 @@ export const SETTINGS = feature({
     "settings.get": spec("The repository's stored settings, them resolved over the defaults, and the defaults", { repo: REPO }, ["repo"], false),
     "settings.set": spec(
       "Replace the repository's stored settings",
-      { repo: REPO, settings: { type: "object", description: "The stored settings", properties: { ...SETTINGS_PROPERTIES, preview: { type: "boolean" }, squash: SQUASH } } },
+      { repo: REPO, settings: { type: "object", description: "The stored settings", properties: schemaOf("repo") } },
       ["repo", "settings"],
       true,
     ),

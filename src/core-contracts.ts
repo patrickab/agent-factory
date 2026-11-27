@@ -10,13 +10,12 @@
  *   get nothing: they read the contract at their launch. Done tasks are answered and reported (a `contract` event
  *   on their wave, `notify.ts`)
  */
-import { contractKind, contractNote, CONTRACT_DIR, factChanges, isContractName, memoryStoreOnPath, readContract, stampOf, withContractsLock } from "./contracts.ts";
-import { FactoryError, nonEmpty, oneLine, type Handler, type Params } from "./core-shared.ts";
+import { contractKind, contractNote, CONTRACT_DIR, factChanges, isContractName, memoryStore, memoryStoreOnPath, readContract, stampOf, withContractsLock } from "./contracts.ts";
+import { nonEmpty, oneLine, type Handler, type Params } from "./core-shared.ts";
 import { messageTask } from "./launch.ts";
-import { runCommand } from "./run.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, readTask, writeTask, type TaskRecord } from "./tasks.ts";
-import { isRecord, outputTail } from "./util.ts";
+import { FactoryError, isRecord, outputTail } from "./util.ts";
 import { appendWaveEvent, foldWave, listWaves } from "./waves.ts";
 
 const OPS = ["add", "update", "retire", "write_doc"];
@@ -77,8 +76,8 @@ async function applyContract(params: Params): Promise<unknown> {
   return withContractsLock(async () => {
     const op = await storeOp(store, name, params.op);
     const before = await readContract(store, name);
-    const applied = await runCommand(["memory-store", "apply", store, "--ops", JSON.stringify([op])], { cwd: "/", timeoutMs: 60_000 });
-    if (applied.exitCode !== 0) throw new FactoryError("failed", `memory-store apply: ${oneLine(outputTail(applied.output, 500))}`);
+    const applied = await memoryStore(["apply", store, "--ops", JSON.stringify([op])]);
+    if (!applied.ok) throw new FactoryError("failed", `memory-store apply: ${oneLine(outputTail(applied.output, 500))}`);
     const after = await readContract(store, name);
     const changes = factChanges(before, after);
     const answer = { store, name, changed: changes.map((change) => change.path), notified: [] as Listed[], kept: [] as Listed[], done: [] as Listed[] };

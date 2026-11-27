@@ -3,7 +3,7 @@ import { expect } from "bun:test";
 import { events, scenario, verdict, writesNamed, type ToolCall } from "./scenario-kit.ts";
 
 scenario(
-  "S4 a wave of two chained tasks squashes onto the target, a parallel wave lands on top; a removed wave's cost still reads",
+  "S4 a wave of two chained tasks squashes onto the target, a parallel wave lands on top",
   writesNamed,
   async (c) => {
     await c.act("repos.add");
@@ -32,9 +32,6 @@ scenario(
     expect(c.git("rev-list", "--merges", "--count", "main")).toBe("0");
     // Exactly the two merges: no `interrupted` for a task or wave whose runner ended after its last state.
     expect(events(c.notices).sort()).toEqual([`wave:${a.id}:merged`, `wave:${b.id}:merged`].sort());
-    // force: a wave rebased onto a moved target leaves its tasks' commits off its branch (an open finding).
-    await c.act("waves.remove", { id: a.id, force: true });
-    expect((await c.act("waves.get", { id: a.id })).wave.usage.cost).toBe(doneA.usage.cost);
     expect(doneA.usage.cost).toBeGreaterThan(0);
   },
 );

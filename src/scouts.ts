@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { factoryHome } from "./settings.ts";
 import { onPath, ownRunner, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { messageText } from "./state.ts";
-import { cents, isRecord } from "./util.ts";
+import { cents, ifMissing, isRecord, readJsonl } from "./util.ts";
 
 export const SCOUT_LIMIT = 4;
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory.
@@ -86,12 +86,7 @@ export function scoutDir(caller: ScoutCaller, id: string): string {
 }
 
 async function listNames(dir: string): Promise<string[]> {
-  try {
-    return (await readdir(dir)).sort();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
+  return (await ifMissing(readdir(dir), [])).sort();
 }
 
 /** The scout directories of `caller`, or of every caller. */
@@ -114,20 +109,6 @@ export type NewScoutEvent = ScoutEvent extends infer E ? (E extends ScoutEvent ?
 
 export async function appendScoutEvent(dir: string, event: NewScoutEvent): Promise<void> {
   await appendFile(join(dir, "events.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
-}
-
-function jsonLines(text: string): Record<string, unknown>[] {
-  const lines: Record<string, unknown>[] = [];
-  for (const line of text.split("\n")) {
-    if (line.trim() === "") continue;
-    try {
-      const value: unknown = JSON.parse(line);
-      if (isRecord(value)) lines.push(value);
-    } catch {
-      // a line being written
-    }
-  }
-  return lines;
 }
 
 function numberOr0(value: unknown): number {
@@ -164,7 +145,7 @@ export function foldScout(events: Record<string, unknown>[]): ScoutFold {
 
 export async function readScout(dir: string): Promise<{ declaration: ScoutDeclaration; fold: ScoutFold }> {
   const declaration = JSON.parse(await readFile(join(dir, "scout.json"), "utf8")) as ScoutDeclaration;
-  const events = jsonLines(await readFile(join(dir, "events.jsonl"), "utf8").catch(() => ""));
+  const events = await readJsonl(join(dir, "events.jsonl"));
   return { declaration, fold: foldScout(events) };
 }
 
@@ -197,7 +178,7 @@ export async function scoutRunnerAlive(pid: number | null, dir: string): Promise
 
 /** The paths `written.jsonl` names, in order, each once. */
 async function writtenPaths(dir: string): Promise<string[]> {
-  const paths = jsonLines(await readFile(join(dir, "written.jsonl"), "utf8").catch(() => "")).flatMap((line) => (typeof line.path === "string" ? [line.path] : []));
+  const paths = (await readJsonl(join(dir, "written.jsonl"))).flatMap((line) => (typeof line.path === "string" ? [line.path] : []));
   return [...new Set(paths)];
 }
 
@@ -316,16 +297,6 @@ export async function startScout(declaration: ScoutDeclaration, env: RunnerEnv =
   await execed(pid, dir);
   await appendScoutEvent(dir, { kind: "runner", pid });
   return dir;
-}
-
-/** The scout directory whose id is `id` or starts with it: `not_found` / `ambiguous` as a string, else the dir. */
-export async function findScoutDir(id: string): Promise<{ dir: string } | { error: "not_found" | "ambiguous"; matches: number }> {
-  const dirs = await scoutDirs();
-  const exact = dirs.find((dir) => dir.endsWith(`/${id}`));
-  if (exact) return { dir: exact };
-  const matches = dirs.filter((dir) => (dir.split("/").at(-1) ?? "").startsWith(id));
-  if (matches.length === 1) return { dir: matches[0] };
-  return { error: matches.length === 0 ? "not_found" : "ambiguous", matches: matches.length };
 }
 
 /** The report of the child's `--mode json` stdout lines: the running usage totals and the last assistant text. */

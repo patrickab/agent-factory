@@ -11,6 +11,7 @@ import { join } from "node:path";
 import type { TaskDiff } from "./git.ts";
 import type { Exec } from "./run.ts";
 import { approvedFrom, type Finding, type ReviewData, type ReviewStatus, type ReviewUsage, type Severity, type Task } from "./state.ts";
+import { jsonLines } from "./util.ts";
 
 export const VERDICT_TOOL = "submit_verdict";
 const REVIEWER_TOOL_EXTENSION = join(import.meta.dirname, "pi", "reviewer-tool.ts");
@@ -70,14 +71,7 @@ export interface ReviewerOutput {
 /** Reads the reviewer's JSONL stdout. Lines that are not JSON are skipped (a killed run ends mid-line). */
 export function readReviewerOutput(stdout: string): ReviewerOutput {
   const output: ReviewerOutput = { findings: null, sessionId: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } };
-  for (const line of stdout.split("\n")) {
-    if (line.trim() === "") continue;
-    let event: any;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
+  for (const event of jsonLines<any>(stdout)) {
     if (event.type === "session" && typeof event.id === "string") output.sessionId = event.id;
     if (event.type === "tool_execution_end" && event.toolName === VERDICT_TOOL && !event.isError) {
       const findings = parseFindings(event.result?.details?.findings);
