@@ -1,10 +1,9 @@
 /** Gate proofs: a branch's merge_gates proven in the background (`gates-prove.ts`). */
-import { proofCard, safeCard } from "./cards.ts";
-import { proofBlock, proofHeader } from "./agent-view.ts";
+import { proofCard } from "./cards.ts";
 import { feature, REPO, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 import { PROOF_HANDLERS, type ProofView } from "./gates-prove.ts";
-import type { Notice } from "./notify.ts";
+import { notice, type Notice } from "./notify.ts";
 
 /** An ended or interrupted proof of a Pi session: key `proof:<id>:<event>`. */
 function proofNotices(proofs: readonly ProofView[]): Notice[] {
@@ -15,7 +14,7 @@ function proofNotices(proofs: readonly ProofView[]): Notice[] {
     const what = event === "passed" ? "pass" : event === "flaky" ? "pass, flaky" : event === "failing" ? "fail" : "were interrupted";
     const title = `the gates of ${proof.branch} ${what}`;
     const tone = event === "failing" || event === "interrupted" ? "attention" : "quiet";
-    notices.push({ key: `proof:${proof.id}:${event}`, origin: proof.origin, text: `factory: ${title}\n${proofBlock(proof)}`, card: safeCard("proof", title, () => proofCard(proof, title, tone)) });
+    notices.push(notice(`proof:${proof.id}:${event}`, proof.origin, title, () => proofCard(proof, title, tone)));
   }
   return notices;
 }
@@ -28,16 +27,11 @@ export const GATES = feature({
       { repo: REPO, branch: { type: "string", description: "The branch whose tip is proven. Default: the repository's branch" } },
       ["repo"],
       true,
+      (_params, result: { proof: ProofView }) => proofCard(result.proof, `proving the gates of ${result.proof.branch}`),
     ),
   },
   get handlers(): Handlers {
     return PROOF_HANDLERS;
-  },
-  renderers: {
-    "gates.prove": (_params, result: { proof: ProofView }) => `started ${proofHeader(result.proof)}`,
-  },
-  cards: {
-    "gates.prove": (_params, result: { proof: ProofView }) => proofCard(result.proof, `proving the gates of ${result.proof.branch}`),
   },
   notices: (items) => proofNotices(items as readonly ProofView[]),
   toolBlurb: '"gates.prove" runs a branch\'s merge_gates in the background before a wave is declared on it: passed, flaky or failing.',

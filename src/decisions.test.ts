@@ -12,7 +12,7 @@ import { taskNotice } from "./notify.ts";
 
 useCoreFixture();
 
-const tool = (params: Record<string, unknown>, origin: string) => callFactoryTool(params, false, { origin }, () => "text");
+const tool = (params: Record<string, unknown>, origin: string) => callFactoryTool(params, false, { origin });
 
 describe("decisions", () => {
   test("an answer to a question names that question's notice key; the log holds it under the session", async () => {

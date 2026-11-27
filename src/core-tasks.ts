@@ -14,7 +14,7 @@
 import { existsSync } from "node:fs";
 import { readFile, stat, truncate } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { byId, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler } from "./core-shared.ts";
+import { byId, nonEmpty, oneLine, primaryOf, tagParam, type Handler } from "./core-shared.ts";
 import { diffFileCounts, git, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
 import {
   defaultBranch,
@@ -37,7 +37,7 @@ import { requireModels } from "./models.ts";
 import { checkSettings, factoryHome, loadSettings, resolveSettings } from "./settings.ts";
 import { COMMIT_ASK_TYPE, FACTORY_TURN_STATES, isFactoryPrompt, messageText, minorFindings, RESTING_STATES, type Finding, type MinorFinding, type ReviewData, type Settings, type State } from "./state.ts";
 import { listTasks, lockTask, tagInGroup, TaskBusyError, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
-import { cents, errorText, FactoryError, isRecord, jsonLines, writeAtomic } from "./util.ts";
+import { cents, errorText, FactoryError, isRecord, jsonLines, short, writeAtomic } from "./util.ts";
 import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
 import { pokeWave, type RunnerSnapshot } from "./wave-poke.ts";
 import { addScoutUsage, cancelScouts, scoutUsage } from "./scouts.ts";
@@ -114,7 +114,7 @@ export async function findTask(id: unknown): Promise<TaskRecord> {
     if (!(error instanceof FactoryError) || error.code !== "not_found" || wanted === undefined) throw error;
     const pending = await pendingWaveTask(wanted);
     if (pending === undefined) throw error;
-    throw new FactoryError("refused", `task ${pending.id.slice(0, SHORT_ID_CHARS)} (${pending.key} of wave ${pending.wave.slice(0, SHORT_ID_CHARS)}) has not started yet: tasks.update changes it, waves.get shows it`);
+    throw new FactoryError("refused", `task ${short(pending.id)} (${pending.key} of wave ${short(pending.wave)}) has not started yet: tasks.update changes it, waves.get shows it`);
   }
 }
 
@@ -389,10 +389,10 @@ function taskActions(view: Omit<TaskView, "actions">, continuable = true, kept =
 async function requireContinuable(record: TaskRecord, what: string): Promise<void> {
   const stage = await taskWaveStage(record);
   if (stage === null || stage === "building") return;
-  const wave = (record.wave ?? "").slice(0, SHORT_ID_CHARS);
+  const wave = short(record.wave);
   throw new FactoryError(
     "refused",
-    `task ${shortId(record)} belongs to wave ${wave}, which is ${stage === "removed" ? "removed" : stage}: its tasks take no more work once it left building, ${what} is refused; give the work to the wave with waves.add`,
+    `task ${short(record.id)} belongs to wave ${wave}, which is ${stage === "removed" ? "removed" : stage}: its tasks take no more work once it left building, ${what} is refused; give the work to the wave with waves.add`,
   );
 }
 
@@ -418,7 +418,7 @@ function stateText(view: TaskView): string {
 function requireState(view: TaskView, allowed: readonly State[], what: string, orInterrupted = false): void {
   if (orInterrupted && view.interrupted) return;
   if (view.state === null || view.interrupted || !allowed.includes(view.state)) {
-    throw new FactoryError("refused", `task ${view.id.slice(0, SHORT_ID_CHARS)} is ${stateText(view)}, ${what}`);
+    throw new FactoryError("refused", `task ${short(view.id)} is ${stateText(view)}, ${what}`);
   }
 }
 
@@ -449,7 +449,7 @@ export async function withTaskLock<T>(record: TaskRecord, check: (view: TaskView
 }
 
 async function requireNoRunner(record: TaskRecord): Promise<void> {
-  if ((await liveRunners(record)).length > 0) throw new FactoryError("busy", `the runner of task ${shortId(record)} is still ending, try again in a few seconds`);
+  if ((await liveRunners(record)).length > 0) throw new FactoryError("busy", `the runner of task ${short(record.id)} is still ending, try again in a few seconds`);
 }
 
 /** A command for a task at rest goes through a new runner; the last one must have ended first. */
@@ -511,7 +511,7 @@ const CUSTOM_KINDS: Record<string, TimelineKind | undefined> = {
 async function readTimeline(record: TaskRecord, since: number): Promise<{ entries: TimelineEntry[]; next: number }> {
   const path = await sessionFilePath(record.sessionDir, record.sessionId);
   if (path === undefined) {
-    if (since > 0) throw new FactoryError("invalid", `task ${shortId(record)} has no session file yet, since must be 0`);
+    if (since > 0) throw new FactoryError("invalid", `task ${short(record.id)} has no session file yet, since must be 0`);
     return { entries: [], next: 0 };
   }
   const size = (await stat(path)).size;
@@ -551,7 +551,7 @@ async function requireRunnerStarted(record: TaskRecord, statesBefore: number): P
       if (await wroteState()) return;
       const log = await readFile(taskLogPath(record.id), "utf8").catch(() => "");
       const last = log.trim().split("\n").at(-1)?.trim().slice(0, 300) ?? "";
-      throw new FactoryError("failed", `the runner of task ${shortId(record)} ended before it ran${last === "" ? "" : ` (${last})`}`);
+      throw new FactoryError("failed", `the runner of task ${short(record.id)} ended before it ran${last === "" ? "" : ` (${last})`}`);
     }
     await Bun.sleep(100);
   }
@@ -580,9 +580,9 @@ export async function cancelTask(record: TaskRecord, env: RunnerEnv | undefined)
 
 /** The check of `tasks.remove` before it looks at the work: refused while the task runs or waits for an answer. */
 export function requireRemovable(view: TaskView): void {
-  if (isActive(view)) throw new FactoryError("refused", `task ${view.id.slice(0, SHORT_ID_CHARS)} is running, cancel it first`);
+  if (isActive(view)) throw new FactoryError("refused", `task ${short(view.id)} is running, cancel it first`);
   if (view.state === "waiting_answer") {
-    throw new FactoryError("refused", `task ${view.id.slice(0, SHORT_ID_CHARS)} waits for the answer to its question, answer it with tasks.message or cancel it first`);
+    throw new FactoryError("refused", `task ${short(view.id)} waits for the answer to its question, answer it with tasks.message or cancel it first`);
   }
 }
 
@@ -590,10 +590,10 @@ export function requireRemovable(view: TaskView): void {
 async function requireNotKeptByWave(record: TaskRecord, view: TaskView): Promise<void> {
   const stage = await taskWaveStage(record);
   if (!keptByWave(view, stage)) return;
-  const wave = (record.wave ?? "").slice(0, SHORT_ID_CHARS);
+  const wave = short(record.wave);
   throw new FactoryError(
     "refused",
-    `task ${shortId(record)} is done in wave ${wave}, which is ${stage}: the wave counts on it (removed, the tasks waiting for it could never start); remove it once the wave is merged or cancelled, or with its wave (waves.remove)`,
+    `task ${short(record.id)} is done in wave ${wave}, which is ${stage}: the wave counts on it (removed, the tasks waiting for it could never start); remove it once the wave is merged or cancelled, or with its wave (waves.remove)`,
   );
 }
 
@@ -604,7 +604,7 @@ export async function droppedWork(record: TaskRecord, force: boolean): Promise<s
   const dropsWork = work.commits > 0 || work.dirty;
   if (dropsWork && !force) {
     const changes = work.dirty ? " and uncommitted changes in its worktree" : "";
-    throw new FactoryError("refused", `task ${shortId(record)} has ${unmergedText(work, target)}${changes}, give force: true to remove it anyway`, { force: true });
+    throw new FactoryError("refused", `task ${short(record.id)} has ${unmergedText(work, target)}${changes}, give force: true to remove it anyway`, { force: true });
   }
   return dropsWork ? `${unmergedText(work, target)}${work.dirty ? " and uncommitted changes" : ""}` : null;
 }
@@ -625,7 +625,7 @@ async function requireNoOpenWaveBranch(repo: string, target: string): Promise<vo
     if (WAVE_FINAL_STAGES.includes(stage)) continue;
     throw new FactoryError(
       "refused",
-      `${target} is the branch of wave ${id.slice(0, SHORT_ID_CHARS)}, which is ${stage}: only the wave's own tasks reach it; give the work to the wave with waves.add`,
+      `${target} is the branch of wave ${short(id)}, which is ${stage}: only the wave's own tasks reach it; give the work to the wave with waves.add`,
     );
   }
 }
@@ -671,8 +671,8 @@ export const TASK_HANDLERS = {
   "tasks.diff": async (params) => {
     const record = await findTask(params.id);
     const target = await taskMainBranch(record.sessionDir, record.sessionId);
-    if (target === undefined) throw new FactoryError("refused", `task ${shortId(record)} has not started yet, so it has no diff`);
-    if (!existsSync(record.worktree)) throw new FactoryError("refused", `the worktree of task ${shortId(record)} is gone (${record.worktree})`);
+    if (target === undefined) throw new FactoryError("refused", `task ${short(record.id)} has not started yet, so it has no diff`);
+    if (!existsSync(record.worktree)) throw new FactoryError("refused", `the worktree of task ${short(record.id)} is gone (${record.worktree})`);
     const base = await git(runCommand, record.worktree, ["merge-base", "HEAD", `refs/heads/${target}`]);
     const tree = await snapshotTree(runCommand, record.worktree);
     const diff = await treeDiff(runCommand, record.worktree, base, tree);
@@ -725,7 +725,7 @@ export const TASK_HANDLERS = {
   "tasks.cancel": async (params, { env }) => {
     const record = await findTask(params.id);
     const before = await taskView(record);
-    if (before.state !== null && FINAL_STATES.includes(before.state)) throw new FactoryError("refused", `task ${shortId(record)} is ${before.state} already`);
+    if (before.state !== null && FINAL_STATES.includes(before.state)) throw new FactoryError("refused", `task ${short(record.id)} is ${before.state} already`);
     await cancelTask(record, env);
     return taskView(record);
   },
@@ -751,8 +751,8 @@ export const TASK_HANDLERS = {
     const text = nonEmpty(params.text);
     if (text === undefined) throw new FactoryError("invalid", "tasks.message needs a text that is not empty");
     const view = await taskView(record);
-    if (view.state === null) throw new FactoryError("refused", `task ${shortId(record)} has not started yet, send the message once it runs`);
-    if (view.state === "merging") throw new FactoryError("refused", `task ${shortId(record)} is merging, send the message when the merge has ended`);
+    if (view.state === null) throw new FactoryError("refused", `task ${short(record.id)} has not started yet, send the message once it runs`);
+    if (view.state === "merging") throw new FactoryError("refused", `task ${short(record.id)} is merging, send the message when the merge has ended`);
     // The answer to its question continues the round it asked in, a wave's task or not; anything else is more work.
     if (view.state !== "waiting_answer") await requireContinuable(record, "a message");
     // `messageTask` takes the task lock itself (resting) or appends to the live runner's inbox (running).

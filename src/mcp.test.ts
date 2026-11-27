@@ -11,7 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { agentView } from "./agent-view.ts";
+import { actionView } from "./factory-tool.ts";
 import { factoryToolParameters } from "./factory-tool.ts";
 import { factoryMcpServer } from "./mcp.ts";
 import { TASK_SESSION_ENV } from "./runner.ts";
@@ -50,7 +50,7 @@ describe("factory-mcp", () => {
     expect(tools.map((tool) => tool.name)).toEqual(["factory"]);
     expect(tools[0].inputSchema).toEqual(factoryToolParameters());
     const read = await client.callTool({ name: "factory", arguments: { action: "models.get" } });
-    expect([Boolean(read.isError), text(read)]).toEqual([false, agentView("models.get", {}, { models: ["a/b"] })]);
+    expect([Boolean(read.isError), text(read)]).toEqual([false, actionView("models.get", {}, { models: ["a/b"] }).text]);
     expect((await client.callTool({ name: "factory", arguments: { action: "repos.add", repo: scratch } })).isError).toBe(true);
     expect((await client.callTool({ name: "nope", arguments: { action: "models.get" } })).isError).toBe(true);
     await client.close();
@@ -76,7 +76,7 @@ describe("factory-mcp", () => {
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["factory"]);
     // No repo given: the server's directory is the repo.
     const added = await client.callTool({ name: "factory", arguments: { action: "repos.add" } });
-    expect(text(added)).toBe(agentView("repos.add", {}, { repo, repos: [repo] }));
+    expect(text(added)).toBe(actionView("repos.add", {}, { repo, repos: [repo] }).text);
     await client.close();
   });
 });

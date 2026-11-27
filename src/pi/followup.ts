@@ -19,7 +19,8 @@ import { runCommand } from "../run.ts";
 import type { StoredSettings } from "../settings.ts";
 import { listTasks } from "../tasks.ts";
 import type { SpawnData } from "../state.ts";
-import { errorText, isRecord } from "../util.ts";
+import { errorText, isRecord, short } from "../util.ts";
+import { toolError, toolText } from "./tool.ts";
 
 /** The system prompt section of a follow-up run on the task merged as `merged`. */
 export function followUpPrompt(merged: string | null): string {
@@ -65,7 +66,7 @@ export function registerNewTaskTool(pi: ExtensionAPI, gate: NewTaskToolGate): vo
       },
     } as never,
     async execute(_toolCallId, params: unknown, signal, _onUpdate, ctx) {
-      const fail = (text: string) => ({ content: [{ type: "text" as const, text: `${NEW_TASK_TOOL}: ${text}` }], details: undefined, isError: true });
+      const fail = (text: string) => toolError(`${NEW_TASK_TOOL}: ${text}`);
       const refusal = gate.refusal();
       if (refusal !== null) return fail(refusal);
       const { title, handoff } = isRecord(params) ? params : {};
@@ -78,7 +79,7 @@ export function registerNewTaskTool(pi: ExtensionAPI, gate: NewTaskToolGate): vo
         const view = await newTaskDeps.callAction("tasks.start", { repo: primary, title, request: handoff, overrides: gate.overrides() }, { cwd: ctx.cwd, signal, origin });
         const id = isRecord(view) && typeof view.id === "string" ? view.id : "";
         gate.spawned({ id, title });
-        return { content: [{ type: "text" as const, text: `started task ${id.slice(0, 8)}: ${title}` }], details: { id, title } };
+        return toolText(`started task ${short(id)}: ${title}`, { id, title });
       } catch (error) {
         return fail(errorText(error));
       }
@@ -125,7 +126,7 @@ export function registerAskSupervisorTool(pi: ExtensionAPI, gate: AskSupervisorT
       properties: { question: { type: "string", description: "The question, self-contained: the supervisor has not seen your work" } },
     } as never,
     async execute(_toolCallId, params: unknown, _signal, _onUpdate, ctx) {
-      const fail = (text: string) => ({ content: [{ type: "text" as const, text: `${ASK_SUPERVISOR_TOOL}: ${text}` }], details: undefined, isError: true });
+      const fail = (text: string) => toolError(`${ASK_SUPERVISOR_TOOL}: ${text}`);
       const refusal = gate.refusal();
       if (refusal !== null) return fail(refusal);
       const { question } = isRecord(params) ? params : {};
@@ -133,7 +134,7 @@ export function registerAskSupervisorTool(pi: ExtensionAPI, gate: AskSupervisorT
       if (lastAssistantToolCalls(ctx) > 1) return fail("call it alone, with no other tool call in the same message: the turn could not end with it");
       if (ctx.hasPendingMessages()) return fail("a message is queued for you: read it first, then ask if the question still stands");
       gate.asked(question, ctx);
-      return { content: [{ type: "text" as const, text: "Question recorded. Stop now: the answer arrives as the next message." }], details: { question }, terminate: true };
+      return { ...toolText("Question recorded. Stop now: the answer arrives as the next message.", { question }), terminate: true };
     },
   });
 }

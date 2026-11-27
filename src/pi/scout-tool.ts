@@ -15,13 +15,15 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { factoryToolError } from "../factory-tool.ts";
+import { present, scoutCard } from "../cards.ts";
+import { actionView, factoryToolError } from "../factory-tool.ts";
+import { scoutEndTitle } from "../feature-scouts.ts";
 import { ACTIONS, callAction } from "../core.ts";
 import { claimNotices } from "../notified.ts";
 import { scoutNoticeKey } from "../notify.ts";
-import { scoutBlock } from "../scout-view.ts";
 import { FINAL_SCOUT_STATES, SCOUT_ID_ENV, type ScoutView } from "../scouts.ts";
-import { isRecord } from "../util.ts";
+import { isRecord, short } from "../util.ts";
+import { toolError, toolText } from "./tool.ts";
 
 export const SCOUT_TOOL_NAME = "scout";
 /** The custom message that carries a scout's report to a coder. */
@@ -69,12 +71,14 @@ export function scoutEnded(scout: ScoutView): boolean {
   return FINAL_SCOUT_STATES.includes(scout.state) || scout.interrupted;
 }
 
-/** `factory: scout <id> reported` (or how it ended) above the scout's block. */
+/** `factory: scout <id> reported` (or how it ended) and its card's text. */
 export function scoutReportText(scout: ScoutView): string {
-  let state: string = scout.state === "done" ? "reported" : scout.state;
-  if (scout.interrupted) state = "was interrupted";
-  return `factory: scout ${scout.id.slice(0, 8)} ${state}\n${scoutBlock(scout)}`;
+  const title = scoutEndTitle(scout);
+  return `factory: ${present(() => scoutCard(scout, title), title).text}`;
 }
+
+/** The agent's text of a `scouts.start` answer. */
+const answerText = (scout: ScoutView, timedOut: boolean) => actionView("scouts.start", {}, { scout, timedOut }).text;
 
 export function createScoutTracker(options: ScoutToolOptions): ScoutTracker {
   const core = options.core ?? CORE;
@@ -102,7 +106,7 @@ export function createScoutTracker(options: ScoutToolOptions): ScoutTracker {
       const holds = coder && (options.holds?.() ?? true);
       const later = holds ? "its report arrives as a message before your turn ends" : coder ? "read its report with scouts.get" : "its report arrives as a factory report";
       if (holds) owed.set(scout.id, scout);
-      if (!isRecord(params) || params.wait !== true) return { text: `${scoutBlock(scout)}\n${later}`, result: { scout, timedOut: false } };
+      if (!isRecord(params) || params.wait !== true) return { text: `${answerText(scout, false)}\n${later}`, result: { scout, timedOut: false } };
       if (!coder) waiting.add(scout.id);
       let view: ScoutView;
       try {
@@ -110,13 +114,13 @@ export function createScoutTracker(options: ScoutToolOptions): ScoutTracker {
       } finally {
         waiting.delete(scout.id);
       }
-      if (!scoutEnded(view)) return { text: `${scoutBlock(view, true)}\n${later}`, result: { scout: view, timedOut: true } };
+      if (!scoutEnded(view)) return { text: `${answerText(view, true)}\n${later}`, result: { scout: view, timedOut: true } };
       if (coder) owed.delete(view.id);
       // The notifier may have claimed it before this call waited for it: then it was delivered there.
       else if ((await claimNotices([{ key: scoutNoticeKey(view.id), origin: ctx.sessionManager.getSessionId(), text: "" }])).length === 0) {
-        return { text: `scout ${view.id.slice(0, 8)} ${view.state}: its report arrived as a factory report`, result: { scout: view, timedOut: false } };
+        return { text: `scout ${short(view.id)} ${view.state}: its report arrived as a factory report`, result: { scout: view, timedOut: false } };
       }
-      return { text: scoutBlock(view), result: { scout: view, timedOut: false } };
+      return { text: answerText(view, false), result: { scout: view, timedOut: false } };
     },
 
     async held(stop) {
@@ -136,22 +140,29 @@ export function createScoutTracker(options: ScoutToolOptions): ScoutTracker {
   };
 }
 
-/** Registers `scout` unless this is a scout's own child; answers the tracker the extension holds the turn end with. */
-export function registerScoutTool(pi: ExtensionAPI, tracker: ScoutTracker): void {
+/**
+ * Registers `scout` unless this is a scout's own child; answers the tracker the extension holds the turn end with.
+ * `review`: a wave's reviewer's scout, which always waits and explores `review.repo()`.
+ */
+export function registerScoutTool(pi: ExtensionAPI, tracker: ScoutTracker, review?: { repo(): Promise<string> }): void {
   if (process.env[SCOUT_ID_ENV] !== undefined) return;
   const { properties, required } = ACTIONS["scouts.start"].params as { properties: Record<string, unknown>; required: string[] };
+  const { wait: _wait, repo: _repo, ...reviewProperties } = properties;
   pi.registerTool({
     name: SCOUT_TOOL_NAME,
     label: "Scout",
-    description: SCOUT_TOOL_DESCRIPTION,
-    promptSnippet: "Ask a read-only scout about the code; wait for its report or let it follow",
-    parameters: { type: "object", required, properties } as never,
+    description: review
+      ? "Send a read-only scout into the work under review: it answers a concern (and questions) from the map of the memory store, explores where the map is not current, writes what it learns there and reports MISSING / DECISIONS / KEY FACTS / MEMORY. The call waits for the report, 15 minutes at the latest."
+      : SCOUT_TOOL_DESCRIPTION,
+    promptSnippet: review ? "Ask a read-only scout about the code and wait for its report" : "Ask a read-only scout about the code; wait for its report or let it follow",
+    parameters: { type: "object", required, properties: review ? reviewProperties : properties } as never,
     async execute(_toolCallId, params: unknown, signal, _onUpdate, ctx) {
       try {
-        const { text, result } = await tracker.call(params, signal, ctx);
-        return { content: [{ type: "text" as const, text }], details: result };
+        const { text, result } = await tracker.call(review ? { ...(isRecord(params) ? params : {}), repo: await review.repo(), wait: true } : params, signal, ctx);
+        if (review && result.timedOut) return toolText(`${answerText(result.scout, true)}\nits report did not arrive in time: go on without it`, result);
+        return toolText(text, result);
       } catch (error) {
-        return { content: [{ type: "text" as const, text: factoryToolError(error) }], details: undefined, isError: true };
+        return toolError(factoryToolError(error));
       }
     },
   });

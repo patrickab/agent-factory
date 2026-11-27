@@ -13,7 +13,7 @@ import { existsSync } from "node:fs";
 import { realpath, rm } from "node:fs/promises";
 import { waveContracts } from "./core-contracts.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
-import { byId, nonEmpty, oneLine, primaryOf, SHORT_ID_CHARS, shortId, tagParam, type Handler } from "./core-shared.ts";
+import { byId, nonEmpty, oneLine, primaryOf, tagParam, type Handler } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, wantedModels } from "./core-settings.ts";
 import { cancelTask, cents, droppedWork, FINAL_STATES, rawUsage, removable, requireRemovable, retryRestingTask, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
 import { git, mergeTrees, uncommittedFiles } from "./git.ts";
@@ -24,7 +24,7 @@ import { requireModels } from "./models.ts";
 import { checkSettings, loadSettings, registeredRepos, resolveSettings, type ModelSize, type StoredSettings } from "./settings.ts";
 import { minorFindings, type MinorFinding } from "./state.ts";
 import { listTasks, sessionTask, tagInGroup, TaskBusyError, type TaskRecord } from "./tasks.ts";
-import { errorText, FactoryError } from "./util.ts";
+import { errorText, FactoryError, short } from "./util.ts";
 import {
   appendWaveEvent,
   appendWaveEvents,
@@ -35,6 +35,7 @@ import {
   readWave,
   removeWave,
   RESTING_WAVE_STAGES,
+  WAVE_ATTENTION_STAGES,
   reviewBegan,
   startableKeys,
   stuckKeys,
@@ -75,7 +76,7 @@ export function waveBranchName(target: string, tag: string): string {
 
 /** The wave's review worktree (`wave-runner.ts`): one per wave, next to the tasks' worktrees. */
 export function waveReviewWorktree(declaration: Pick<WaveDeclaration, "id" | "repo">): string {
-  return worktreePath(declaration.repo, `wave-${declaration.id.slice(0, SHORT_ID_CHARS)}-review`);
+  return worktreePath(declaration.repo, `wave-${short(declaration.id)}-review`);
 }
 
 /** The wave of the task in the Pi session `sessionId`, null outside one. */
@@ -93,17 +94,17 @@ export async function taskWave(sessionId: string): Promise<string | null> {
 export async function waveMergeRefusal(sessionId: string): Promise<string | null> {
   const record = await sessionTask(sessionId);
   if (record === undefined || record.wave === null) return null;
-  const short = record.wave.slice(0, SHORT_ID_CHARS);
+  const shown = short(record.wave);
   let file: WaveFile;
   try {
     file = await readWave(record.wave);
   } catch (error) {
-    if (error instanceof FactoryError && error.code === "not_found") return `its wave ${short} is removed: nothing more reaches its branch`;
+    if (error instanceof FactoryError && error.code === "not_found") return `its wave ${shown} is removed: nothing more reaches its branch`;
     throw error;
   }
   if (!reviewBegan(file.events)) return null;
   const { stage, branch } = foldWave(file.declaration, file.events);
-  return `its wave ${short} is ${stage}, its review began: nothing more reaches its branch ${branch} (the reviewed tree is what merges); give the work to the wave with waves.add`;
+  return `its wave ${shown} is ${stage}, its review began: nothing more reaches its branch ${branch} (the reviewed tree is what merges); give the work to the wave with waves.add`;
 }
 
 /** The wave whose id is `id` or starts with it. */
@@ -126,7 +127,7 @@ async function pokeWaveRunner(id: string, env?: RunnerEnv): Promise<void> {
   try {
     await pokeWave(id, env);
   } catch (error) {
-    throw new FactoryError("failed", `wave ${id.slice(0, SHORT_ID_CHARS)}: its runner did not start (${oneLine(errorText(error))}); a later poke tries again`);
+    throw new FactoryError("failed", `wave ${short(id)}: its runner did not start (${oneLine(errorText(error))}); a later poke tries again`);
   }
 }
 
@@ -162,13 +163,8 @@ function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["u
   return { input: (sum?.input ?? 0) + usage.input, output: (sum?.output ?? 0) + usage.output, cacheRead: (sum?.cacheRead ?? 0) + usage.cacheRead, cacheWrite: (sum?.cacheWrite ?? 0) + usage.cacheWrite, cost: (sum?.cost ?? 0) + usage.cost };
 }
 
-/**
- * A wave as `tasks.wait` judges it: its view, and whether it is stuck: it builds with tasks that can never start while
- * nothing else moves it (`stuckKeys`), or it is queued after a wave that was cancelled or removed (`queueLook`). A
- * stuck wave rests (its runner does too) and needs attention; it is not interrupted.
- */
-/** `events`: the log the view was folded from (a notice keys on it). */
-export type WaveLook = { view: WaveView; stuck: boolean; events: WaveEvent[] };
+/** A wave's view and the log it was folded from (a notice keys on it). */
+export type WaveLook = { view: WaveView; events: WaveEvent[] };
 
 /** The wave as clients see it: its fold, its tasks' states and usage, whether its runner lives. */
 async function waveView(file: WaveFile, all?: WaveFile[], read?: ListingReads): Promise<WaveView> {
@@ -201,18 +197,18 @@ export async function queueStalled(fold: WaveFold, look: { waiting: string[]; ne
 export async function queueLook(fold: WaveFold, all?: readonly WaveFile[]): Promise<{ waiting: string[]; never: string | null }> {
   const waiting: string[] = [];
   for (const id of fold.after) {
-    const short = id.slice(0, SHORT_ID_CHARS);
+    const shown = short(id);
     let file = all?.find((candidate) => candidate.declaration.id === id);
     if (file === undefined) {
       try {
         file = await readWave(id);
       } catch (error) {
-        if (error instanceof FactoryError && error.code === "not_found") return { waiting, never: `it waits for wave ${short}, which was removed: it can never start; waves.cancel or waves.remove it` };
+        if (error instanceof FactoryError && error.code === "not_found") return { waiting, never: `it waits for wave ${shown}, which was removed: it can never start; waves.cancel or waves.remove it` };
         throw error;
       }
     }
     const named = foldWave(file.declaration, file.events);
-    if (named.stage === "cancelled") return { waiting, never: `it waits for wave ${named.tag} (${short}), which was cancelled: it can never start; waves.cancel or waves.remove it` };
+    if (named.stage === "cancelled") return { waiting, never: `it waits for wave ${named.tag} (${shown}), which was cancelled: it can never start; waves.cancel or waves.remove it` };
     if (named.stage !== "merged") waiting.push(id);
   }
   return { waiting, never: null };
@@ -258,7 +254,7 @@ export async function startQueuedWave(id: string): Promise<boolean> {
 export async function pokeQueuedAfter(id: string, env?: RunnerEnv): Promise<string[]> {
   const failures: string[] = [];
   for (const fold of queuedAfter(id, await listWaves())) {
-    await pokeWave(fold.id, env).catch((error: unknown) => failures.push(`wave ${fold.id.slice(0, SHORT_ID_CHARS)}: ${oneLine(errorText(error))}`));
+    await pokeWave(fold.id, env).catch((error: unknown) => failures.push(`wave ${short(fold.id)}: ${oneLine(errorText(error))}`));
   }
   return failures;
 }
@@ -311,7 +307,8 @@ async function lookWave(given: WaveFile, all?: readonly WaveFile[], read: Listin
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
   const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
   const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
-  return { view: { ...fold, reviews, minors, running, interrupted, tasks, counts: waveCounts(full, states), usage: total, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, stuck, events: file.events };
+  const attention = interrupted || stuck || WAVE_ATTENTION_STAGES.includes(fold.stage);
+  return { view: { ...fold, reviews, minors, running, interrupted, stuck, attention, tasks, counts: waveCounts(full, states), usage: total, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, events: file.events };
 }
 
 /**
@@ -548,7 +545,7 @@ export const WAVE_HANDLERS = {
     const all = await listWaves(repo);
     // A wave that has not started yet reserves its branch's name.
     const reserving = all.map((file) => foldWave(file.declaration, file.events)).find((fold) => !waveStarted(fold) && fold.stage !== "cancelled" && waveBranchName(fold.target, fold.tag) === branch);
-    if (reserving !== undefined) throw new FactoryError("refused", `${repo}: the wave branch ${branch} is reserved by wave ${reserving.id.slice(0, SHORT_ID_CHARS)}, which is ${reserving.stage}`);
+    if (reserving !== undefined) throw new FactoryError("refused", `${repo}: the wave branch ${branch} is reserved by wave ${short(reserving.id)}, which is ${reserving.stage}`);
     const after = resolveAfter(params.after, all, target, tag);
     const queued = after.length > 0;
     // A queued wave gets its branch when it starts: off the target's tip then, with the code of the waves it waits for.
@@ -596,7 +593,7 @@ export const WAVE_HANDLERS = {
     // Checked and appended under the log lock: a runner's stage change after it loses, never the added tasks.
     await busyAsFactoryError(() =>
       appendWaveEvents(id, (fold) => {
-        if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage}, it takes no more tasks`);
+        if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, it takes no more tasks`);
         const tasks = validateTaskSpecs(params.tasks, fold.tasks);
         // The supervisor acts on a wave whose pending tasks can never start: they leave it (count as cancelled).
         const dropped = unreachableKeys(fold, states);
@@ -642,7 +639,7 @@ export const WAVE_HANDLERS = {
     const file = await findWave(params.id);
     const view = await waveView(file);
     const { id } = view;
-    if (!view.actions.includes("waves.retry")) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${waveStageText(view)}, retry needs blocked or interrupted`);
+    if (!view.actions.includes("waves.retry")) throw new FactoryError("refused", `wave ${short(id)} is ${waveStageText(view)}, retry needs blocked or interrupted`);
     // Blocked with tasks not started or not finished (a launch failed): build again, the runner starts them. Blocked
     // otherwise: review and merge again from the rebase. Interrupted: the runner resumes the stage the log holds.
     if (view.stage === "blocked") {
@@ -686,7 +683,7 @@ export const WAVE_HANDLERS = {
     // The stage first: a runner (or a poke from a task's runner) that looks now sees the wave rest and starts nothing.
     await busyAsFactoryError(() =>
       appendWaveEvents(id, (fold) => {
-        if (WAVE_FINAL_STAGES.includes(fold.stage)) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage} already`);
+        if (WAVE_FINAL_STAGES.includes(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage} already`);
         return [{ kind: "stage", stage: "cancelled", reason: null }];
       }),
     );
@@ -701,7 +698,7 @@ export const WAVE_HANDLERS = {
       try {
         await cancelTask(record, env);
       } catch (error) {
-        failures.push(`${shortId(record)}: ${oneLine(errorText(error))}`);
+        failures.push(`${short(record.id)}: ${oneLine(errorText(error))}`);
       }
     }
     // A conflict task that did not finish moved the wave's branch onto the target's tip: back to the wave's own commits.
@@ -715,30 +712,30 @@ export const WAVE_HANDLERS = {
         failures.push(`its branch ${fold.branch}: ${oneLine(errorText(error))}`);
       }
     }
-    if (failures.length > 0) throw new FactoryError("failed", `wave ${id.slice(0, SHORT_ID_CHARS)} is cancelled, but cleaning up after it failed (${failures.join("; ")}); cancel its tasks with tasks.cancel, put its branch back by hand`);
+    if (failures.length > 0) throw new FactoryError("failed", `wave ${short(id)} is cancelled, but cleaning up after it failed (${failures.join("; ")}); cancel its tasks with tasks.cancel, put its branch back by hand`);
     return { wave: await waveView(await readWave(id)) };
   },
 
   "waves.remove": async (params) => {
     const { declaration } = await findWave(params.id);
     const { id, repo } = declaration;
-    const short = id.slice(0, SHORT_ID_CHARS);
+    const shown = short(id);
     // The runner's lock for the whole removal: no poke starts a runner meanwhile.
     try {
       await lockWave(id);
     } catch (error) {
-      if (error instanceof TaskBusyError) throw new FactoryError("refused", `wave ${short} has a runner, cancel it first`);
+      if (error instanceof TaskBusyError) throw new FactoryError("refused", `wave ${shown} has a runner, cancel it first`);
       throw error;
     }
     try {
-      if ((await liveWaveRunners(id)).length > 0) throw new FactoryError("refused", `wave ${short} has a runner, cancel it first`);
+      if ((await liveWaveRunners(id)).length > 0) throw new FactoryError("refused", `wave ${shown} has a runner, cancel it first`);
       const file = await readWave(id);
       const { stage, branch } = foldWave(file.declaration, file.events);
       const waiting = queuedAfter(id, await listWaves());
       if (waiting.length > 0) {
-        const names = waiting.map((fold) => `${fold.tag} (${fold.id.slice(0, SHORT_ID_CHARS)}, ${fold.stage})`).join(", ");
+        const names = waiting.map((fold) => `${fold.tag} (${short(fold.id)}, ${fold.stage})`).join(", ");
         const one = waiting.length === 1;
-        throw new FactoryError("refused", `wave ${short}: the ${one ? "wave" : "waves"} ${names} ${one ? "waits" : "wait"} for it and ${one ? "has" : "have"} not started, cancel or remove ${one ? "that" : "those"} first`);
+        throw new FactoryError("refused", `wave ${shown}: the ${one ? "wave" : "waves"} ${names} ${one ? "waits" : "wait"} for it and ${one ? "has" : "have"} not started, cancel or remove ${one ? "that" : "those"} first`);
       }
       const records = await waveRecords(id);
       // Every refusal before anything is deleted.
@@ -747,7 +744,7 @@ export const WAVE_HANDLERS = {
           requireRemovable(await taskView(record));
           await droppedWork(record, params.force === true);
         } catch (error) {
-          if (error instanceof FactoryError) throw new FactoryError(error.code, `wave ${short}: ${error.message}`, error.detail);
+          if (error instanceof FactoryError) throw new FactoryError(error.code, `wave ${shown}: ${error.message}`, error.detail);
           throw error;
         }
       }
@@ -755,7 +752,7 @@ export const WAVE_HANDLERS = {
       const review = waveReviewWorktree(declaration);
       const hasReview = existsSync(review);
       if (hasReview && params.force !== true && (await uncommittedFiles(runCommand, review))) {
-        throw new FactoryError("refused", `wave ${short}: its review worktree ${review} holds uncommitted changes, commit or remove them there, or give force: true to remove it anyway`, {
+        throw new FactoryError("refused", `wave ${shown}: its review worktree ${review} holds uncommitted changes, commit or remove them there, or give force: true to remove it anyway`, {
           force: true,
         });
       }
@@ -772,13 +769,13 @@ export const WAVE_HANDLERS = {
       // Before the branch: `git branch -D` refuses a branch a worktree has checked out.
       if (hasReview) {
         const removed = await runCommand(["git", "worktree", "remove", ...(params.force === true ? ["--force"] : []), review], { cwd: repo });
-        if (removed.exitCode !== 0) throw new FactoryError("failed", `wave ${short}: removing its review worktree ${review} failed: ${oneLine(removed.output)}`);
+        if (removed.exitCode !== 0) throw new FactoryError("failed", `wave ${shown}: removing its review worktree ${review} failed: ${oneLine(removed.output)}`);
       }
       // Only a merged wave's branch: the target has all of it (a `squash` wave's runner deleted it already, its commits
       // stay under their ref, which the factory never deletes). Any other branch may hold work nobody merged.
       if (stage === "merged" && branch !== null && (await localBranchExists(repo, branch))) {
         const deleted = await runCommand(["git", "branch", "-D", branch], { cwd: repo });
-        if (deleted.exitCode !== 0) throw new FactoryError("failed", `wave ${short}: deleting its branch ${branch} failed: ${oneLine(deleted.output)}`);
+        if (deleted.exitCode !== 0) throw new FactoryError("failed", `wave ${shown}: deleting its branch ${branch} failed: ${oneLine(deleted.output)}`);
       }
       await removeWave(id);
       return { removed: id };
@@ -818,10 +815,10 @@ export async function startReviewerFix(waveId: string, fix: { title: string; req
   let key = "";
   await busyAsFactoryError(() =>
     appendWaveEvents(waveId, (fold) => {
-      const short = waveId.slice(0, SHORT_ID_CHARS);
-      if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${short} is ${fold.stage}, it takes no more tasks`);
+      const shown = short(waveId);
+      if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${shown} is ${fold.stage}, it takes no more tasks`);
       const added = reviewerFixEvents(fold, fix);
-      if (added === null) throw new FactoryError("refused", `wave ${short} has its ${REVIEWER_FIX_CAP} fix tasks already: tell the supervisor with notify_supervisor`);
+      if (added === null) throw new FactoryError("refused", `wave ${shown} has its ${REVIEWER_FIX_CAP} fix tasks already: tell the supervisor with notify_supervisor`);
       key = added.key;
       return added.events;
     }),
@@ -845,7 +842,7 @@ function waveStageText(view: WaveView): string {
 async function moveWave(id: string, from: WaveStage, to: WaveStage, what: string): Promise<void> {
   await busyAsFactoryError(() =>
     appendWaveEvents(id, (fold) => {
-      if (fold.stage !== from) throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage}, ${what}`);
+      if (fold.stage !== from) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, ${what}`);
       return [{ kind: "stage", stage: to, reason: null }];
     }),
   );
@@ -887,7 +884,7 @@ function resolveAfter(raw: unknown, waves: readonly WaveFile[], target: string, 
       found = matches[0];
     }
     if (found === undefined) throw new FactoryError("invalid", `waves.start: after names "${name}", no wave of this repository on ${target}`);
-    if (found.stage === "cancelled") throw new FactoryError("invalid", `waves.start: after names wave ${found.tag} (${found.id.slice(0, SHORT_ID_CHARS)}), which is cancelled: the wave could never start`);
+    if (found.stage === "cancelled") throw new FactoryError("invalid", `waves.start: after names wave ${found.tag} (${short(found.id)}), which is cancelled: the wave could never start`);
     if (!ids.includes(found.id)) ids.push(found.id);
   }
   return ids;

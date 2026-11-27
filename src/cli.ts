@@ -4,8 +4,8 @@
  * prints one of the two views of the answer (`VIEWS.md`).
  *
  * - `factory <action> [<json params> | -] [--json]`: `-` reads the params from stdin, none means `{}`. stdout gets the
- *   agent view (`agent-view.ts`, text lines), or with `--json` (anywhere after the action) the full view: `callAction`'s
- *   result as JSON. An action without an agent view (`tasks.timeline`) always prints JSON. Exit 0.
+ *   agent's text (`actionView`), or with `--json` (anywhere after the action) the full view: `callAction`'s result as
+ *   JSON. An action without a view (`tasks.timeline`) always prints JSON. Exit 0.
  *   `cwd` is the caller's directory
  * - A `FactoryError` goes to stderr as `factory: <code>: <message>`, exit 1 (`invalid`: exit 2); without `--json` the
  *   agent view's way out follows the message (` · next: ...`)
@@ -16,8 +16,9 @@
  *   through; with `FACTORY_SLOT_HELD` set it runs it directly. For test runs outside the factory's gates
  */
 import { join } from "node:path";
-import { agentActions, agentError, agentView, hasAgentView } from "./agent-view.ts";
+import { agentActions, agentError } from "./agent-view.ts";
 import { ACTIONS, callAction, FactoryError } from "./core.ts";
+import { actionView, hasView } from "./factory-tool.ts";
 import { runInSlot } from "./test-slots.ts";
 import { errorText } from "./util.ts";
 
@@ -97,8 +98,8 @@ async function main(args: string[]): Promise<number> {
   try {
     const params = await readParams(positional[0]);
     const result = await callAction(first, params, { cwd: process.cwd(), signal: abort.signal });
-    if (json || !hasAgentView(first)) printJson(result);
-    else process.stdout.write(`${agentView(first, params, result)}\n`);
+    if (json || !hasView(first)) printJson(result);
+    else process.stdout.write(`${actionView(first, params, result).text}\n`);
     return 0;
   } catch (error) {
     return fail(error, json);

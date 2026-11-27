@@ -1,13 +1,15 @@
 /** The waves: a planned set of tasks on one branch, reviewed and merged once (`core-waves.ts`). */
-import { card, decision, shortId, waveCard, waveCardState } from "./cards.ts";
-import { afterNames, plural, short, waveBlock, waveList, waveReceipt } from "./agent-view.ts";
+import { card, decision, waveCard, waveState } from "./cards.ts";
+import { plural } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
+import { WAVE_FINAL_STAGES } from "./core-tasks.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
 import { waveCause } from "./decisions.ts";
 import { feature, REPO, spec, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
 import { schemaOf } from "./settings.ts";
 import type { Handlers } from "./feature.ts";
 import type { WaveView } from "./waves.ts";
+import { short } from "./util.ts";
 
 export const WAVES = feature({
   name: "waves",
@@ -42,6 +44,7 @@ export const WAVES = feature({
       },
       ["repo", "tag", "title", "request", "tasks"],
       true,
+      (_params, result: { wave: WaveView }) => waveCard(result.wave, `${result.wave.stage === "queued" ? "declared" : "started"} wave ${result.wave.tag}`),
     ),
     "waves.add": spec(
       "Add tasks to a wave (after may name its existing keys); a rejected, blocked, reviewing or waiting_approve wave builds again. Pending tasks that can never start (a task they wait for was cancelled or removed) are dropped: they count as cancelled. Answers {wave}",
@@ -51,8 +54,17 @@ export const WAVES = feature({
       },
       ["id", "tasks"],
       true,
+      // A decision only when it answers a rejection or a block: `actionView` makes it one with the key it answers.
+      (params, result: { wave: WaveView }) => {
+        const added = Array.isArray(params.tasks) ? params.tasks.map((task) => task as Params) : [];
+        const text = added.map((task) => `- **${String(task.key)}**: ${String(task.title)}`).join("\n");
+        return { ...decision(waveCard(result.wave, ""), `added ${plural(added.length, "task")} to wave ${result.wave.tag}`, text), kind: "action" };
+      },
+      (params) => waveCause(params.id, ["rejected", "blocked"]),
     ),
-    "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage. Answers {wave}", { id: WAVE_ID }, ["id"], false),
+    "waves.get": spec("One wave: declaration, stage, tasks with state and usage, counts, reviews, merge, usage. Answers {wave}", { id: WAVE_ID }, ["id"], false, (_params, result: { wave: WaveView }) =>
+      waveCard(result.wave, `wave ${result.wave.tag}`),
+    ),
     "waves.list": spec(
       "Every wave, or the repository's, or those under a tag, or a session's, or the open ones (filters combine). Answers {waves}",
       {
@@ -63,75 +75,49 @@ export const WAVES = feature({
       },
       [],
       false,
+      // The finished ones as a count: a long history must not fill an agent's context.
+      (_params, result: { waves: WaveView[] }) => {
+        const open = result.waves.filter((wave) => !WAVE_FINAL_STAGES.includes(wave.stage));
+        return card("action", "quiet", result.waves.length === 0 ? "no waves" : plural(result.waves.length, "wave"), {
+          rows: [
+            ...open.map((wave) => ({ label: wave.tag, text: `${waveState(wave)}  ${wave.counts.done}/${wave.counts.total}  ${short(wave.id)}  ${wave.title}` })),
+            ...(open.length < result.waves.length ? [{ label: "merged or cancelled", text: `${result.waves.length - open.length}, not shown` }] : []),
+          ],
+        });
+      },
     ),
     "waves.retry": spec(
       "Run a blocked or interrupted wave again: a blocked wave with tasks not started or not finished builds again (starts them), else review and merge from the rebase on; an interrupted one resumes from its log; also retries each interrupted task of the wave. Answers {wave, retried, refused}",
       { id: WAVE_ID },
       ["id"],
       true,
+      (_params, result: { wave: WaveView; retried?: string[]; refused?: { id: string; why: string }[] }) => {
+        const lines = [...(result.retried ?? []).map((id) => `- retried task ${short(id)}`), ...(result.refused ?? []).map((task) => `- refused task ${short(task.id)}: ${task.why}`)];
+        return decision(waveCard(result.wave, ""), `retried wave ${result.wave.tag}`, ...(lines.length > 0 ? [lines.join("\n")] : []));
+      },
+      (params) => waveCause(params.id),
     ),
-    "waves.approve": spec("Merge a wave waiting for approve (its merge setting is review). Answers {wave}", { id: WAVE_ID }, ["id"], true),
-    "waves.cancel": spec("Stop a wave: cancel its tasks that are not done or cancelled, stop its runner; its branch stays. Answers {wave}", { id: WAVE_ID }, ["id"], true),
+    "waves.approve": spec("Merge a wave waiting for approve (its merge setting is review). Answers {wave}", { id: WAVE_ID }, ["id"], true, (_params, result: { wave: WaveView }) =>
+      waveCard(result.wave, `approved wave ${result.wave.tag}`),
+    ),
+    "waves.cancel": spec(
+      "Stop a wave: cancel its tasks that are not done or cancelled, stop its runner; its branch stays. Answers {wave}",
+      { id: WAVE_ID },
+      ["id"],
+      true,
+      (_params, result: { wave: WaveView }) => decision(waveCard(result.wave, ""), `cancelled wave ${result.wave.tag}`),
+      (params) => waveCause(params.id),
+    ),
     "waves.remove": spec(
       "Delete a wave's record, its tasks (as tasks.remove does) and a review worktree a block left (one holding uncommitted changes only with force); its branch only when the wave is merged. Refused while the wave or one of its tasks runs. Answers {removed: id}",
       { id: WAVE_ID, force: { type: "boolean", description: "Also drop commits its target branch lacks and uncommitted changes" } },
       ["id"],
       true,
+      (_params, result: { removed: string }) => card("action", "quiet", `removed wave ${short(result.removed)}`, { id: short(result.removed) }),
     ),
   },
   get handlers(): Handlers {
     return WAVE_HANDLERS;
-  },
-  renderers: {
-    "waves.start": (_params, result: { wave: WaveView }) => {
-      const wave = result.wave;
-      if (wave.stage === "queued") return waveReceipt("declared ", wave, [`waits for: ${afterNames(wave)}`]);
-      const started = wave.tasks.filter((task) => task.taskId !== null).map((task) => task.key);
-      const waiting = wave.tasks.filter((task) => task.taskId === null && task.state === "pending").map((task) => `${task.key} (${task.after.join(", ")})`);
-      return waveReceipt("started ", wave, [`started: ${started.join(", ") || "none"}`, ...(waiting.length > 0 ? [`waits: ${waiting.join(", ")}`] : [])]);
-    },
-    "waves.add": (params, result: { wave: WaveView }) => {
-      const wave = result.wave;
-      const keys = new Set(Array.isArray(params.tasks) ? params.tasks.map((task) => String((task as Params).key)) : []);
-      const added = wave.tasks.filter((task) => keys.has(task.key)).map((task) => `${task.key} ${task.state}`);
-      return waveReceipt("", wave, [`added: ${added.join(", ") || "none"}`]);
-    },
-    "waves.get": (_params, result: { wave: WaveView }) => waveBlock(result.wave),
-    "waves.list": (_params, result: { waves: WaveView[] }) => waveList(result.waves),
-    "waves.retry": (_params, result: { wave: WaveView; retried?: string[]; refused?: { id: string; why: string }[] }) =>
-      waveReceipt("", result.wave, [
-        ...((result.retried ?? []).length > 0 ? [`retried tasks: ${(result.retried ?? []).map(short).join(", ")}`] : []),
-        ...(result.refused ?? []).map((task) => `refused task ${short(task.id)}: ${task.why}`),
-      ]),
-    "waves.approve": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
-    "waves.cancel": (_params, result: { wave: WaveView }) => waveReceipt("", result.wave),
-    "waves.remove": (_params, result: { removed: string }) => `removed wave ${short(result.removed)}`,
-  },
-  decides: {
-    "waves.add": (params) => waveCause(params.id, ["rejected", "blocked"]),
-    "waves.retry": (params) => waveCause(params.id),
-    "waves.cancel": (params) => waveCause(params.id),
-  },
-  cards: {
-    "waves.start": (_params, result: { wave: WaveView }) => waveCard(result.wave, `${result.wave.stage === "queued" ? "declared" : "started"} wave ${result.wave.tag}`),
-    // A decision only when it answers a rejection or a block: `actionCard` makes it one with the key it answers.
-    "waves.add": (params, result: { wave: WaveView }) => {
-      const added = Array.isArray(params.tasks) ? params.tasks.map((task) => task as Params) : [];
-      const text = added.map((task) => `- **${String(task.key)}**: ${String(task.title)}`).join("\n");
-      return { ...decision(waveCard(result.wave, ""), `added ${plural(added.length, "task")} to wave ${result.wave.tag}`, text), kind: "action" };
-    },
-    "waves.get": (_params, result: { wave: WaveView }) => waveCard(result.wave, `wave ${result.wave.tag}`),
-    "waves.list": (_params, result: { waves: WaveView[] }) =>
-      card("action", "quiet", result.waves.length === 0 ? "no waves" : plural(result.waves.length, "wave"), {
-        rows: result.waves.map((wave) => ({ label: wave.tag, text: `${waveCardState(wave)}  ${wave.counts.done}/${wave.counts.total}  ${shortId(wave.id)}` })),
-      }),
-    "waves.retry": (_params, result: { wave: WaveView; retried?: string[]; refused?: { id: string; why: string }[] }) => {
-      const lines = [...(result.retried ?? []).map((id) => `- retried task ${shortId(id)}`), ...(result.refused ?? []).map((task) => `- refused task ${shortId(task.id)}: ${task.why}`)];
-      return decision(waveCard(result.wave, ""), `retried wave ${result.wave.tag}`, ...(lines.length > 0 ? [lines.join("\n")] : []));
-    },
-    "waves.approve": (_params, result: { wave: WaveView }) => waveCard(result.wave, `approved wave ${result.wave.tag}`),
-    "waves.cancel": (_params, result: { wave: WaveView }) => decision(waveCard(result.wave, ""), `cancelled wave ${result.wave.tag}`),
-    "waves.remove": (_params, result: { removed: string }) => card("action", "quiet", `removed wave ${shortId(result.removed)}`, { id: shortId(result.removed) }),
   },
   toolBlurb:
     '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, each task reviewed, then the whole, merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',

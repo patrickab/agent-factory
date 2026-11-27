@@ -43,6 +43,16 @@ export function cents(cost: number): number {
   return Math.round(cost * 100) / 100;
 }
 
+/** An id as the views show it: its first 8 characters. */
+export function short(id: string | null | undefined): string {
+  return (id ?? "").slice(0, 8);
+}
+
+/** `$2.10`. */
+export function dollars(cost: number): string {
+  return `$${cost.toFixed(2)}`;
+}
+
 /** `promise`'s value (a read of a file or directory), `missing` when that does not exist. */
 export function ifMissing<T, M>(promise: Promise<T>, missing: M): Promise<T | M> {
   return promise.catch((error: NodeJS.ErrnoException) => {

@@ -4,26 +4,25 @@
  * cannot drift apart.
  *
  * - The description: an opening sentence, the features' `toolBlurb`s (`features.ts`), how answers work
- * - `agentActions`: every `ACTIONS` name with an agent view (`tasks.timeline` has none: programs replay it through
- *   the core or the CLI); in a task session only those with `mutates: false`
+ * - `agentActions`: every `ACTIONS` name with a view (`tasks.timeline` has none: programs replay it through the core
+ *   or the CLI); in a task session only those with `mutates: false`
  * - `factoryToolParameters`: `action` (one of them) plus the union of their params
  * - `callFactoryTool`: one tool call, `{action, ...params}`, refusing an action the agent is not offered. Answers the
- *   agent view as `text`, the full view as `result` and its readable form as `card` (`cards.ts`); a failure throws
- *   (`factoryToolError` renders it). A view that fails to render after the action succeeded is a one-line receipt
- *   (`renderFailed`), never a failure: the agent must not retry what already happened; a card that fails is the
- *   action's name (`fallbackCard`)
- * - `factoryCard(name, params, result, cause?)`: the card of a result, never throwing
- * - A decision (contract `cards`): before the action runs, its feature's `decides` reads the cause from state
+ *   full view as `result`, its card and the agent's text of it (`actionView`); a failure throws (`factoryToolError`
+ *   renders it)
+ * - `actionView(name, params, result, cause?)`: the card of a result from its action's view and its text, never
+ *   throwing (`present`): the agent must not retry what already happened
+ * - A decision (contract `cards`): before the action runs, its `decides` reads the cause from state
  *   (`decisions.ts`); a cause that cannot be read leaves a decision that answers nothing. After it succeeded the card is a
  *   decision and, with an `origin`, appended to that session's log. A log that fails
  *   never fails the answer: the action happened
  */
-import { agentError, agentView, hasAgentView } from "./agent-view.ts";
-import { actionCard, fallbackCard, type FactoryCard } from "./cards.ts";
+import { agentError } from "./agent-view.ts";
+import { present, type FactoryCard } from "./cards.ts";
 import { ACTIONS, callAction, FactoryError, type ActionName, type CallOptions } from "./core.ts";
 import type { Params } from "./core-shared.ts";
 import { appendDecision, type Cause } from "./decisions.ts";
-import type { CauseReader } from "./feature.ts";
+import type { ActionSpec, View } from "./feature.ts";
 import { FEATURES } from "./features.ts";
 import { errorText, isRecord } from "./util.ts";
 
@@ -41,9 +40,17 @@ export const FACTORY_TOOL_DESCRIPTION = [
   "Every answer and notice also carries a card for the user, never in your context; an action that settles a question, rejection or block is recorded as a decision on its own: pass nothing for it.",
 ].join(" ");
 
-/** The actions an agent may call: those with an agent view; in a task session only those with `mutates: false`. */
+/** The action `name` with its view and cause reader; undefined for a name that is none. */
+const actionOf = (name: string): ActionSpec | undefined => (Object.hasOwn(ACTIONS, name) ? ACTIONS[name as ActionName] : undefined);
+
+/** Whether an agent may call `name`: it has a view. */
+export function hasView(name: string): boolean {
+  return actionOf(name)?.view !== undefined;
+}
+
+/** The actions an agent may call: those with a view; in a task session only those with `mutates: false`. */
 export function agentActions(taskSession = false): ActionName[] {
-  return (Object.keys(ACTIONS) as ActionName[]).filter((name) => hasAgentView(name) && !(taskSession && ACTIONS[name].mutates));
+  return (Object.keys(ACTIONS) as ActionName[]).filter((name) => hasView(name) && !(taskSession && ACTIONS[name].mutates));
 }
 
 /** `action` and the union of the actions' params. A param several actions share names each of them in its description. */
@@ -71,68 +78,47 @@ export function factoryToolParameters(taskSession = false): { type: "object"; re
   return { type: "object", required: ["action"], properties };
 }
 
-/** The id an answer names (`{wave}`, `{task}`, a task view, `{removed}`), for a receipt. */
-function answerId(result: unknown): string | null {
-  if (!isRecord(result)) return null;
-  for (const inner of [result.wave, result.task, result]) {
-    if (isRecord(inner) && typeof inner.id === "string") return inner.id.slice(0, 8);
-  }
-  return typeof result.removed === "string" ? result.removed.slice(0, 8) : null;
-}
-
-/** The one line an agent gets when the view of a succeeded action fails to render. */
-function renderFailed(name: string, result: unknown, error: unknown): string {
-  const id = answerId(result);
-  return `${name} done${id === null ? "" : ` (${id})`}; its answer could not be shown (${errorText(error).split("\n")[0]}), do not repeat it: look with tasks.get, waves.get or the lists`;
-}
-
 /**
- * Runs one `factory` tool call: `text` is the agent view, `result` the full view. An action the agent is not offered
- * (a timeline, a mutating one in a task session) is as unknown as a made-up one. `render` is the agent view
- * (tests swap it).
+ * Runs one `factory` tool call: `result` the full view, `card` and `text` its view (`actionView`). An action the agent
+ * is not offered (a timeline, a mutating one in a task session) is as unknown as a made-up one.
  */
-export async function callFactoryTool(
-  params: unknown,
-  taskSession: boolean,
-  options: CallOptions,
-  render = agentView,
-): Promise<{ text: string; result: unknown; card: FactoryCard }> {
+export async function callFactoryTool(params: unknown, taskSession: boolean, options: CallOptions): Promise<{ text: string; result: unknown; card: FactoryCard }> {
   const { action, ...rest } = isRecord(params) ? params : {};
   const name = String(action);
   if (!(agentActions(taskSession) as string[]).includes(name)) throw new FactoryError("invalid", `unknown action "${name}"`);
   const cause = await causeOf(name, rest, options);
   const result = await callAction(name, rest, options);
-  let text: string;
-  try {
-    text = render(name, rest, result);
-  } catch (error) {
-    text = renderFailed(name, result, error);
-  }
-  const card = factoryCard(name, rest, result, cause);
+  const { card, text } = actionView(name, rest, result, cause);
   if (cause !== null && options.origin !== undefined) {
     await appendDecision(options.origin, { at: new Date().toISOString(), card }).catch(() => undefined);
   }
   return { text, result, card };
 }
 
-/** The cause `name` settles (its feature's `decides`), read before it runs; null when it is no decision. */
+/** The cause `name` settles (its `decides`), read before it runs; null when it is no decision. */
 async function causeOf(name: string, params: Params, options: CallOptions): Promise<Cause | null> {
-  const reader = FEATURES.flatMap((feature) => (feature.decides as Readonly<Record<string, CauseReader>> | undefined)?.[name] ?? [])[0];
-  if (reader === undefined) return null;
+  const decides = actionOf(name)?.decides;
+  if (decides === undefined) return null;
   try {
-    return await reader(params, { cwd: options.cwd, signal: options.signal, env: options.env, origin: options.origin });
+    return await decides(params, { cwd: options.cwd, signal: options.signal, env: options.env, origin: options.origin });
   } catch {
     return {};
   }
 }
 
-/** The card of `name`'s result (`actionCard`), a decision with a cause; the action's name when it cannot be built. */
-export function factoryCard(name: string, params: unknown, result: unknown, cause?: Cause | null): FactoryCard {
-  try {
-    return actionCard(name, params, result, cause);
-  } catch {
-    return fallbackCard(name);
-  }
+/**
+ * The card of `name`'s result from its view, and the agent's text of it; with a cause (`decisions.ts`) the
+ * card is a decision, answering the notice key the cause names. A view that fails is a receipt, never a failure.
+ */
+export function actionView(name: string, params: unknown, result: unknown, cause: Cause | null = null): { card: FactoryCard; text: string } {
+  const failed = `${name} done; its answer could not be shown, do not repeat it: look with tasks.get, waves.get or the lists`;
+  return present(() => {
+    const built = (ACTIONS[name as ActionName].view as View)((params ?? {}) as Params, result as never);
+    if (cause === null) return built;
+    const [first, ...more] = [built].flat();
+    const { answers: _answers, ...rest } = first;
+    return [{ ...rest, kind: "decision", ...(cause.answers === undefined ? {} : { answers: cause.answers }) }, ...more];
+  }, failed, name.startsWith("repos."));
 }
 
 /** A failed tool call as the agent's one line (`agentError`); an error that is not a `FactoryError` is `failed`. */

@@ -8,6 +8,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { FEEDBACK_KINDS, type FeedbackEntry, type FeedbackKind, storeFeedback } from "../feedback.ts";
 import { errorText, isRecord } from "../util.ts";
+import { toolError, toolText } from "./tool.ts";
 
 export const FEEDBACK_TOOL = "feedback";
 
@@ -41,7 +42,7 @@ export function registerFeedbackTool(pi: ExtensionAPI, gate: FeedbackToolGate): 
       },
     } as never,
     async execute(_toolCallId, params: unknown, _signal, _onUpdate, ctx) {
-      const fail = (text: string) => ({ content: [{ type: "text" as const, text: `${FEEDBACK_TOOL}: ${text}` }], details: undefined, isError: true });
+      const fail = (text: string) => toolError(`${FEEDBACK_TOOL}: ${text}`);
       const { kind, what, cost, suggestion } = isRecord(params) ? params : {};
       if (typeof kind !== "string" || !FEEDBACK_KINDS.includes(kind as FeedbackKind)) return fail(`kind must be one of ${FEEDBACK_KINDS.join(", ")}`);
       if (typeof what !== "string" || what.trim() === "") return fail("what must not be empty");
@@ -51,7 +52,7 @@ export function registerFeedbackTool(pi: ExtensionAPI, gate: FeedbackToolGate): 
         if (whose === null || (!whose.task && !whose.wave)) return fail("this session holds no task");
         const entry: FeedbackEntry = { kind: kind as FeedbackKind, what, cost: optional(cost), suggestion: optional(suggestion), task: whose.task, wave: whose.wave, role: gate.role };
         const stored = await storeFeedback(whose.plan, entry);
-        return { content: [{ type: "text" as const, text: stored ? "Feedback recorded." : "Feedback recorded on the task." }], details: entry };
+        return toolText(stored ? "Feedback recorded." : "Feedback recorded on the task.", entry);
       } catch (error) {
         return fail(errorText(error));
       }

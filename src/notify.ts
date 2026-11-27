@@ -25,27 +25,29 @@
  *   never start (`unreachableTasks`), not the log's length: the runner's `building` event naming them lands after the
  *   task state that made them so, and must not make the same event a second one (invariant 12); for `never` the waves
  *   it waits for: it can never start only once
- * - `text`: `factory: <what happened>`, then the agent view block of the task or wave (a rejection carries its findings)
  * - `card` (`cards.ts`): title `<what happened>`; tone `attention` for every task and wave event but `merged`, `quiet`
- *   for that and a contract change
+ *   for that and a contract change. `text`: `factory: ` and the card's text (`notice`)
  * - Scouts a session started (`feature-scouts.ts`, caller `session`): one notice when the scout ended (`done`, `failed`, `cancelled`,
- *   interrupted), key `scout:<id>:report` (`scoutNoticeKey`), text the scout's block with its report and the report's
- *   path. A call that waited for the report claims the same key
+ *   interrupted), key `scout:<id>:report` (`scoutNoticeKey`), its report and the report's path. A call that waited for
+ *   the report claims the same key
  */
-import { neverStarts, taskBlock, unreachableTasks, waveBlock } from "./agent-view.ts";
-import { card, contractCard, safeCard, shortId, taskCard, waveCard, type FactoryCard } from "./cards.ts";
+import { card, contractCard, present, taskCard, unreachableTasks, waveCard, type FactoryCard } from "./cards.ts";
 import type { TaskView } from "./core.ts";
 import { FEATURES } from "./features.ts";
+import { short } from "./util.ts";
 import type { WaveView } from "./waves.ts";
 
 /** `text` is what the agent reads (the message's `content`), `card` the readable form (`cards.ts`, the message's `details.card`). */
 export type Notice = { key: string; origin: string; text: string; card: FactoryCard };
 
-/**
- * A wave as notifications judge it: its view, whether it is stuck (builds with tasks that can never start, or is queued
- * after a cancelled wave: `WaveLook`), the kinds of its log's events.
- */
-export type NoticeWave = { view: WaveView; stuck: boolean; events: readonly { kind: string }[] };
+/** A wave as notifications judge it: its view and the kinds of its log's events. */
+export type NoticeWave = { view: WaveView; events: readonly { kind: string }[] };
+
+/** The notice `key` to `origin` of the card `build` makes; a card that cannot be built is a quiet one titled `title`. */
+export function notice(key: string, origin: string, title: string, build: () => FactoryCard): Notice {
+  const { card, text } = present(build, title);
+  return { key, origin, text: `factory: ${text}`, card };
+}
 
 const TASK_EVENTS: Record<string, string> = {
   waiting_answer: "a coder asks",
@@ -62,8 +64,8 @@ function taskEvent(task: TaskView): string | null {
 export function taskNotice(task: TaskView, origin: string): Notice | null {
   const event = taskEvent(task);
   if (event === null) return null;
-  const what = event === "waiting_answer" ? TASK_EVENTS[event] : event === "interrupted" ? `task ${task.id.slice(0, 8)} was interrupted` : `task ${task.id.slice(0, 8)} ${TASK_EVENTS[event]}`;
-  return { key: `task:${task.id}:${event}:${task.round ?? 0}@${task.at ?? ""}`, origin, text: `factory: ${what}\n${taskBlock(task)}`, card: safeCard("task", what, () => taskCard(task, what, "attention")) };
+  const what = event === "waiting_answer" ? TASK_EVENTS[event] : event === "interrupted" ? `task ${short(task.id)} was interrupted` : `task ${short(task.id)} ${TASK_EVENTS[event]}`;
+  return notice(`task:${task.id}:${event}:${task.round ?? 0}@${task.at ?? ""}`, origin, what, () => taskCard(task, what, "attention"));
 }
 
 const WAVE_STAGE_EVENTS: Partial<Record<WaveView["stage"], string>> = {
@@ -76,15 +78,15 @@ const WAVE_STAGE_EVENTS: Partial<Record<WaveView["stage"], string>> = {
 /** The events a supervisor's action appends with no runner: they do not make an interrupted wave a new event. */
 const SUPERVISOR_EVENTS: readonly string[] = ["update", "contract"];
 
-export function waveNotice({ view, stuck, events }: NoticeWave, origin: string, interruptedTasks: readonly TaskView[] = []): Notice | null {
+export function waveNotice({ view, events }: NoticeWave, origin: string, interruptedTasks: readonly TaskView[] = []): Notice | null {
   let event: string;
   let n: number | string;
   let what: string;
   if (view.interrupted) {
     [event, n, what] = ["interrupted", events.findLastIndex((entry) => !SUPERVISOR_EVENTS.includes(entry.kind)) + 1, "was interrupted"];
-  } else if (view.stage === "building" && stuck) {
+  } else if (view.stage === "building" && view.stuck) {
     [event, n, what] = ["unreachable", unreachableTasks(view.tasks).join(","), "has tasks that can never start"];
-  } else if (view.stage === "queued" && (stuck || neverStarts(view))) {
+  } else if (view.stage === "queued" && view.stuck) {
     // Not the stage event's index: the core may judge it stuck before its `queued` event saying why lands.
     [event, n, what] = ["never", view.after.join(","), "can never start"];
   } else {
@@ -93,16 +95,13 @@ export function waveNotice({ view, stuck, events }: NoticeWave, origin: string, 
     [event, n, what] = [view.stage, events.findLastIndex((entry) => entry.kind === "stage"), said];
   }
   // Its interrupted tasks are named here, not in notices of their own (`pendingNotices`): `waves.retry` retries them.
-  let told = what;
-  if (event === "interrupted" && interruptedTasks.length > 0) {
-    const named = interruptedTasks.map((task) => {
-      const key = view.tasks.find((entry) => entry.taskId === task.id)?.key;
-      return key === undefined ? task.id.slice(0, 8) : `${key} (${task.id.slice(0, 8)})`;
-    });
-    told = `${what} with ${interruptedTasks.length === 1 ? "task" : "tasks"} ${named.join(", ")}; waves.retry retries ${interruptedTasks.length === 1 ? "it" : "them"}`;
-  }
+  const named = interruptedTasks.map((task) => `${view.tasks.find((entry) => entry.taskId === task.id)?.key ?? "a task"} (${short(task.id)})`);
+  const title = `wave ${view.tag} ${what}`;
   const tone = event === "merged" ? "quiet" : "attention";
-  return { key: `wave:${view.id}:${event}:${n}`, origin, text: `factory: wave ${view.tag} ${told}\n${waveBlock(view)}`, card: safeCard("wave", `wave ${view.tag} ${what}`, () => waveCard(view, `wave ${view.tag} ${what}`, tone)) };
+  return notice(`wave:${view.id}:${event}:${n}`, origin, title, () => {
+    const built = waveCard(view, title, tone);
+    return named.length === 0 ? built : { ...built, rows: [{ label: "interrupted tasks", text: `${named.join(", ")}: waves.retry retries them` }, ...(built.rows ?? [])] };
+  });
 }
 
 /** One notice per `contract` event of the wave (`contracts.apply` changed a contract its done tasks worked by). */
@@ -110,8 +109,7 @@ function contractNotices({ view, events }: NoticeWave, origin: string): Notice[]
   return events.flatMap((entry, index) => {
     if (entry.kind !== "contract") return [];
     const { name, paths, done } = entry as { kind: "contract"; name: string; paths: string[]; done: string[] };
-    const text = `factory: contract ${name} changed (${paths.join(", ")}): wave ${view.tag} has done tasks ${done.join(", ")}, which may need a follow-up task`;
-    return [{ key: `wave:${view.id}:contract:${index}`, origin, text, card: safeCard("contract", `contract ${name} changed`, () => contractCard(view, name, paths, done)) }];
+    return [notice(`wave:${view.id}:contract:${index}`, origin, `contract ${name} changed`, () => contractCard(view, name, paths, done))];
   });
 }
 
@@ -120,13 +118,13 @@ function reviewerNotices({ view, events }: NoticeWave, origin: string): Notice[]
   return events.flatMap((entry, index): Notice[] => {
     if (entry.kind === "note") {
       const { text, taskId } = entry as { kind: "note"; text: string; taskId: string | null };
-      const about = taskId === null ? "" : ` (reviewing task ${taskId.slice(0, 8)})`;
-      return [{ key: `wave:${view.id}:note:${index}`, origin, text: `factory: the reviewer of wave ${view.tag} notes${about}: ${text}`, card: card("wave", "quiet", `the reviewer of wave ${view.tag} notes${about}`, { tag: view.tag, id: shortId(view.id), text }) }];
+      const title = `the reviewer of wave ${view.tag} notes${taskId === null ? "" : ` (reviewing task ${short(taskId)})`}`;
+      return [notice(`wave:${view.id}:note:${index}`, origin, title, () => card("wave", "quiet", title, { tag: view.tag, id: short(view.id), text }))];
     }
     if (entry.kind !== "tasks" || (entry as { by?: string }).by !== "reviewer") return [];
     const { tasks } = entry as { kind: "tasks"; tasks: { key: string; title: string }[] };
-    const started = tasks.map((task) => `${task.key} "${task.title}"`).join(", ");
-    return [{ key: `wave:${view.id}:fix:${index}`, origin, text: `factory: the reviewer of wave ${view.tag} started ${started}`, card: card("wave", "quiet", `the reviewer of wave ${view.tag} started ${tasks.length === 1 ? "a fix task" : `${tasks.length} fix tasks`}`, { tag: view.tag, id: shortId(view.id), rows: tasks.map((task) => ({ label: task.key, text: task.title })) }) }];
+    const title = `the reviewer of wave ${view.tag} started ${tasks.length === 1 ? "a fix task" : `${tasks.length} fix tasks`}`;
+    return [notice(`wave:${view.id}:fix:${index}`, origin, title, () => card("wave", "quiet", title, { tag: view.tag, id: short(view.id), rows: tasks.map((task) => ({ label: task.key, text: task.title })) }))];
   });
 }
 

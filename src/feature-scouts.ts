@@ -1,21 +1,23 @@
 /** Scouts: read-only pi children that answer a concern from a memory store's map (`core-scouts.ts`). */
-import { safeCard, scoutCard, shortId } from "./cards.ts";
+import { scoutCard } from "./cards.ts";
 import { SCOUT_HANDLERS } from "./core-scouts.ts";
 import { feature, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
-import { scoutNoticeKey, type Notice } from "./notify.ts";
-import { scoutBlock, SCOUT_RENDERERS } from "./scout-view.ts";
+import { notice, scoutNoticeKey, type Notice } from "./notify.ts";
 import type { ScoutView } from "./scouts.ts";
+import { short } from "./util.ts";
+
+/** `scout <id> reported`, or how else it ended. */
+export function scoutEndTitle(scout: ScoutView): string {
+  return `scout ${short(scout.id)} ${scout.interrupted ? "was interrupted" : scout.state === "done" ? "reported" : scout.state}`;
+}
 
 function scoutNotice(scout: ScoutView): Notice | null {
   if (scout.caller.kind !== "session" || scout.caller.id === null) return null;
   const ended = scout.state === "done" || scout.state === "failed" || scout.state === "cancelled";
   if (!ended && !scout.interrupted) return null;
-  let what: string = scout.state === "done" ? "reported" : scout.state;
-  if (scout.interrupted) what = "was interrupted";
-  const path = scout.reportPath === null ? "" : `\nreport: ${scout.reportPath}`;
-  const title = `scout ${scout.id.slice(0, 8)} ${what}`;
-  return { key: scoutNoticeKey(scout.id), origin: scout.caller.id, text: `factory: ${title}\n${scoutBlock(scout)}${path}`, card: safeCard("scout", title, () => scoutCard(scout, title)) };
+  const title = scoutEndTitle(scout);
+  return notice(scoutNoticeKey(scout.id), scout.caller.id, title, () => scoutCard(scout, title));
 }
 
 export const SCOUTS = feature({
@@ -32,17 +34,19 @@ export const SCOUTS = feature({
       },
       ["concern"],
       true,
+      (_params, result: { scout: ScoutView; timedOut: boolean }) =>
+        scoutCard(result.scout, result.scout.report !== null ? `scout ${short(result.scout.id)} reported` : result.timedOut ? `scout ${short(result.scout.id)}: the wait ended before the report` : `started scout ${short(result.scout.id)}`),
     ),
-    "scouts.get": spec("One scout: caller, concern, state, usage, report, the map paths it wrote. Answers {scout}", { id: { type: "string", description: "The scout id or a unique prefix of it" } }, ["id"], false),
+    "scouts.get": spec(
+      "One scout: caller, concern, state, usage, report, the map paths it wrote. Answers {scout}",
+      { id: { type: "string", description: "The scout id or a unique prefix of it" } },
+      ["id"],
+      false,
+      (_params, result: { scout: ScoutView }) => scoutCard(result.scout, `scout ${short(result.scout.id)}`),
+    ),
   },
   get handlers(): Handlers {
     return SCOUT_HANDLERS;
-  },
-  renderers: SCOUT_RENDERERS,
-  cards: {
-    "scouts.start": (_params, result: { scout: ScoutView; timedOut: boolean }) =>
-      scoutCard(result.scout, result.scout.report !== null ? `scout ${shortId(result.scout.id)} reported` : result.timedOut ? `scout ${shortId(result.scout.id)}: the wait ended before the report` : `started scout ${shortId(result.scout.id)}`),
-    "scouts.get": (_params, result: { scout: ScoutView }) => scoutCard(result.scout, `scout ${shortId(result.scout.id)}`),
   },
   notices: (items) => (items as readonly ScoutView[]).flatMap((scout) => scoutNotice(scout) ?? []),
   toolBlurb: '"scouts.start" sends a read-only scout that answers a concern from the map of a memory store (wait: true for its report, else it reports back).',

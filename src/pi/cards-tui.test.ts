@@ -3,14 +3,15 @@
  * text, the cards to rule on are counted.
  */
 import { describe, expect, test } from "bun:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { initTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { card, type CardKind, type FactoryCard } from "../cards.ts";
 import { cardsToRule } from "../session-widget.ts";
 import { cardLines, FACTORY_ICON, registerCardRenderers, type CardTheme } from "./cards-tui.ts";
 
-/** A theme that draws nothing: the lines are the plain text. */
-const plain: CardTheme = { fg: (_color, text) => text, bold: (text) => text, italic: (text) => text, underline: (text) => text, strikethrough: (text) => text };
+/** A theme that draws nothing: the lines are the plain text; the card's markdown takes Pi's global theme, as in Pi. */
+const plain: CardTheme = { fg: (_color, text) => text, bold: (text) => text };
+initTheme();
 const hints = { keyHint: (_id: string, description: string) => `ctrl+o ${description}`, keyText: () => "ctrl+o" };
 
 const full: Omit<FactoryCard, "v" | "kind" | "tone" | "title"> = {

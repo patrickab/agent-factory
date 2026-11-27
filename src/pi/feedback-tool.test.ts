@@ -12,11 +12,9 @@ const scratch = mkdtempSync(join(tmpdir(), "factory-feedback-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 const bin = join(scratch, "bin");
 const root = join(scratch, "store");
-const calls = join(scratch, "calls.log");
 writeFakeMemoryStore(bin);
 process.env.PATH = `${bin}:${process.env.PATH}`;
 process.env.FAKE_STORE_ROOT = root;
-process.env.FAKE_STORE_LOG = calls;
 
 type Result = { isError?: boolean; content: { text: string }[]; terminate?: boolean };
 function tool(plan: string | null) {
@@ -28,7 +26,6 @@ function tool(plan: string | null) {
 
 beforeEach(() => {
   rmSync(root, { recursive: true, force: true });
-  rmSync(calls, { force: true });
 });
 /** A strict store (as the real CLI) with the directories `dirs` declared. */
 const store = (name: string, dirs: string[]) => writeStore(root, name, { memories: {}, docs: {}, dirs });

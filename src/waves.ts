@@ -48,6 +48,9 @@ export type WaveTaskEntry = { key: string; title: string; request: string; after
 /** `queued` too: no runner drives a wave that waits for others, a merge of one of them pokes it (`queuedWaves`). */
 export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["queued", "rejected", "waiting_approve", "merged", "blocked", "cancelled"];
 
+/** The stages a wave waits for the supervisor in (`interrupted` and stuck too: `WaveView.attention`). */
+export const WAVE_ATTENTION_STAGES: readonly WaveStage[] = ["rejected", "blocked", "waiting_approve"];
+
 /**
  * The settings `waves.start` got, stored with the wave. Its tasks start with `models`, `maxRounds` and `review` from
  * them, `branch` = the wave's branch and `merge: "auto"`; `merge` is the wave's own (`review`: wait for approve), so is
@@ -210,6 +213,13 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after" | 
   detail: string | null;
   running: boolean;
   interrupted: boolean;
+  /**
+   * It builds with tasks that can never start while nothing else moves it (`stuckKeys`), or it is queued after a wave
+   * that was cancelled or removed (`queueLook`). A stuck wave rests (its runner does too); it is not interrupted.
+   */
+  stuck: boolean;
+  /** It waits for the supervisor: interrupted, stuck, or in one of `WAVE_ATTENTION_STAGES`, whatever `running` says. */
+  attention: boolean;
   /** Its runner waits for a test slot (`test-slots.ts`) to run a merge gate; absent otherwise. */
   waitingForSlot?: true;
   /** `id`: the task's id, a pending one's too (declared with it). */

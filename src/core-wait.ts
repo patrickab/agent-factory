@@ -18,7 +18,7 @@ import { liveRunners } from "./launch.ts";
 import { readFactoryStates, sessionFilePath } from "./runner.ts";
 import { FACTORY_TURN_STATES, type State } from "./state.ts";
 import { listTasks, tagInGroup, type TaskRecord } from "./tasks.ts";
-import { foldWave, listWaves, readWave, RESTING_WAVE_STAGES, stuckKeys, type WaveFile, type WaveStage, type WaveView } from "./waves.ts";
+import { foldWave, listWaves, readWave, RESTING_WAVE_STAGES, stuckKeys, WAVE_ATTENTION_STAGES, type WaveFile, type WaveView } from "./waves.ts";
 import { liveWaveRunners } from "./wave-poke.ts";
 import { FactoryError } from "./util.ts";
 
@@ -56,16 +56,13 @@ async function waitMayEnd(records: TaskRecord[], states: (State | null)[], waves
   return true;
 }
 
-/** The stages a resting wave waits for the supervisor in (`interrupted` too). */
-const WAVE_ATTENTION_STAGES: readonly WaveStage[] = ["rejected", "blocked", "waiting_approve"];
-
 /**
  * No runner lives and nothing moves the wave on by itself: its stage is a resting one, it is interrupted, or it is
  * stuck (`stuckKeys`: tasks that can never start and nothing else running, where its runner rests too; or queued after
  * a cancelled wave). A queued wave that can still start does not rest: a merge of the waves it waits for starts it.
  */
-function waveRests({ view, stuck }: WaveLook): boolean {
-  return view.interrupted || (!view.running && (stuck || (view.stage !== "queued" && RESTING_WAVE_STAGES.includes(view.stage))));
+function waveRests({ view }: WaveLook): boolean {
+  return view.interrupted || (!view.running && (view.stuck || (view.stage !== "queued" && RESTING_WAVE_STAGES.includes(view.stage))));
 }
 
 /**
@@ -73,7 +70,7 @@ function waveRests({ view, stuck }: WaveLook): boolean {
  * (building, whether or not its runner has rested yet, or queued after a cancelled wave).
  */
 function waveNeedsAttention(look: WaveLook): boolean {
-  return look.stuck || (waveRests(look) && (look.view.interrupted || WAVE_ATTENTION_STAGES.includes(look.view.stage)));
+  return look.view.stuck || (waveRests(look) && look.view.attention);
 }
 
 /**
@@ -125,7 +122,7 @@ async function pollWaves(
 type Watched = () => Promise<{ records: TaskRecord[]; waves: WaveFile[]; proofs?: string[] }>;
 
 /** `proofs` only when the wait watches gate proofs: the answer of every other wait is as before. */
-type WaitAnswer = { tasks: TaskView[]; waves: WaveView[]; proofs?: ProofView[]; attention: string[]; timedOut: boolean };
+export type WaitAnswer = { tasks: TaskView[]; waves: WaveView[]; proofs?: ProofView[]; attention: string[]; timedOut: boolean };
 
 /**
  * `tasks.wait`: polls the watched tasks and waves until all rest, one needs attention, the deadline passes or nothing

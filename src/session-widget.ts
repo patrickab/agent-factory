@@ -5,15 +5,16 @@
  *   active wave `Factory · <n> finished`. No waves and no card to rule on: no lines (the widget goes)
  * - Cards to rule on (`cardsToRule`): the session's attention notices that no later notice of the same task, wave,
  *   scout or proof replaced and no later decision answered
- * - Active (not `merged`, not `cancelled`): those that need the supervisor first (`rejected`, `blocked`,
- *   `waiting_approve`, interrupted, building with tasks that can never start, whether a runner lives or not, queued
- *   after a cancelled wave), then newest first. A queued wave that can still start shows `queued`
+ * - Active (not `merged`, not `cancelled`): those that need the supervisor first (`WaveView.attention`), then newest
+ *   first. A queued wave that can still start shows `queued`
  * - Finished: one line `<n> finished` while closed; open (`showFinished`), that line carries their cost and every
  *   finished wave follows, newest first
  * - A row: mark, tag, title, done/total, state, cost. Only the title gives way to the width. Tag and title go through
  *   the agent view's `scrub` (no paths, no long ids)
  */
-import { neverStarts, scrub, unreachableTasks } from "./agent-view.ts";
+import { scrub } from "./agent-view.ts";
+import { WAVE_FINAL_STAGES } from "./core-tasks.ts";
+import { dollars } from "./util.ts";
 import type { WaveView } from "./waves.ts";
 
 export interface SessionWidgetOptions {
@@ -62,36 +63,22 @@ export function cardsToRule(branch: Iterable<unknown>): number {
   return [...open.values()].filter(Boolean).length;
 }
 
-const FINISHED_STAGES: readonly string[] = ["merged", "cancelled"];
-const ATTENTION_STAGES: readonly string[] = ["rejected", "blocked", "waiting_approve"];
 const ELLIPSIS = "…";
-
-/**
- * Building with tasks that can never start, or queued after a cancelled wave: the agent view's and `tasks.wait`'s
- * notion, whatever `running` says.
- */
-function stuck(view: WaveView): boolean {
-  return (view.stage === "building" && unreachableTasks(view.tasks).length > 0) || neverStarts(view);
-}
-
-function needsYou(view: WaveView): boolean {
-  return view.interrupted || ATTENTION_STAGES.includes(view.stage) || stuck(view);
-}
 
 function state(view: WaveView): string {
   if (view.interrupted) return "interrupted";
-  if (stuck(view)) return "stuck";
+  if (view.stuck) return "stuck";
   return view.stage;
 }
 
 function mark(view: WaveView): string {
   if (view.stage === "merged") return "✓";
   if (view.stage === "cancelled") return "✗";
-  return needsYou(view) ? "!" : "◐";
+  return view.attention ? "!" : "◐";
 }
 
 function money(cost: number | null): string {
-  return cost === null ? "" : `$${cost.toFixed(2)}`;
+  return cost === null ? "" : dollars(cost);
 }
 
 function totalCost(views: readonly WaveView[]): number | null {
@@ -155,14 +142,14 @@ function rows(views: readonly WaveView[], width: number): string[] {
 export function sessionWidget(waves: readonly WaveView[], { showFinished, width, rulings = 0 }: SessionWidgetOptions): string[] {
   const toRule = rulings > 0 ? ` · ${rulings} ${rulings === 1 ? "card" : "cards"} to rule on` : "";
   if (waves.length === 0) return toRule === "" ? [] : [truncate(`Factory${toRule}`, width)];
-  const active = waves.filter((view) => !FINISHED_STAGES.includes(view.stage));
-  const finished = waves.filter((view) => FINISHED_STAGES.includes(view.stage)).sort(newestFirst);
-  active.sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)) || newestFirst(a, b));
+  const active = waves.filter((view) => !WAVE_FINAL_STAGES.includes(view.stage));
+  const finished = waves.filter((view) => WAVE_FINAL_STAGES.includes(view.stage)).sort(newestFirst);
+  active.sort((a, b) => Number(b.attention) - Number(a.attention) || newestFirst(a, b));
   const finishedCost = showFinished ? money(totalCost(finished)) : "";
   if (active.length === 0) {
     return [spread(`Factory · ${finished.length} finished${toRule}`, finishedCost, width), ...(showFinished ? rows(finished, width) : [])];
   }
-  const waiting = active.filter(needsYou).length;
+  const waiting = active.filter((view) => view.attention).length;
   const header = `Factory · ${active.length} active${waiting > 0 ? ` · ${waiting} needs you` : ""}${toRule}`;
   const lines = [spread(header, money(totalCost(active)), width), ...rows(active, width)];
   if (finished.length === 0) return lines;

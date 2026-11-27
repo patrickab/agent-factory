@@ -11,7 +11,7 @@
  * - `waves.update`: the wave's title and reviewer instructions; a review reads them when it starts
  */
 import { withContractsLock } from "./contracts.ts";
-import { nonEmpty, oneLine, SHORT_ID_CHARS, type Handler, type Params } from "./core-shared.ts";
+import { nonEmpty, oneLine, type Handler, type Params } from "./core-shared.ts";
 import { findTask, pendingWaveTask } from "./core-tasks.ts";
 import { findWave, waveLook } from "./core-waves.ts";
 import { liveRunners, messageTask, type RunnerEnv } from "./launch.ts";
@@ -19,7 +19,7 @@ import { lastFactoryState } from "./runner.ts";
 import { requireModels } from "./models.ts";
 import { MODEL_SIZES, type ModelSize } from "./settings.ts";
 import { readTask, TaskBusyError, writeTask, type TaskRecord } from "./tasks.ts";
-import { errorText, FactoryError } from "./util.ts";
+import { errorText, FactoryError, short } from "./util.ts";
 import { liveWaveRunners, pokeWave } from "./wave-poke.ts";
 import { appendWaveEvents, foldWave, readWave, type FoldedTask, type NewWaveEvent, type WaveFold } from "./waves.ts";
 
@@ -147,16 +147,16 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   }
   if (record !== undefined) {
     const { id, wave } = record;
-    if (wave === null) throw new FactoryError("refused", `task ${id.slice(0, SHORT_ID_CHARS)} belongs to no wave; send it a message with tasks.message`);
+    if (wave === null) throw new FactoryError("refused", `task ${short(id)} belongs to no wave; send it a message with tasks.message`);
     waveId = wave;
     const file = await readWave(waveId);
     const found = foldWave(file.declaration, file.events).tasks.find((task) => task.taskId === id || task.id === id);
-    if (found === undefined) throw new FactoryError("not_found", `task ${id.slice(0, SHORT_ID_CHARS)} is not in its wave's log`);
+    if (found === undefined) throw new FactoryError("not_found", `task ${short(id)} is not in its wave's log`);
     key = found.key;
   } else {
     ({ wave: waveId, key } = pending as NonNullable<typeof pending>);
   }
-  const short = waveId.slice(0, SHORT_ID_CHARS);
+  const shown = short(waveId);
   const file = await readWave(waveId);
   if (model === "small") await requireModels({ small: file.declaration.overrides.models?.small });
   // A started task's state, read before the log lock (its session, not its log).
@@ -164,16 +164,16 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   const startedRecord = before?.taskId ? await readTask(before.taskId).catch(() => undefined) : undefined;
   const state = startedRecord === undefined ? undefined : (await lastFactoryState(startedRecord.sessionDir, startedRecord.sessionId))?.state;
 
-  const refuse = (why: string) => new FactoryError("refused", `task ${key} of wave ${short} ${why}`);
+  const refuse = (why: string) => new FactoryError("refused", `task ${key} of wave ${shown} ${why}`);
   // Set by the check under the log lock (a closure: typed wide on purpose).
   let delivery = "pending" as Delivery;
   let old: TaskText = { title: "", request: "" };
   let taskId = null as string | null;
   const appended = await busy(() =>
     appendWaveEvents(waveId, async (fold) => {
-      if (fold.stage === "merged" || fold.stage === "cancelled") throw new FactoryError("refused", `wave ${short} is ${fold.stage}, its tasks cannot change`);
+      if (fold.stage === "merged" || fold.stage === "cancelled") throw new FactoryError("refused", `wave ${shown} is ${fold.stage}, its tasks cannot change`);
       const task = fold.tasks.find((candidate) => candidate.key === key);
-      if (task === undefined) throw new FactoryError("not_found", `wave ${short} has no task ${key}`);
+      if (task === undefined) throw new FactoryError("not_found", `wave ${shown} has no task ${key}`);
       if (task.dropped) throw refuse("was dropped (it could never start): add a task with waves.add");
       old = { title: task.title, request: task.request };
       taskId = task.taskId;
@@ -217,7 +217,7 @@ async function updateWave(params: Params): Promise<unknown> {
   const { id } = (await findWave(params.id)).declaration;
   const appended = await busy(() =>
     appendWaveEvents(id, (fold) => {
-      if (fold.stage === "merged" || fold.stage === "cancelled") throw new FactoryError("refused", `wave ${id.slice(0, SHORT_ID_CHARS)} is ${fold.stage}, it cannot change`);
+      if (fold.stage === "merged" || fold.stage === "cancelled") throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, it cannot change`);
       const event: NewWaveEvent = { kind: "update" };
       if (title !== undefined && title !== fold.title) event.title = title;
       if (request !== undefined && request !== fold.request) event.request = request;

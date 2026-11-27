@@ -12,10 +12,8 @@ import type { ActionName } from "./core.ts";
 import { primaryCheckout } from "./git.ts";
 import type { RunnerEnv } from "./launch.ts";
 import { runCommand } from "./run.ts";
-import { isTaskTag, type TaskRecord } from "./tasks.ts";
+import { isTaskTag } from "./tasks.ts";
 import { FactoryError } from "./util.ts";
-
-export const SHORT_ID_CHARS = 8;
 
 export const WAIT_TIMEOUT_MS = { default: 600_000, minimum: 1_000, maximum: 3_600_000 };
 
@@ -38,10 +36,6 @@ export function byId<T>(items: readonly T[], idOf: (item: T) => string, id: unkn
   if (matches.length === 0) throw new FactoryError("not_found", `no ${noun} has an id starting with "${wanted}"`);
   if (matches.length > 1) throw new FactoryError("invalid", `"${wanted}" matches ${matches.length} ${noun}s (${matches.map(idOf).join(", ")}), give more of the id`);
   return matches[0];
-}
-
-export function shortId(record: TaskRecord): string {
-  return record.id.slice(0, SHORT_ID_CHARS);
 }
 
 export function nonEmpty(value: unknown): string | undefined {

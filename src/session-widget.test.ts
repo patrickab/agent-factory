@@ -7,8 +7,8 @@ test("the waves that need the supervisor come first, no line exceeds the width, 
   const waves = [
     wave({ tag: "old", createdAt: at(1), title: "fix /home/me/git/app/src/x.ts" }),
     wave({ tag: "new", createdAt: at(9) }),
-    wave({ tag: "rejected", stage: "rejected", running: false, createdAt: at(2) }),
-    wave({ tag: "stuck", running: false, createdAt: at(3), tasks: [waveTask("a", "cancelled"), waveTask("b", "pending", ["a"])] }),
+    wave({ tag: "rejected", stage: "rejected", running: false, attention: true, createdAt: at(2) }),
+    wave({ tag: "stuck", running: false, stuck: true, attention: true, createdAt: at(3), tasks: [waveTask("a", "cancelled"), waveTask("b", "pending", ["a"])] }),
     wave({ tag: "merged", stage: "merged", running: false, createdAt: at(4) }),
   ];
   for (const width of [10, 40, 120]) {

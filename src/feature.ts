@@ -1,34 +1,37 @@
 /**
- * What a feature registers: its actions (`ActionSpec`), their handlers, their agent views, its notices and its sentence
- * of the `factory` tool's description. One module per feature in `feature-<name>.ts`, listed by `features.ts`; `core.ts`,
- * `agent-view.ts`, `notify.ts` and `factory-tool.ts` read the list, so a new feature edits none of them.
+ * What a feature registers: its actions (`ActionSpec`, each with its view and cause), their handlers, its notices and
+ * its sentence of the `factory` tool's description. One module per feature in `feature-<name>.ts`, listed by
+ * `features.ts`; `core.ts`, `notify.ts` and `factory-tool.ts` read the list, so a new feature edits none of them.
  *
  * - `handlers` is a getter: read on the first call, never on load (a handler module may import a module that imports
  *   the registry)
- * - `renderers`: one per action, `(params, result) => text` (`agent-view.ts` scrubs it); `cards`: one per action,
- *   `(params, result) => FactoryCard` (`cards.ts`). An action without a renderer (`tasks.timeline`: a log programs
+ * - An action's `view`: `(params, result) => FactoryCard` (`cards.ts`), the agent's text read from it; several cards:
+ *   the first and the subjects it names (`tasks.wait`). An action without a view (`tasks.timeline`: a log programs
  *   replay) is never offered to an agent and prints as JSON
- * - `decides`: for the actions that settle something, how the cause is read from state at call time, before the action
- *   runs (`decisions.ts`): a `Cause` makes it a decision, null leaves it an action
+ * - An action's `decides`: for the actions that settle something, how the cause is read from state at call time, before
+ *   the action runs (`decisions.ts`): a `Cause` makes it a decision, null leaves it an action
  * - `notices`: the feature's notices from the items the notifier looked up under the feature's `name`
  * - Also the schema helpers the features' action specs share
  */
-import type { CardBuilder } from "./cards.ts";
+import type { FactoryCard } from "./cards.ts";
 import type { CallContext, Handler, Params } from "./core-shared.ts";
 import type { Cause } from "./decisions.ts";
 import type { Notice } from "./notify.ts";
 
 export type Schema = Record<string, unknown>;
 
+/** `view` and `decides` are functions: the JSON of `ACTIONS` (CLI `--json`, pi-host) carries only the spec. */
 export interface ActionSpec {
   summary: string;
   params: { type: "object"; required: string[]; properties: Record<string, Schema> };
   mutates: boolean;
+  view?: View;
+  decides?: CauseReader;
 }
 
 export type Handlers = Readonly<Record<string, Handler>>;
 
-export type Renderer = (params: Params, result: never) => string;
+export type View = (params: Params, result: never) => FactoryCard | FactoryCard[];
 
 /** The cause an action settles, read before it runs (`decisions.ts`); null: this call is no decision. */
 export type CauseReader = (params: Params, context: CallContext) => Promise<Cause | null>;
@@ -39,23 +42,18 @@ export interface Feature<A extends string = string> {
   actions: { readonly [K in A]: ActionSpec };
   /** Typed loosely: a handler module's types reach `ActionName`. `features.test.ts` checks they match `actions`. */
   readonly handlers: Handlers;
-  renderers: Partial<Record<NoInfer<A>, Renderer>>;
-  /** One card per action (`cards.ts`): the readable form of its result next to the agent's text. */
-  cards: Partial<Record<NoInfer<A>, CardBuilder>>;
   notices?: (items: readonly unknown[]) => Notice[];
-  /** The actions that settle something: their cause (`decisions.ts`). */
-  decides?: Partial<Record<NoInfer<A>, CauseReader>>;
   /** Its sentences of the `factory` tool's description. */
   toolBlurb?: string;
 }
 
-/** `feature` as it is, its action names checked against its handlers and renderers. */
+/** `feature` as it is, its action names inferred for `ActionName`. */
 export function feature<A extends string>(declared: Feature<A>): Feature<A> {
   return declared;
 }
 
-export function spec(summary: string, properties: Record<string, Schema>, required: string[], mutates: boolean): ActionSpec {
-  return { summary, params: { type: "object", required, properties }, mutates };
+export function spec(summary: string, properties: Record<string, Schema>, required: string[], mutates: boolean, view?: View, decides?: CauseReader): ActionSpec {
+  return { summary, params: { type: "object", required, properties }, mutates, view, decides };
 }
 
 export const REPO: Schema = { type: "string", description: "A path inside the git repository. Default: the current directory" };

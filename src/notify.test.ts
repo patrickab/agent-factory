@@ -5,11 +5,7 @@ import type { WaveView } from "./waves.ts";
 import { SESSION, TASK_ID, WAVE_ID, task as fixtureTask, wave as fixtureWave, waveTask } from "./view-fixtures.ts";
 
 const task = (over: Partial<TaskView> = {}) => fixtureTask({ origin: SESSION, running: false, ...over });
-const wave = (over: Partial<WaveView> = {}, stuck = false, events: { kind: string }[] = [{ kind: "tasks" }, { kind: "stage" }]): NoticeWave => ({
-  view: fixtureWave({ running: false, ...over }),
-  stuck,
-  events,
-});
+const wave = (over: Partial<WaveView> = {}, events: { kind: string }[] = [{ kind: "tasks" }, { kind: "stage" }]): NoticeWave => ({ view: fixtureWave({ running: false, ...over }), events });
 const none = new Set<string>();
 const keys = (notices: { key: string }[]) => notices.map((notice) => notice.key);
 
@@ -25,7 +21,7 @@ test("each attention state of a task or wave is one notice to its origin, the re
     wave({ stage: "waiting_approve" }),
     wave({ stage: "merged" }),
     wave({ stage: "reviewing", interrupted: true }),
-    wave({ tasks: [waveTask("a", "cancelled"), waveTask("b", "pending", ["a"])] }, true),
+    wave({ stuck: true, tasks: [waveTask("a", "cancelled"), waveTask("b", "pending", ["a"])] }),
   ];
   for (const input of waves) {
     const notices = pendingNotices([], [input], none);
@@ -45,7 +41,7 @@ test("a delivered key is never delivered again; a new round or a new rejection i
   expect(pendingNotices([task({ state: "blocked", round: 2, at: "2025-01-02T11:00:00.000Z" })], [], new Set([notice.key]))).toHaveLength(1);
   const first = new Set(keys(pendingNotices([], [wave({ stage: "rejected" })], none)));
   expect(pendingNotices([], [wave({ stage: "rejected" })], first)).toEqual([]);
-  const later = wave({ stage: "rejected" }, false, [{ kind: "tasks" }, { kind: "stage" }, { kind: "review" }, { kind: "stage" }]);
+  const later = wave({ stage: "rejected" }, [{ kind: "tasks" }, { kind: "stage" }, { kind: "review" }, { kind: "stage" }]);
   expect(pendingNotices([], [later], first)).toHaveLength(1);
 });
 
@@ -58,7 +54,7 @@ test("a wave's task speaks only while its wave builds", () => {
 
 test("an interrupted wave is one notice for it and its interrupted tasks, also after a supervisor's update; a runner's event after it is a new one", () => {
   const tasks = [waveTask("a", "running", [], TASK_ID)];
-  const interrupted = (events: { kind: string }[]) => wave({ interrupted: true, tasks }, false, events);
+  const interrupted = (events: { kind: string }[]) => wave({ interrupted: true, tasks }, events);
   const first = pendingNotices([task({ wave: WAVE_ID, interrupted: true })], [interrupted([{ kind: "tasks" }, { kind: "stage" }])], none);
   expect(first).toHaveLength(1);
   const delivered = new Set(keys(first));

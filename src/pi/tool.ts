@@ -13,10 +13,14 @@
  * - Drawn in the TUI as its card (`cards-tui.ts`), the agent's text with the session's switch
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { callFactoryTool, factoryCard, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolError, factoryToolParameters } from "../factory-tool.ts";
+import { actionView, callFactoryTool, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolError, factoryToolParameters } from "../factory-tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import type { ScoutTracker } from "./scout-tool.ts";
 import { factoryToolRenderers, type CardSwitch } from "./cards-tui.ts";
+
+/** A Pi tool's text result, and its error form. */
+export const toolText = (text: string, details: unknown = undefined) => ({ content: [{ type: "text" as const, text }], details });
+export const toolError = (text: string) => ({ ...toolText(text), isError: true });
 
 /** Whether the tool runs in a factory task's session: Pi started by the runner, or a session branch holding a `factory-task` entry. */
 export function isTaskSession(branch: Iterable<{ type: string }>): boolean {
@@ -41,7 +45,7 @@ export function registerFactoryTool(pi: ExtensionAPI, scouts?: ScoutTracker, vie
         const { action, ...rest } = params as Record<string, unknown>;
         if (scouts !== undefined && action === "scouts.start" && !isTaskSession(ctx.sessionManager.getBranch())) {
           const { text, result } = await scouts.call(rest, signal, ctx);
-          return { content: [{ type: "text", text }], details: { result, card: factoryCard("scouts.start", rest, result) } };
+          return toolText(text, { result, card: actionView("scouts.start", rest, result).card });
         }
         const { text, result, card } = await callFactoryTool(params, isTaskSession(ctx.sessionManager.getBranch()), {
           cwd: ctx.cwd,
@@ -49,9 +53,9 @@ export function registerFactoryTool(pi: ExtensionAPI, scouts?: ScoutTracker, vie
           // The declaring session of a wave (`waves.start`): Pi's public session id.
           origin: ctx.sessionManager.getSessionId(),
         });
-        return { content: [{ type: "text", text }], details: { result, card } };
+        return toolText(text, { result, card });
       } catch (error) {
-        return { content: [{ type: "text", text: factoryToolError(error) }], details: undefined, isError: true };
+        return toolError(factoryToolError(error));
       }
     },
   });

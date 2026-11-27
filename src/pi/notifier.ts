@@ -20,6 +20,7 @@
 import { mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { noticeInputs } from "../core.ts";
+import { FINAL_STATES, WAVE_FINAL_STAGES } from "../core-tasks.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
 import { pendingNotices, scoutNoticeKey, type Notice } from "../notify.ts";
 import { callerKey, scoutDirs, scoutsDir, scoutView, type ScoutView } from "../scouts.ts";
@@ -56,9 +57,6 @@ const FALLBACK_MS = 60_000;
 function relevant(name: string | Buffer | null): boolean {
   return name === null || !String(name).endsWith(".log");
 }
-
-const FINAL_TASK_STATES: readonly (string | null)[] = ["done", "cancelled"];
-const FINAL_WAVE_STAGES: readonly string[] = ["merged", "cancelled"];
 
 /** What changes when a file is written: size and mtime; null when it is gone. */
 function fileStamp(path: string): string | null {
@@ -159,11 +157,11 @@ export function startNotifier(options: NotifierOptions): Notifier {
     for (const task of tasks) {
       const seen = before.get(task.id);
       // Final when read, the file stamped before that read: a task first read here is read once more first.
-      if (seen !== undefined && seen.path === task.sessionPath && FINAL_TASK_STATES.includes(task.state)) {
+      if (seen !== undefined && seen.path === task.sessionPath && task.state !== null && FINAL_STATES.includes(task.state)) {
         finishedTasks.set(task.id, { sessionId: task.sessionId, path: seen.path, stamp: seen.stamp });
       }
     }
-    for (const wave of waves) if (FINAL_WAVE_STAGES.includes(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);
+    for (const wave of waves) if (WAVE_FINAL_STAGES.includes(wave.view.stage)) finishedWaves.set(wave.view.id, wave.view);
     if (!stopped) options.onWaves?.([...waves.map((wave) => wave.view).filter((view) => !finishedWaves.has(view.id)), ...finishedWaves.values()]);
   };
 

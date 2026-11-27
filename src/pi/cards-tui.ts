@@ -13,9 +13,10 @@
  *   so a toggle redraws the cards already shown
  * - No line is wider than the width it renders at
  */
-import type { ExtensionAPI, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
-import { Markdown, Text, truncateToWidth, wrapTextWithAnsi, type Component, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, type ExtensionAPI, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
+import { Markdown, Text, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import type { CardFinding, FactoryCard } from "../cards.ts";
+import { dollars } from "../util.ts";
 
 /** The factory's icon, on every card and every `factory` tool call. */
 export const FACTORY_ICON = "◆";
@@ -27,7 +28,7 @@ const TEXT_LINES = 8;
 const SEVERITIES: readonly CardFinding["severity"][] = ["blocker", "major", "minor"];
 
 /** What of Pi's theme a card uses. */
-export type CardTheme = Pick<Theme, "fg" | "bold" | "italic" | "underline" | "strikethrough">;
+export type CardTheme = Pick<Theme, "fg" | "bold">;
 
 /** The session's switch: `agentText` shows the agent's text in place of every card. */
 export interface CardSwitch {
@@ -62,29 +63,6 @@ export function contentText(content: unknown): string {
     .join("\n");
 }
 
-export function markdownTheme(theme: CardTheme): MarkdownTheme {
-  return {
-    heading: (text) => theme.fg("mdHeading", theme.bold(text)),
-    link: (text) => theme.fg("mdLink", text),
-    linkUrl: (text) => theme.fg("mdLinkUrl", text),
-    code: (text) => theme.fg("mdCode", text),
-    codeBlock: (text) => theme.fg("mdCodeBlock", text),
-    codeBlockBorder: (text) => theme.fg("mdCodeBlockBorder", text),
-    quote: (text) => theme.fg("mdQuote", text),
-    quoteBorder: (text) => theme.fg("mdQuoteBorder", text),
-    hr: (text) => theme.fg("mdHr", text),
-    listBullet: (text) => theme.fg("mdListBullet", text),
-    bold: (text) => theme.bold(text),
-    italic: (text) => theme.italic(text),
-    strikethrough: (text) => theme.strikethrough(text),
-    underline: (text) => theme.underline(text),
-  };
-}
-
-function dollars(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
-}
-
 /** `text` wrapped to `width` with `indent` before every line. */
 function indented(text: string, width: number, indent = "  "): string[] {
   const room = Math.max(1, width - indent.length);
@@ -113,7 +91,7 @@ export function cardLines(card: FactoryCard, options: CardRenderOptions, theme: 
     card.id,
     card.state,
     card.progress ? `${card.progress.done}/${card.progress.total}` : undefined,
-    card.cost === undefined ? undefined : dollars(card.cost),
+    card.cost === undefined ? undefined : dollars(card.cost / 100),
   ].filter((part): part is string => part !== undefined && part !== "");
   if (meta.length > 0) lines.push(...indented(theme.fg("dim", meta.join(" · ")), width));
 
@@ -147,7 +125,7 @@ export function cardLines(card: FactoryCard, options: CardRenderOptions, theme: 
     const source = card.text.split("\n");
     const shown = options.expanded ? source : source.slice(0, TEXT_LINES);
     if (shown.length < source.length) hidden = true;
-    const markdown = new Markdown(shown.join("\n"), 0, 0, markdownTheme(theme));
+    const markdown = new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme());
     lines.push(...markdown.render(Math.max(1, width - 2)).map((line) => `  ${line}`.trimEnd()));
     if (shown.length < source.length) lines.push(...indented(theme.fg("dim", `… ${source.length - shown.length} more lines`), width));
   }

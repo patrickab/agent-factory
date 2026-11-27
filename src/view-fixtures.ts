@@ -72,6 +72,8 @@ export function wave(over: Partial<WaveView> = {}): WaveView {
     detail: null,
     running: true,
     interrupted: false,
+    stuck: false,
+    attention: false,
     tasks: [waveTask("record", "done"), waveTask("actions", "running", ["record"]), waveTask("docs", "pending", ["actions"])],
     counts: { total: 3, done: 1 },
     reviews: [],

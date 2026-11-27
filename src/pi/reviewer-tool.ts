@@ -21,16 +21,15 @@
  *     then refused with the hint to notify the supervisor
  */
 import { readFileSync } from "node:fs";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { ACTIONS } from "../core.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { findWave, noteToSupervisor, REVIEWER_FIX_CAP, startReviewerFix, waveReviewWorktree } from "../core-waves.ts";
 import { factoryToolError } from "../factory-tool.ts";
 import { REVIEW_DIFF_ENV, readDiffText, STUB_PREFIX } from "../review-diff.ts";
-import { scoutBlock } from "../scout-view.ts";
 import { listTasks } from "../tasks.ts";
 import { isRecord } from "../util.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
-import { createScoutTracker, SCOUT_TOOL_NAME } from "./scout-tool.ts";
+import { createScoutTracker, registerScoutTool } from "./scout-tool.ts";
+import { toolError, toolText } from "./tool.ts";
 
 export const REVIEW_WAVE_ENV = "FACTORY_REVIEW_WAVE";
 export const REVIEW_TASK_ENV = "FACTORY_REVIEW_TASK";
@@ -45,35 +44,14 @@ export interface ReviewerIds {
   plan: string | null;
 }
 
-type ToolResult = { content: { type: "text"; text: string }[]; details: unknown; isError?: boolean };
-const text = (value: string, details: unknown = undefined): ToolResult => ({ content: [{ type: "text", text: value }], details });
-const failed = (error: unknown): ToolResult => ({ ...text(factoryToolError(error)), isError: true });
+const failed = (error: unknown) => toolError(factoryToolError(error));
 const nonEmptyString = (value: unknown): string | undefined => (typeof value === "string" && value.trim() !== "" ? value : undefined);
 
 /** `scout`, `feedback`, `notify_supervisor` and `start_fix` of a wave's reviewer; none ends the review. */
 export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds): void {
-  const tracker = createScoutTracker({ isCoder: () => true, holds: () => false });
-  const { properties, required } = ACTIONS["scouts.start"].params as { properties: Record<string, unknown>; required: string[] };
-  const { wait: _wait, repo: _repo, ...scoutProperties } = properties;
-  pi.registerTool({
-    name: SCOUT_TOOL_NAME,
-    label: "Scout",
-    description:
-      "Send a read-only scout into the work under review: it answers a concern (and questions) from the map of the memory store, explores where the map is not current, writes what it learns there and reports MISSING / DECISIONS / KEY FACTS / MEMORY. The call waits for the report, 15 minutes at the latest.",
-    promptSnippet: "Ask a read-only scout about the code and wait for its report",
-    parameters: { type: "object", required, properties: scoutProperties } as never,
-    async execute(_toolCallId, params: unknown, signal, _onUpdate, ctx: ExtensionContext) {
-      try {
-        const record = ids.task === null ? undefined : (await listTasks()).find((task) => task.id === ids.task);
-        // The task's worktree, else the wave's review worktree.
-        const repo = record?.worktree ?? waveReviewWorktree((await findWave(ids.wave)).declaration);
-        const { text: answer, result } = await tracker.call({ ...(isRecord(params) ? params : {}), repo, wait: true }, signal, ctx);
-        if (result.timedOut) return text(`${scoutBlock(result.scout, true)}\nits report did not arrive in time: go on without it`, result);
-        return text(answer, result);
-      } catch (error) {
-        return failed(error);
-      }
-    },
+  registerScoutTool(pi, createScoutTracker({ isCoder: () => true, holds: () => false }), {
+    // The task's worktree, else the wave's review worktree.
+    repo: async () => (ids.task === null ? undefined : (await listTasks()).find((task) => task.id === ids.task))?.worktree ?? waveReviewWorktree((await findWave(ids.wave)).declaration),
   });
   registerFeedbackTool(pi, {
     role: "reviewer",
@@ -88,10 +66,10 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds): void 
     parameters: { type: "object", required: ["text"], properties: { text: { type: "string", description: "What the supervisor should know, short" } } } as never,
     async execute(_toolCallId, params: unknown) {
       const value = nonEmptyString(isRecord(params) ? params.text : undefined);
-      if (value === undefined) return { ...text(`${NOTIFY_TOOL}: text must not be empty`), isError: true };
+      if (value === undefined) return toolError(`${NOTIFY_TOOL}: text must not be empty`);
       try {
         await noteToSupervisor(ids.wave, value, ids.task);
-        return text("The supervisor gets the notice. Go on with the review.");
+        return toolText("The supervisor gets the notice. Go on with the review.");
       } catch (error) {
         return failed(error);
       }
@@ -114,11 +92,11 @@ export function registerReviewerTools(pi: ExtensionAPI, ids: ReviewerIds): void 
     async execute(_toolCallId, params: unknown) {
       const title = nonEmptyString(isRecord(params) ? params.title : undefined);
       const request = nonEmptyString(isRecord(params) ? params.request : undefined);
-      if (title === undefined || request === undefined) return { ...text(`${FIX_TOOL}: title and request must not be empty`), isError: true };
+      if (title === undefined || request === undefined) return toolError(`${FIX_TOOL}: title and request must not be empty`);
       try {
         const model = isRecord(params) && (params.model === "small" || params.model === "big") ? params.model : undefined;
         const key = await startReviewerFix(ids.wave, { title, request, ...(model ? { model } : {}) });
-        return text(`Task ${key} added to the wave; it starts at once. Go on with the review.`, { key });
+        return toolText(`Task ${key} added to the wave; it starts at once. Go on with the review.`, { key });
       } catch (error) {
         return failed(error);
       }
@@ -175,7 +153,7 @@ export default function (pi: ExtensionAPI) {
       parameters: { type: "object", properties: { paths: { type: "array", items: { type: "string" }, description: "Only these files or directories" } } },
       async execute(_toolCallId, params) {
         const { paths } = params as { paths?: string[] };
-        return { content: [{ type: "text", text: readDiffText(readFileSync(diffFile, "utf8"), paths) }], details: {} };
+        return toolText(readDiffText(readFileSync(diffFile, "utf8"), paths), {});
       },
     });
   }
@@ -186,11 +164,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Submit the final review verdict as a terminating tool call",
     parameters,
     async execute(_toolCallId, params) {
-      return {
-        content: [{ type: "text", text: "Verdict recorded." }],
-        details: { findings: (params as { findings: unknown }).findings },
-        terminate: true,
-      };
+      return { ...toolText("Verdict recorded.", { findings: (params as { findings: unknown }).findings }), terminate: true };
     },
   });
   const wave = process.env[REVIEW_WAVE_ENV];

@@ -3,7 +3,7 @@ import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentView } from "./agent-view.ts";
+import { actionView } from "./factory-tool.ts";
 import { ACTIONS } from "./core.ts";
 
 const CLI = join(import.meta.dirname, "cli.ts");
@@ -18,7 +18,7 @@ function factory(args: string[], stdin?: string) {
 
 test("params run the action and print the agent view, --json the full view; invalid input exits 2, a failure 1", () => {
   expect(JSON.parse(factory(["models.set", "-", "--json"], '{"models":["a/b","c/d"]}').stdout)).toEqual({ models: ["a/b", "c/d"] });
-  expect(factory(["models.get"])).toEqual({ code: 0, stdout: `${agentView("models.get", {}, { models: ["a/b", "c/d"] })}\n`, stderr: "" });
+  expect(factory(["models.get"])).toEqual({ code: 0, stdout: `${actionView("models.get", {}, { models: ["a/b", "c/d"] }).text}\n`, stderr: "" });
   expect(JSON.parse(factory(["models.get", "{}", "--json"]).stdout)).toEqual({ models: ["a/b", "c/d"] });
   for (const args of [["tasks.nope"], ["models.set", "{models"], ["models.get", "{}", "{}"]]) expect(factory(args)).toMatchObject({ code: 2, stdout: "" });
   expect(factory(["tasks.get", '{"id":"00000000"}', "--json"])).toMatchObject({ code: 1, stdout: "" });
