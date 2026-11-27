@@ -193,7 +193,7 @@ describe("tasks.message", () => {
     expect(existsSync(taskInboxPath(record.id))).toBe(false);
   }, 30_000);
 
-  test("a running task's live runner gets an inbox line; no state and merging are refused", async () => {
+  test("a running task's live runner gets an inbox line; no state, merging and done are refused", async () => {
     await writeTask(fakeRecord(ID_1, "/r"));
     await expectError(callAction("tasks.message", { id: ID_1, text: "hi" }), "refused", "has not started yet");
     process.env.FAKE_PI_HOLD = "1";
@@ -205,10 +205,12 @@ describe("tasks.message", () => {
     expect(readFileSync(taskInboxPath(record.id), "utf8")).toBe('{"text":"also do c"}\n');
     expect(prompts()).toEqual(["prompt /factory start"]);
 
-    const merging = fakeRecord(ID_2, "/r");
-    await writeTask(merging);
-    writeSession(merging, [{ type: "custom", customType: "factory-state", data: { state: "merging", round: 1, reason: "approved" } }]);
-    await expectError(callAction("tasks.message", { id: ID_2, text: "hi" }), "refused", "is merging");
+    for (const [state, why] of [["merging", "is merging"], ["done", "waves.add"]]) {
+      const resting = fakeRecord(ID_2, "/r");
+      await writeTask(resting);
+      writeSession(resting, [{ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "approved" } }]);
+      await expectError(callAction("tasks.message", { id: ID_2, text: "hi" }), "refused", why);
+    }
   }, 30_000);
 });
 

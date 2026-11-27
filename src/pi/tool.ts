@@ -2,8 +2,7 @@
  * The `factory` tool in Pi: every core action for an agent, one tool call per action. Its name, description, schema
  * and answer come from `factory-tool.ts`, which the MCP server shares.
  * - Sequential: one call at a time. Every failure is an `isError` result without details
- * - In a task session only the actions with `mutates: false` are offered: a coder starts a task only through
- *   `factory_new_task` (`followup.ts`)
+ * - In a task session only the actions with `mutates: false` are offered
  * - A call passes the session's id as `origin`: `tasks.start` and `waves.start` record it, notifications go there
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

@@ -1,41 +1,24 @@
-/**
- * The `factory_new_task` tool as `index.ts` registers and gates it, against a fake `pi`/`ctx` on a throwaway repo.
- * `tasks.start` is replaced by a recorder: no task, runner or Pi starts.
- */
+/** The `factory_ask_supervisor` tool as `index.ts` registers and gates it, against a fake `pi`/`ctx` on a throwaway repo. */
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { writeTask } from "../tasks.ts";
-import { ASK_SUPERVISOR_TOOL, newTaskDeps } from "./followup.ts";
+import factory from "./index.ts";
 
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-followup-tool-test-")));
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-ask-tool-test-")));
 process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
-
-let started = 0;
-const origins: (string | undefined)[] = [];
-const realStart = newTaskDeps.callAction;
-afterAll(() => {
-  newTaskDeps.callAction = realStart;
-});
-newTaskDeps.callAction = (async (_name: string, _params: unknown, options?: { origin?: string }) => {
-  started += 1;
-  origins.push(options?.origin);
-  return { id: `0000000${started}-0000-0000-0000-000000000000` };
-}) as typeof realStart;
-const { default: factory } = await import("./index.ts");
 
 function gitIn(repo: string, ...args: string[]): string {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
 let counter = 0;
-function repoWithTask(): { repo: string; worktree: string; merged: string } {
+function repoWithTask(): string {
   counter += 1;
   const repo = join(scratch, `repo-${counter}`);
   mkdirSync(repo);
@@ -50,8 +33,7 @@ function repoWithTask(): { repo: string; worktree: string; merged: string } {
   writeFileSync(join(worktree, "a.txt"), "a\n");
   gitIn(worktree, "add", "a.txt");
   gitIn(worktree, "commit", "--quiet", "-m", "feat: add a");
-  gitIn(repo, "merge", "--quiet", "--ff-only", "task");
-  return { repo, worktree, merged: gitIn(repo, "rev-parse", "main") };
+  return worktree;
 }
 
 interface Tool {
@@ -108,68 +90,19 @@ function session(cwd: string, branch: { customType: string; data: unknown }[]) {
       await emit("input", { text: "also do x", source: "rpc" });
       await emit("before_agent_start", { messageType: "user", systemPromptOptions: { sections } });
     },
-    newTask: (params: unknown) => tools.get("factory_new_task")!.execute("call", params, undefined, undefined, ctx),
-    ask: (params: unknown) => tools.get(ASK_SUPERVISOR_TOOL)!.execute("call", params, undefined, undefined, ctx),
+    ask: (params: unknown) => tools.get("factory_ask_supervisor")!.execute("call", params, undefined, undefined, ctx),
   };
 }
 
 const custom = (customType: string, data: unknown) => ({ customType, data });
 const taskEntry = () =>
   custom("factory-task", { title: "Add a", request: "add a", settings: { branch: "main", merge: "auto", maxRounds: 3, review: false, models: {} }, branch: "task", mainBranch: "main", baseSha: "x" });
-const mergedSession = (worktree: string, merged: string) =>
-  session(worktree, [
-    taskEntry(),
-    custom("factory-round", { round: 1, trigger: "start" }),
-    custom("factory-merge", { ok: true, commit: merged, error: null, depsSynced: false }),
-    custom("factory-state", { state: "done", round: 1, reason: "merged" }),
-  ]);
-
-describe("factory_new_task", () => {
-  test("is registered in a task session only", async () => {
-    const plain = session(scratch, []);
-    await plain.emit("session_start");
-    expect(plain.tools.has("factory_new_task")).toBe(false);
-    const { worktree, merged } = repoWithTask();
-    const task = mergedSession(worktree, merged);
-    await task.emit("session_start");
-    expect(task.tools.has("factory_new_task")).toBe(true);
-  });
-
-  test("the new task carries the parent task's origin (invariant 9)", async () => {
-    const { worktree, merged } = repoWithTask();
-    const pi = mergedSession(worktree, merged);
-    await pi.emit("session_start");
-    await pi.message();
-    // No record holds this session yet: no origin.
-    expect((await pi.newTask({ title: "feat: o", handoff: "do o" })).isError).toBeUndefined();
-    expect(origins.at(-1)).toBeUndefined();
-    await writeTask({
-      id: "00000000-0000-0000-0000-0000000000aa",
-      repo: worktree,
-      worktree,
-      branch: "task",
-      title: "Add a",
-      sessionId: "tool-session",
-      sessionDir: join(scratch, "sessions"),
-      createdAt: new Date(0).toISOString(),
-      tag: "test",
-      plan: null,
-      wave: null,
-      origin: "supervisor-session",
-    });
-    await pi.emit("input", { text: "and p", source: "rpc" });
-    expect((await pi.newTask({ title: "feat: p", handoff: "do p" })).isError).toBeUndefined();
-    expect(origins.at(-1)).toBe("supervisor-session");
-  });
-
-});
-
 describe("factory_ask_supervisor", () => {
   test("records the question and waiting_answer and ends the turn; refused outside a running coder turn or without a question", async () => {
-    const { worktree } = repoWithTask();
+    const worktree = repoWithTask();
     const pi = session(worktree, [taskEntry(), custom("factory-round", { round: 1, trigger: "start" }), custom("factory-state", { state: "blocked", round: 1, reason: "max_rounds: gates" })]);
     await pi.emit("session_start");
-    expect(pi.tools.has(ASK_SUPERVISOR_TOOL)).toBe(true);
+    expect(pi.tools.has("factory_ask_supervisor")).toBe(true);
     expect((await pi.ask({ question: "Which table?" })).isError).toBe(true);
 
     await pi.message();
@@ -185,15 +118,15 @@ describe("factory_ask_supervisor", () => {
   });
 
   test("refused next to another tool call in the same message or while a message is queued: the turn could not end with it (m6)", async () => {
-    const { worktree } = repoWithTask();
+    const worktree = repoWithTask();
     const pi = session(worktree, [taskEntry(), custom("factory-round", { round: 1, trigger: "start" }), custom("factory-state", { state: "blocked", round: 1, reason: "max_rounds: gates" })]);
     await pi.emit("session_start");
     await pi.message();
     const toolCall = (name: string) => ({ type: "toolCall", id: name, name, arguments: {} });
-    pi.messages.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "I ask" }, toolCall(ASK_SUPERVISOR_TOOL), toolCall("read")] } });
+    pi.messages.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "I ask" }, toolCall("factory_ask_supervisor"), toolCall("read")] } });
     expect((await pi.ask({ question: "Which table?" })).isError).toBe(true);
 
-    pi.messages.push({ type: "message", message: { role: "assistant", content: [toolCall(ASK_SUPERVISOR_TOOL)] } });
+    pi.messages.push({ type: "message", message: { role: "assistant", content: [toolCall("factory_ask_supervisor")] } });
     pi.flags.pending = true;
     expect((await pi.ask({ question: "Which table?" })).isError).toBe(true);
     expect(pi.entries.filter((entry) => entry.customType === "factory-question")).toEqual([]);

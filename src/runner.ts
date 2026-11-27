@@ -15,6 +15,7 @@ import { rebuild, RESTING_STATES, type StateData } from "./state.ts";
 import { handLockFile, unlockFile } from "./tasks.ts";
 import { errorText, ifMissing, isRecord, jsonLines, writeAtomic } from "./util.ts";
 import { pokeWave, TASK_WAVE_ENV } from "./wave-poke.ts";
+import { foldWave, readWave, WAVE_FINAL_STAGES } from "./waves.ts";
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const CHECK_INTERVAL_MS = 2000;
@@ -402,12 +403,17 @@ async function startSuccessor(args: [worktree: string, sessionDir: string, sessi
   if (pid !== undefined && lock) await handLockFile(lock, pid);
 }
 
-/** Pokes the task's wave (`FACTORY_TASK_WAVE`) when the task rests. */
+/**
+ * Pokes the task's wave (`FACTORY_TASK_WAVE`) when the task rests. A merged or cancelled wave is not poked: a runner
+ * started for it does nothing, and the task runners `waves.cancel` stops would start one after it stopped the wave's.
+ */
 async function pokeTaskWave(sessionDir: string, sessionId: string): Promise<void> {
   const wave = process.env[TASK_WAVE_ENV];
   if (wave === undefined || wave === "") return;
   const state = await lastFactoryState(sessionDir, sessionId);
   if (state === undefined || !RESTING_STATES.includes(state.state)) return;
+  const file = await readWave(wave);
+  if (WAVE_FINAL_STAGES.includes(foldWave(file.declaration, file.events).stage)) return;
   await pokeWave(wave);
 }
 

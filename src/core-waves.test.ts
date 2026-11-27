@@ -232,7 +232,7 @@ describe("waves", () => {
     expect(prompts()).toEqual([]);
   });
 
-  test("tasks.start (and with it factory_new_task) refuses the branch of a wave not merged or cancelled (invariant 13)", async () => {
+  test("tasks.start refuses the branch of a wave not merged or cancelled (invariant 13)", async () => {
     const repo = makeRepo();
     git(repo, "branch", "main-factory-w9");
     const id = waveId(2, 5);
@@ -461,13 +461,13 @@ describe("waiting on waves and the wave actions", () => {
     expect((await wait({ wave: WAVE() })).attention).toEqual([taskId(2), WAVE()]);
   });
 
-  test("a task of a wave past building is not continued (invariant 2): retry, a follow-up and approve refused, actions say so; its question is answered", async () => {
+  test("a task of a wave past building is not continued (invariant 2): retry, a message and approve refused, actions say so; its question is answered", async () => {
     const [cancelled, done, asking] = await writtenWave("/r", ["cancelled", "done", "waiting_answer"]);
     const actionsOf = async (record: TaskRecord) => ((await callAction("tasks.get", { id: record.id })) as TaskView).actions;
     // While the wave builds: as for any task.
     expect(await actionsOf(cancelled)).toEqual(["tasks.retry", "tasks.remove", "tasks.message"]);
     // A done task stays while its wave is neither merged nor cancelled (its own test below).
-    expect(await actionsOf(done)).toEqual(["tasks.message"]);
+    expect(await actionsOf(done)).toEqual([]);
     expect(await actionsOf(asking)).toEqual(["tasks.cancel", "tasks.message"]);
     for (const stage of ["reviewing", "waiting_approve", "merging", "rejected", "blocked", "merged", "cancelled"] as const) {
       await appendWaveEvent(WAVE(), { kind: "stage", stage, reason: stage === "blocked" ? "gates" : null });
@@ -476,7 +476,7 @@ describe("waiting on waves and the wave actions", () => {
       // The answer to a question continues the round it asked in: always allowed.
       expect(await actionsOf(asking)).toEqual(["tasks.cancel", "tasks.message"]);
       await expectError(callAction("tasks.retry", { id: cancelled.id }), "refused", `belongs to wave ${WAVE().slice(0, 8)}, which is ${stage}`);
-      await expectError(callAction("tasks.message", { id: done.id, text: "one more thing" }), "refused", "give the work to the wave with waves.add");
+      await expectError(callAction("tasks.message", { id: done.id, text: "one more thing" }), "refused", "waves.add");
     }
     writeSession(done, [stateEntry("waiting_approve")]);
     expect(await actionsOf(done)).toEqual(["tasks.cancel", "tasks.remove"]);

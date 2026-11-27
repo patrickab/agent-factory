@@ -81,7 +81,7 @@ export const SETTINGS_HANDLERS = {
     const text = await ifMissing(readFile(join(repo, "factory.yaml"), "utf8"), null);
     if (text !== null) return { exists: true, text, draft: null, source: [] };
     const draft = initDraft(repo);
-    return { exists: false, text: null, draft: draft.text, source: draft.source === "" ? [] : draft.source.split(", ") };
+    return { exists: false, text: null, draft: draft.text, source: draft.source === "" ? [] : [draft.source] };
   },
 
   "config.write": async (params, { cwd }) => {

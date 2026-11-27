@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
 import { contractsForLaunch } from "./contracts.ts";
 import { git, primaryCheckout } from "./git.ts";
-import { CODER_EXTENSIONS_ENV, CODER_MODEL_ENV, inboxReadPath, lastFactoryState, taskMainBranch } from "./runner.ts";
+import { CODER_EXTENSIONS_ENV, CODER_MODEL_ENV, inboxReadPath, lastFactoryState } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, taskModels, type ModelSize, type StoredSettings } from "./settings.ts";
 import type { Settings, StartPayload } from "./state.ts";
@@ -269,24 +269,10 @@ export async function messageTask(record: TaskRecord, text: string, env?: Runner
     if (state === undefined) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} has not started yet, send the message once it runs`);
     if (state.state === "merging") throw new FactoryError("refused", `task ${record.id.slice(0, 8)} is merging, send the message when the merge has ended`);
     if ((await liveRunners(record)).length > 0) throw new FactoryError("busy", `task ${record.id.slice(0, 8)} is busy: its last runner is still ending, try again in a few seconds`);
-    if (state.state === "done") await restoreWorktree(record);
     await sendCommand(record, text, env);
   } finally {
     await unlockTask(record.id);
   }
-}
-
-/**
- * The worktree of a done task that is gone, made again before a runner starts in it: on the task branch when that
- * still exists, else on a new one off the target branch. `git worktree prune` first drops the stale entry.
- */
-export async function restoreWorktree(record: TaskRecord): Promise<void> {
-  if (existsSync(record.worktree)) return;
-  const target = await taskMainBranch(record.sessionDir, record.sessionId);
-  await git(runCommand, record.repo, ["worktree", "prune"]);
-  if (await localBranchExists(record.repo, record.branch)) await git(runCommand, record.repo, ["worktree", "add", "--quiet", record.worktree, record.branch]);
-  else if (target !== undefined) await git(runCommand, record.repo, ["worktree", "add", "--quiet", "-b", record.branch, record.worktree, `refs/heads/${target}`]);
-  else throw new Error(`the worktree ${record.worktree} is gone and the task's target branch is unknown`);
 }
 
 /** The task's live runner: the holder of its lock (`lockRunner`), named by the task's session id; as a list. */

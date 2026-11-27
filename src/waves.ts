@@ -122,12 +122,12 @@ export type WaveEvent =
   /** `contracts.apply` changed the contract `name` (its facts `paths`); `done`: the wave's done tasks, reported to the supervisor. */
   | { at: string; kind: "contract"; name: string; paths: string[]; done: string[] }
   /**
-   * `tasks.update` (with `key`) or `waves.update` (without): the fields given replace the task's spec or the wave's
-   * title and request. A started task's `after` and `model` stay what it started with.
+   * `tasks.update` (with `key`, a pending task) or `waves.update` (without): the fields given replace the task's spec or
+   * the wave's title and request.
    */
   | { at: string; kind: "update"; key?: string; title?: string; request?: string; after?: string[]; model?: ModelSize }
-  /** The runner launches the pending task `key` with its spec as folded now (`title`, `request`: the text it launched with); its `task` event follows (or a `stage` event). */
-  | { at: string; kind: "launch"; key: string; title?: string; request?: string }
+  /** The runner launches the pending task `key` with its spec as folded now; its `task` event follows (or a `stage` event). */
+  | { at: string; kind: "launch"; key: string }
   | ({ kind: "conflict" } & WaveConflict)
   /** The wave's reviewer told the supervisor `text` (`notify_supervisor`), while reviewing the task `taskId` (null: none). */
   | { at: string; kind: "note"; text: string; taskId: string | null };
@@ -420,7 +420,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
   return fold;
 }
 
-/** Applies an `update` event: to the task `key` (a started one keeps its `after` and `model`), else to the wave. */
+/** Applies an `update` event: to the task `key`, else to the wave. */
 function foldUpdate(fold: WaveFold, event: Extract<WaveEvent, { kind: "update" }>): void {
   const fields: string[] = [];
   if (event.key === undefined) {
@@ -431,8 +431,6 @@ function foldUpdate(fold: WaveFold, event: Extract<WaveEvent, { kind: "update" }
   } else {
     const task = fold.tasks.find((candidate) => candidate.key === event.key);
     if (task === undefined) return;
-    // `tasks.update` gives a task being launched no `after` or `model` (unless its launch died with its runner).
-    const pending = task.taskId === null;
     if (event.title !== undefined) {
       task.title = event.title;
       fields.push("title");
@@ -441,11 +439,11 @@ function foldUpdate(fold: WaveFold, event: Extract<WaveEvent, { kind: "update" }
       task.request = event.request;
       fields.push("request");
     }
-    if (pending && event.after !== undefined) {
+    if (event.after !== undefined) {
       task.after = [...event.after];
       fields.push("after");
     }
-    if (pending && event.model !== undefined) {
+    if (event.model !== undefined) {
       task.model = event.model;
       fields.push("model");
     }

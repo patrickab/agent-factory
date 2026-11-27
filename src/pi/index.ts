@@ -12,8 +12,8 @@ import { cardsToRule, sessionWidget } from "../session-widget.ts";
 import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
-import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
 import { sessionWave } from "../core.ts";
+import { DONE_REFUSAL } from "../core-tasks.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
 import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "../pipeline.ts";
@@ -40,18 +40,16 @@ import {
   type OpsDeps,
   type RunOpening,
 } from "../ops.ts";
-import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, type Draft, type Snapshot, type State } from "../state.ts";
+import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, type Draft, type State } from "../state.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
 import { createScoutTracker, registerScoutTool, type ScoutCore } from "./scout-tool.ts";
-import { isTaskSession, registerFactoryTool } from "./tool.ts";
+import { isTaskSession, registerFactoryTool, toolError, toolText } from "./tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
-import { errorText } from "../util.ts";
+import { errorText, isRecord } from "../util.ts";
 import { sessionTask, type TaskRecord } from "../tasks.ts";
 
 /** Tag of the system prompt section that carries `.factory/agents/coder.md`. */
 const ROLE_SECTION = "factory_role";
-/** Tag of the system prompt section that tells the coder how a follow-up on a merged task is carried out. */
-const FOLLOW_UP_SECTION = "factory_followup";
 /** Key of the widget above the editor that lists the session's waves. */
 const WAVES_WIDGET = "factory-waves";
 
@@ -65,8 +63,15 @@ function lastAssistantText(entries: Iterable<{ type: string }>): string {
   return text;
 }
 
-function isMergedTask(snapshot: Snapshot): boolean {
-  return snapshot.state === "done" && snapshot.reason.startsWith("merged");
+/** The tool calls of the session's last assistant message: Pi records the message before it runs any of its calls. */
+function lastAssistantToolCalls(entries: Iterable<{ type: string }>): number {
+  let calls = 0;
+  for (const entry of entries) {
+    const { message } = entry as { message?: { role?: unknown; content?: unknown } };
+    if (entry.type !== "message" || message?.role !== "assistant") continue;
+    calls = Array.isArray(message.content) ? message.content.filter((part) => isRecord(part) && part.type === "toolCall").length : 0;
+  }
+  return calls;
 }
 
 /** `scoutCore`: how the `scout` tool reaches the core, for tests; Pi passes nothing. */
@@ -90,28 +95,10 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     taskRecord ??= sessionTask(ctx.sessionManager.getSessionId()).catch(() => undefined);
     return taskRecord;
   };
-  /** `factory_new_task` and `factory_ask_supervisor` exist in task sessions only: registered once the session holds a task. */
+  /** `feedback` and `factory_ask_supervisor` exist in task sessions only: registered once the session holds a task. */
   const registerTaskTools = () => {
     if (taskTools || !session.snapshot) return;
     taskTools = true;
-    registerNewTaskTool(pi, {
-      refusal: () => {
-        const current = session.snapshot;
-        if (!current) return "this session holds no task";
-        if (!session.followUp || current.state !== "running") return "only a follow-up run on a merged task may start a new task";
-        if (session.followUp.spawnedForMessage) return "a task was started for this message already: one per message";
-        return null;
-      },
-      overrides: () => {
-        const task = session.snapshot?.task;
-        return task ? { branch: task.mainBranch, merge: task.settings.merge } : {};
-      },
-      spawned: (spawn) => {
-        if (session.followUp) session.followUp.spawnedForMessage = true;
-        pi.appendEntry("factory-spawn", spawn);
-        session.snapshot = applyEntry(session.snapshot, "factory-spawn", spawn);
-      },
-    });
     registerFeedbackTool(pi, {
       role: "coder",
       context: async (ctx) => {
@@ -119,10 +106,29 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
         return record === undefined ? null : { task: record.id, wave: record.wave, plan: record.plan };
       },
     });
-    registerAskSupervisorTool(pi, {
-      refusal: () => (session.snapshot?.state === "running" ? null : "only the coder of a running task may ask"),
-      asked: (question, ctx) => {
-        if (session.snapshot) askSupervisor(deps(ctx), session.snapshot, question);
+    // A terminating call, so the turn ends with the question. Pi ends a turn early only when every call of the batch
+    // terminates, and runs a queued message anyway: the call is refused next to another tool call or while a message
+    // is queued, so an accepted question always ends the turn.
+    pi.registerTool({
+      name: "factory_ask_supervisor",
+      label: "Ask the supervisor",
+      description:
+        "Ask whoever runs this factory task a question you cannot answer from the request or the code (a decision, missing information). Call it alone, with no other tool call in the same message. Your turn ends with the call; the answer arrives as the next message and you continue the same round. Ask only when guessing would risk wrong work.",
+      promptSnippet: "Ask the task's supervisor a blocking question; the turn ends and the answer comes as the next message",
+      parameters: {
+        type: "object",
+        required: ["question"],
+        properties: { question: { type: "string", description: "The question, self-contained: the supervisor has not seen your work" } },
+      } as never,
+      async execute(_toolCallId, params: unknown, _signal, _onUpdate, ctx) {
+        const fail = (text: string) => toolError(`factory_ask_supervisor: ${text}`);
+        if (session.snapshot?.state !== "running") return fail("only the coder of a running task may ask");
+        const { question } = isRecord(params) ? params : {};
+        if (typeof question !== "string" || question.trim() === "") return fail("question must not be empty");
+        if (lastAssistantToolCalls(ctx.sessionManager.getBranch()) > 1) return fail("call it alone, with no other tool call in the same message: the turn could not end with it");
+        if (ctx.hasPendingMessages()) return fail("a message is queued for you: read it first, then ask if the question still stands");
+        askSupervisor(deps(ctx), session.snapshot, question);
+        return { ...toolText("Question recorded. Stop now: the answer arrives as the next message.", { question }), terminate: true };
       },
     });
   };
@@ -261,22 +267,19 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
   pi.on("input", async (_event, ctx) => {
     const atRest = session.snapshot;
     if (!atRest) return;
-    // One `factory_new_task` per user message, a follow-up queued during the run included.
-    if (session.followUp) session.followUp.spawnedForMessage = false;
     if (atRest.state === "merging") {
       ctx.ui.notify("factory: a merge is running, send the message when it has ended", "warning");
       return { action: "handled" };
     }
-    // The answer to the coder's question continues its round: no rebase, so the worktree stays as the coder left it.
-    if (atRest.state === "waiting_answer") {
-      // A merged task runs again only in a follow-up run, whose session state a new runner has to restore.
-      session.followUp = atRest.mergedCommit === null ? undefined : { merged: atRest.mergedCommit, spawnedForMessage: false };
-      return;
+    if (atRest.state === "done") {
+      ctx.ui.notify(`factory: the task ${DONE_REFUSAL}`, "warning");
+      return { action: "handled" };
     }
+    // The answer to the coder's question continues its round: no rebase, so the worktree stays as the coder left it.
+    if (atRest.state === "waiting_answer") return;
     if (!RESTING_STATES.includes(atRest.state)) return;
     const ops = deps(ctx);
     try {
-      session.followUp = isMergedTask(atRest) ? { merged: atRest.mergedCommit, spawnedForMessage: false } : undefined;
       opened = await openRun(ops, atRest);
     } catch (error) {
       ctx.ui.notify(`factory: the message starts no run: ${errorText(error)}`, "error");
@@ -304,7 +307,6 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     // A `factory.yaml` that does not parse is reported by the round, not here.
     const taskFilesNow = await taskFiles(ops, atRest.task).catch(() => undefined);
     if (taskFilesNow?.prompts.coder) event.systemPromptOptions.sections[ROLE_SECTION] = taskFilesNow.prompts.coder;
-    if (session.followUp) event.systemPromptOptions.sections[FOLLOW_UP_SECTION] = followUpPrompt(session.followUp.merged);
     // The user's message and the conflict both reach the coder in this run.
     if (opens && opening.conflict !== undefined) return { message: conflictMessage(atRest.round, opening.conflict) };
   });

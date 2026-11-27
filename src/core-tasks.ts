@@ -90,7 +90,7 @@ export interface TaskView {
 const TASK_ACTIONS = ["tasks.approve", "tasks.retry", "tasks.cancel", "tasks.remove", "tasks.message"] as const;
 export type TaskActionName = (typeof TASK_ACTIONS)[number];
 
-export type TimelineKind = "task" | "round" | "gate" | "review" | "merge" | "state" | "coder" | "user" | "spawn" | "question";
+export type TimelineKind = "task" | "round" | "gate" | "review" | "merge" | "state" | "coder" | "user" | "question";
 
 /** `coder`/`user` data is `{text}`; the others carry the `factory-*` entry's data unchanged. */
 export interface TimelineEntry {
@@ -307,6 +307,9 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): 
  * counts on (neither merged, cancelled nor removed) is not removed: removed, it would count as cancelled and strand the
  * tasks waiting for it; `waves.remove` removes it with its wave (`waveStage` null).
  */
+/** A done task takes no message: its work is merged, more work is a new task. */
+export const DONE_REFUSAL = "is done: give the work to its wave with waves.add, or start a new task";
+
 export function refusal(view: Omit<TaskView, "actions">, action: TaskActionName, waveStage: WaveStage | "removed" | null): FactoryError | null {
   const task = `task ${short(view.id)}`;
   const refused = (why: string) => new FactoryError("refused", `${task} ${why}`);
@@ -335,6 +338,7 @@ export function refusal(view: Omit<TaskView, "actions">, action: TaskActionName,
     case "tasks.message":
       if (view.state === null) return refused("has not started yet, send the message once it runs");
       if (view.state === "merging") return refused("is merging, send the message when the merge has ended");
+      if (view.state === "done") return refused(DONE_REFUSAL);
       return view.state === "waiting_answer" ? null : leftBuilding("a message");
   }
 }
@@ -435,7 +439,6 @@ const CUSTOM_KINDS: Record<string, TimelineKind | undefined> = {
   "factory-review": "review",
   "factory-merge": "merge",
   "factory-state": "state",
-  "factory-spawn": "spawn",
   "factory-question": "question",
 };
 

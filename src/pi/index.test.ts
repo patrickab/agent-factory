@@ -316,7 +316,8 @@ describe("a task that waits for approve", () => {
 
     expect(pi.of("factory-merge")).toEqual([{ ok: true, commit: gitIn(repo, "rev-parse", "main"), error: null, depsSynced: false }]);
     expect(gitIn(repo, "log", "--format=%s", "main")).toBe("feat: add task file\nbase");
-    expect(await pi.emit("input", { text: "now" })).toBeUndefined();
+    // A done task takes no message.
+    expect(await pi.emit("input", { text: "now" })).toEqual({ action: "handled" });
   });
 });
 

@@ -70,14 +70,6 @@ export type RunOpening = { conflict?: string; failed?: string };
 /** A feedback message to the coder, as `pi.sendMessage` and `before_agent_start` take it. */
 export type CoderMessage = Omit<FeedbackDraft, "type">;
 
-/** A run that follows up on the merged task (`followup.ts`), from the user message that opened it on. */
-export interface FollowUpRun {
-  /** The task's merged commit the follow-up builds on. */
-  merged: string | null;
-  /** `factory_new_task` started a task for the current user message. */
-  spawnedForMessage: boolean;
-}
-
 /** The task state of one session, shared by the operations and the event handlers. */
 export interface TaskSession {
   snapshot: Snapshot | undefined;
@@ -88,8 +80,6 @@ export interface TaskSession {
   disposed: boolean;
   /** Runs every command of the task; `cancel` kills them. */
   readonly runner: CommandRunner;
-  /** Set by a user message to the task while it is `done`/`merged`, cleared by one in any other resting state. */
-  followUp: FollowUpRun | undefined;
 }
 
 /** The session state and the Pi capabilities the operations use. */
@@ -119,7 +109,7 @@ export interface OpsDeps {
 }
 
 export function newTaskSession(): TaskSession {
-  return { snapshot: undefined, files: undefined, starting: false, disposed: false, runner: new CommandRunner(), followUp: undefined };
+  return { snapshot: undefined, files: undefined, starting: false, disposed: false, runner: new CommandRunner() };
 }
 
 /** The feedback message of a `conflict` round that opens a run. */
@@ -239,8 +229,7 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
       return mergeTask({ exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent, status: mergeStatus, message, stop: () => runner.cancelled, ...gates });
     },
     openRebase: () => rebaseInProgress(runner.run, root),
-    // A follow-up on a merged task is a new commit of its own: the task title already named the first one.
-    askCommitMessage: () => !isConventionalTitle(task.title) || session.snapshot?.mergedCommit != null,
+    askCommitMessage: () => !isConventionalTitle(task.title),
     inWave: async () => (await deps.wave()) !== null,
   };
 }

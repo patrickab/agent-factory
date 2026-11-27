@@ -2,7 +2,7 @@
  * Factory task state, without Pi, git or I/O.
  *
  * - Provides the entry shapes the extension writes (`factory-task`, `-round`, `-gate`, `-review`, `-merge-intent`,
- *   `-merge`, `-state`, `-commit-message`, `-spawn`, `-question`)
+ *   `-merge`, `-state`, `-commit-message`, `-question`)
  * - Provides the reducer that rebuilds a task from those entries (`rebuild`), the same one that tracks it live (`applyEntry`)
  * - Provides the round budget, the `/factory start` payload check and the feedback texts the coder reads
  */
@@ -120,12 +120,6 @@ export interface MergeIntentData {
   before: string;
 }
 
-/** A task the coder started with `factory_new_task` from a follow-up of this one. */
-export interface SpawnData {
-  id: string;
-  title: string;
-}
-
 /** What the coder asked the supervisor with `factory_ask_supervisor`. */
 export interface QuestionData {
   text: string;
@@ -178,7 +172,6 @@ export interface EntryData {
   "factory-merge": MergeData;
   "factory-state": StateData;
   "factory-commit-message": CommitMessage;
-  "factory-spawn": SpawnData;
   "factory-question": QuestionData;
 }
 
@@ -230,13 +223,10 @@ const REDUCERS: { [K in EntryType]: Reducer<K> } = {
       mergeIntent: null,
       mergeError: ok ? null : error,
       mergedCommit: ok && commit ? commit : snapshot.mergedCommit,
-      // A message is the merge's own: a follow-up on the merged task gets asked for a new one.
-      commitMessage: ok ? null : snapshot.commitMessage,
     },
   "factory-state": (snapshot, { state, reason }) =>
     snapshot && { ...snapshot, state, reason, mergeIntent: null, question: state === "waiting_answer" ? snapshot.question : undefined },
   "factory-commit-message": (snapshot, commitMessage) => snapshot && { ...snapshot, commitMessage },
-  "factory-spawn": (snapshot) => snapshot,
   "factory-question": (snapshot, { text }) => snapshot && { ...snapshot, question: text },
 };
 

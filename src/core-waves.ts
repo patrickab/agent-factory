@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs";
 import { realpath, rm } from "node:fs/promises";
 import { waveContracts } from "./core-contracts.ts";
-import { launchSpec, recordStart } from "./core-plan.ts";
+import { launchSpec } from "./core-plan.ts";
 import { byId, nonEmpty, oneLine, primaryOf, tagParam, type Handler } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, wantedModels } from "./core-settings.ts";
 import { cancelTask, droppedWork, rawUsage, refusal, retryRestingTask, taskView, withTaskLock, type TaskView } from "./core-tasks.ts";
@@ -38,7 +38,6 @@ import {
   validateTaskSpecs,
   waveCounts,
   waveTaskState,
-  type FoldedTask,
   type NewWaveEvent,
   type WaveEvent,
   type WaveConflict,
@@ -335,17 +334,13 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
     if (found === undefined) continue;
     const orphan = orphans.findIndex((record) => record.id === found.id);
     let record: TaskRecord;
-    // Launched with its spec as the log holds it now (`tasks.update` may have changed it since the fold above).
-    let task: Pick<FoldedTask, "title" | "request" | "model"> = found;
     if (orphan >= 0) {
+      // A runner that died after the launch: its record is adopted, no second launch.
       [record] = orphans.splice(orphan, 1);
-      // A runner that died after the launch: the coder got the launched text, a later update reaches it as a follow-up.
-      const launch = events.findLast((event) => event.kind === "launch" && event.key === key);
-      if (launch?.kind === "launch" && launch.request !== undefined) task = { ...found, title: launch.title ?? found.title, request: launch.request };
     } else {
+      // Launched with its spec as the log holds it now (`tasks.update` may have changed it since the fold above).
       const spec = await launchSpec(id, key, found.after);
       if (spec === null) continue;
-      task = spec;
       if (spec.model === "small" && models.small === undefined) {
         const small = await defaultSmallModel();
         if (small !== undefined) models.small = small;
@@ -363,8 +358,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
         throw new FactoryError(error instanceof FactoryError && error.code === "refused" ? "refused" : "failed", why);
       }
     }
-    // A `tasks.update` between the launch and this event reaches the coder as a follow-up.
-    await recordStart(id, key, task, record);
+    await appendWaveEvent(id, { kind: "task", key, taskId: record.id, sessionId: record.sessionId });
     started.push(key);
   }
   return started;

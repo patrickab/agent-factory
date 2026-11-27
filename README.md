@@ -47,8 +47,8 @@ Invariants every step keeps:
 5. The runner ends when the task rests. `tasks.approve`, `tasks.retry`, `tasks.cancel` and `tasks.message` to a
    resting task start a runner for one command; a live runner gets `tasks.message` through the task's inbox
 6. A coder may ask the supervisor (`factory_ask_supervisor`): the task rests `waiting_answer`, and the next
-   `tasks.message` is the answer within the same round. A message to a `done` task opens a follow-up run that merges
-   as a new commit; a part outside its scope becomes a new task (`factory_new_task`)
+   `tasks.message` is the answer within the same round. A `done` task takes no message: more work goes to its wave
+   (`waves.add`) or a new task
 
 ## How a wave runs
 
@@ -93,13 +93,13 @@ The supervisor's loop:
 - **MCP** (`src/mcp.ts`): stdio, one tool `factory` with the Pi tool's name, description and schema
   (`src/factory-tool.ts`), `{action, ...params}`; the answer is the agent's text
 - **Pi extension** (`src/pi/`): the tools `factory` (answer: the agent's text, `details {result, card}`), `scout`,
-  and in task sessions `feedback`, `factory_ask_supervisor` and `factory_new_task`. In a task's own session the
+  and in task sessions `feedback` and `factory_ask_supervisor`. In a task's own session the
   `factory` tool (and the MCP server a runner starts) offers only the actions with `mutates: false`. Notices arrive
   in the origin session as `factory-notice` messages with `details {key, card}`. Commands: `/factory init` (a draft
   `factory.yaml`), `/factory models [add|remove|set ...]`, `/factory waves` (the widget's finished waves), and in a
   task's session `/factory start|approve|retry|cancel`
 - **Session entries** a task's Pi session holds (`src/state.ts`): `factory-task`, `-round`, `-gate`, `-review`,
-  `-merge-intent`, `-merge`, `-state`, `-commit-message`, `-spawn`, `-question`
+  `-merge-intent`, `-merge`, `-state`, `-commit-message`, `-question`
 - **Settings** (`settings.get`/`settings.set`, the table `SETTINGS` in `src/settings.ts`): `branch`, `merge`
   (`auto` | `review`), `maxRounds`, `review`, `models` (`big`, `small`, `reviewer`), `preview` (stored for clients),
   `squash`, `extensions`. Tasks and waves take some as `overrides`. A model must be on the factory models list

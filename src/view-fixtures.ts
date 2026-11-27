@@ -218,7 +218,7 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
       done: [{ wave: WAVE_ID, tag: "factory/w1", key: "docs", task: "4ae7325b-2222-4000-8000-000000000000" }],
     },
   },
-  "tasks.update": { params: { id: "4ae7325b", request: "SECRET-REQUEST" }, result: { wave: wave(), key: "docs", changed: true, delivery: "pending" } },
+  "tasks.update": { params: { id: "4ae7325b", request: "SECRET-REQUEST" }, result: { wave: wave(), key: "docs", changed: true } },
   "waves.update": { params: { id: WAVE_ID, request: "SECRET-REQUEST" }, result: { wave: wave(), changed: true } },
   "decisions.list": {
     params: {},
