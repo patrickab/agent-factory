@@ -11,11 +11,12 @@
  * - A conflicting rebase is aborted and reported with its files (`MergeResult` `conflict`), not as a failure. A merge
  *   gate that fails on the rebased branch is reported with its command (`MergeResult` `gate_failed`): the rebase stays,
  *   so the coder fixes the change on top of the target branch
- * - Provides `rebaseWorktree`, which a run that opens uses to bring the task branch up to date the same way. It
- *   squashes the task branch onto its base first (`taskBase`): the rebase replays one commit, the task's net change.
- *   A branch merged as it is (`asIs`, a wave's) is never committed to nor squashed: the rebase replays its commits and
- *   the target gets every one of them and nothing else. Its worktree must hold nothing but HEAD's tree when the merge
- *   starts, and what its merge gates leave untracked is removed after them
+ * - Provides `prepareTaskBranch` and `rebaseWorktree`, which a run that opens uses to bring the task branch up to date
+ *   the same way. A task's branch is committed and squashed onto its base (`taskBase`) once, before its first rebase:
+ *   the rebase replays one commit, the task's net change. A branch merged as it is (`asIs`, a wave's) is never
+ *   committed to nor squashed: the rebase replays its commits and the target gets every one of them and nothing else.
+ *   Its worktree must hold nothing but HEAD's tree when the merge starts, and what its merge gates leave untracked is
+ *   removed after them
  * - The factory's own commits run no commit hooks and are not signed (`--no-verify --no-gpg-sign`)
  * - Reports the step that cannot be undone (`intent`) right before it, so a resume can tell whether it happened
  * - Provides `mergeTask`: the `MergeResult` and the `factory-gate` data of the commands it ran. It never throws, a
@@ -40,8 +41,7 @@ import {
   removeUntracked,
   targetMoved,
   taskBase,
-  trackedChanges,
-  uncommittedFiles,
+  worktreeChanges,
 } from "./git.ts";
 import { joinQueue, leaveQueue, queueAhead } from "./queue.ts";
 import type { CommandResult, Exec } from "./run.ts";
@@ -133,29 +133,30 @@ export interface MergeOutcome {
   result: MergeResult;
 }
 
+/** Commits the task's worktree (`commitWorktree`) and squashes its branch onto its base (`squashOntoBase`). */
+export async function prepareTaskBranch(exec: Exec, root: string, task: Task, protectedGlobs: string[], message = task.title): Promise<void> {
+  await commitWorktree(exec, root, message, protectedGlobs);
+  await squashOntoBase(exec, root, task, message);
+}
+
 /**
- * Brings the task branch up to date: commits the worktree as `commitWorktree` does and squashes the branch onto its
- * base (neither when `asIs`), then rebases it onto the target branch. A conflicting rebase is aborted with `cleanup` and its conflicting files
- * returned, else null. Any other failure throws. `--autostash` carries what the commit leaves out (protected paths)
+ * Rebases the branch of `root` onto `mainBranch`. A conflicting rebase is aborted with `cleanup` and its conflicting
+ * files returned, else null. Any other failure throws. `--autostash` carries what is not committed (protected paths)
  * over the rebase.
  */
-export async function rebaseWorktree(exec: Exec, cleanup: Exec, root: string, task: Task, protectedGlobs: string[], message = task.title, asIs = false): Promise<string[] | null> {
-  if (!asIs) {
-    await commitWorktree(exec, root, message, protectedGlobs);
-    await squashOntoBase(exec, root, task, message);
-  }
-  const rebase = await continueResolved(exec, cleanup, root, task.mainBranch, await exec(["git", "rebase", "--autostash", `refs/heads/${task.mainBranch}`], { cwd: root }));
+export async function rebaseWorktree(exec: Exec, cleanup: Exec, root: string, mainBranch: string): Promise<string[] | null> {
+  const rebase = await continueResolved(exec, cleanup, root, mainBranch, await exec(["git", "rebase", "--autostash", `refs/heads/${mainBranch}`], { cwd: root }));
   if (passed(rebase)) {
     // An autostash that did not apply cleanly leaves conflict markers, which the next commit would take.
     const unmerged = nulList(await git(exec, root, ["diff", "--name-only", "--diff-filter=U", "-z"]));
-    if (unmerged.length > 0) throw new Error(`the autostash did not apply after the rebase onto ${task.mainBranch} (kept in git stash list): ${unmerged.join(", ")}`);
+    if (unmerged.length > 0) throw new Error(`the autostash did not apply after the rebase onto ${mainBranch} (kept in git stash list): ${unmerged.join(", ")}`);
     return null;
   }
   const open = await rebaseInProgress(cleanup, root);
   const conflicts = open ?? [];
   if (open !== null || rebase.killed) await cleanup(["git", "rebase", "--abort"], { cwd: root });
   if (conflicts.length > 0 && !rebase.killed) return conflicts;
-  throw new Error(`rebase onto ${task.mainBranch} failed: ${outputTail(rebase.output)}`);
+  throw new Error(`rebase onto ${mainBranch} failed: ${outputTail(rebase.output)}`);
 }
 
 /**
@@ -257,10 +258,10 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
   // worktree clean, so anything in it now (during `waiting_approve`) is somebody's work, which the merge gates must not
   // see and their cleanup must not delete.
   if (asIs) {
-    if (await uncommittedFiles(exec, root)) return { kind: "dirty" };
+    if (await worktreeChanges(exec, root, true)) return { kind: "dirty" };
   } else {
     status("commit");
-    await commitWorktree(exec, root, text, config.protected);
+    await prepareTaskBranch(exec, root, task, config.protected, text);
   }
   let ontoBefore = await taskBase(exec, root, task);
   const mergeGates = input.gates ?? config.merge_gates;
@@ -268,7 +269,7 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
 
   // Rebased before it queues: a conflict goes to the coder at once, without a place in the queue.
   status(`rebase onto ${task.mainBranch}`);
-  const conflicts = await rebaseWorktree(exec, cleanup, root, task, config.protected, text, asIs);
+  const conflicts = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
   if (conflicts) return { kind: "conflict", files: conflicts };
 
   /** The ticket's turn: rebase, merge gates, move the target. Again from the rebase when the target moved anyway. */
@@ -279,10 +280,10 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
     let landing: string;
     for (let attempt = 1; ; attempt++) {
       status(attempt === 1 ? `rebase onto ${task.mainBranch}` : `rebase onto ${task.mainBranch} again, it moved (attempt ${attempt})`);
-      const conflicts = await rebaseWorktree(exec, cleanup, root, task, config.protected, text, asIs);
+      const conflicts = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
       if (conflicts) return { kind: "conflict", files: conflicts };
       // The rebase brings the target's .gitignore: a file it stopped ignoring is somebody's work, not merge gate output.
-      if (asIs && (await uncommittedFiles(exec, root))) return { kind: "dirty" };
+      if (asIs && (await worktreeChanges(exec, root, true))) return { kind: "dirty" };
       head = await git(exec, root, ["rev-parse", "HEAD"]);
       // Merge gates that are the round's gates, on the base the round passed them on (the squash keeps the tree), would
       // only repeat that run.
@@ -302,7 +303,7 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       }
       ontoBefore = onto;
       // The fast-forward moves the target to HEAD: an `asIs` working tree must be what was gated.
-      if (asIs && (await trackedChanges(exec, root))) return { kind: "dirty" };
+      if (asIs && (await worktreeChanges(exec, root, false))) return { kind: "dirty" };
 
       status("fast-forward");
       await assertCheckoutReady(exec, root, task.branch);
@@ -352,7 +353,7 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       // A merge ahead landed: rebase onto it now, a conflict leaves the queue and goes to the coder.
       if (!(await targetMoved(exec, root, task))) continue;
       status(`rebase onto ${task.mainBranch}, a merge ahead landed`);
-      const moved = await rebaseWorktree(exec, cleanup, root, task, config.protected, text, asIs);
+      const moved = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
       if (moved) return { kind: "conflict", files: moved };
     }
     return await turn();

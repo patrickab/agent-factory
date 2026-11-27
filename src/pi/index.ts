@@ -45,9 +45,9 @@
  *   at every turn's end, with the count of cards to rule on; only in the interactive terminal UI
  *   (`ctx.mode === "tui"`), never in a task's own session
  * - Notices and `factory` tool results are drawn as their cards (`cards-tui.ts`); Alt+V shows the agent's text
- * - A task of a wave merges into the wave's branch only until the wave's review began (`waveMergeRefusal`, invariant
+ * - A task of a wave merges into the wave's branch only until the wave's review began (`sessionWave`, invariant
  *   2): a merge after that ends the task `blocked`, `merge_failed`, its work stays in its worktree. Its merge gates
- *   are `gates` and `task_gates` (`taskWave`), not `merge_gates`: the wave runs those
+ *   are `gates` and `task_gates` (`sessionWave`), not `merge_gates`: the wave runs those
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -56,7 +56,7 @@ import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
 import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
-import { taskWave, waveMergeRefusal } from "../core.ts";
+import { sessionWave } from "../core.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
 import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "../pipeline.ts";
@@ -83,7 +83,7 @@ import {
   type OpsDeps,
   type RunOpening,
 } from "../ops.ts";
-import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, wasInterrupted, type Draft, type Snapshot, type State } from "../state.ts";
+import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, type Draft, type Snapshot, type State } from "../state.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
 import { createScoutTracker, registerScoutTool, type ScoutCore } from "./scout-tool.ts";
 import { isTaskSession, registerFactoryTool } from "./tool.ts";
@@ -192,8 +192,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     followUps: () => followUpMessages(ctx.sessionManager.getBranch()),
     sessionModel: () => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null),
     sessionId: () => ctx.sessionManager.getSessionId(),
-    mergeRefusal: () => waveMergeRefusal(ctx.sessionManager.getSessionId()),
-    wave: () => taskWave(ctx.sessionManager.getSessionId()),
+    wave: () => sessionWave(ctx.sessionManager.getSessionId()),
   });
 
   const command = (args: string, ops: OpsDeps): Promise<OpResult> => {
@@ -206,11 +205,12 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
       });
     }
     if (verb === "init") return initConfig(ops);
-    if (!session.snapshot) return Promise.resolve({ ok: false, error: "this session holds no task" });
-    if (verb === "approve") return approveTask(ops);
-    if (verb === "retry") return retryTask(ops);
-    if (verb === "cancel") return cancelTask(ops);
-    if (verb === "reviewed") return applyReviewed(ops, text.slice(verb.length).trim());
+    const current = session.snapshot;
+    if (!current) return Promise.resolve({ ok: false, error: "this session holds no task" });
+    if (verb === "approve") return approveTask(ops, current);
+    if (verb === "retry") return retryTask(ops, current);
+    if (verb === "cancel") return cancelTask(ops, current);
+    if (verb === "reviewed") return applyReviewed(ops, current, text.slice(verb.length).trim());
     return Promise.resolve({ ok: false, error: `unknown command "${verb}"` });
   };
 
@@ -284,7 +284,8 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     session.files = undefined;
     taskRecord = undefined;
     registerTaskTools();
-    if (session.snapshot && wasInterrupted(session.snapshot)) await resumeTask(deps(ctx), session.snapshot);
+    // A run is active only inside the process that started it: a task loaded in a state that does not rest was interrupted.
+    if (session.snapshot && !RESTING_STATES.includes(session.snapshot.state)) await resumeTask(deps(ctx), session.snapshot);
   });
 
   pi.on("session_tree", (_event, ctx) => {

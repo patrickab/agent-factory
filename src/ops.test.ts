@@ -72,6 +72,7 @@ function fake(cwd: string) {
     followUps: () => [],
     sessionModel: () => null,
     sessionId: () => "ops-test",
+    wave: async () => null,
   };
   const states = () => entries.filter((entry) => entry.customType === "factory-state").map((entry) => `${entry.data.state}/${entry.data.reason}`);
   /** Puts a task in `state` into the session, as its entries would. */
@@ -92,7 +93,7 @@ describe("startTask", () => {
     busy.flags.idle = false;
     expect(await startTask(busy.deps, payload())).toEqual({ ok: false, error: "the session is busy" });
     const invalid = fake(dir);
-    expect(await startTask(invalid.deps, "{not json")).toEqual({ ok: false, error: "payload is not JSON" });
+    expect(await startTask(invalid.deps, "{not json")).toMatchObject({ ok: false });
     const outside = await startTask(fake(dir).deps, payload());
     expect(outside.ok).toBe(false);
     const primary = await startTask(fake(repo).deps, payload());
@@ -110,7 +111,7 @@ describe("approveTask before any await", () => {
   test("merging is recorded before the call returns: a runner can never see the task still waiting once Pi answers", async () => {
     const pi = fake(dir);
     pi.holdTask("waiting_approve");
-    const answer = approveTask(pi.deps);
+    const answer = approveTask(pi.deps, pi.deps.session.snapshot!);
     expect(pi.states()).toEqual(["waiting_approve/test", "merging/approved"]);
     expect(pi.deps.session.snapshot?.state).toBe("merging");
     expect(await answer).toEqual({ ok: true });
@@ -137,9 +138,9 @@ describe("the merge step", () => {
     pi.holdTask("merging");
     writeFileSync(join(worktree, "task.txt"), "work\n");
     let asked = 0;
-    pi.deps.mergeRefusal = async () => {
+    pi.deps.wave = async () => {
       asked += 1;
-      return "its wave is reviewing";
+      return { id: "w", mergeRefusal: "its wave is reviewing" };
     };
     const main = gitIn(repo, "rev-parse", "main");
     const files = await loadTaskFiles(new CommandRunner().run, worktree, main);
@@ -164,7 +165,7 @@ describe("the merge step", () => {
     const main = gitIn(repo, "rev-parse", "main");
     const pi = fake(worktree);
     pi.holdTask("merging");
-    pi.deps.wave = async () => wave;
+    pi.deps.wave = async () => (wave === null ? null : { id: wave, mergeRefusal: null });
     writeFileSync(join(worktree, "task.txt"), "work\n");
     const files = await loadTaskFiles(new CommandRunner().run, worktree, main);
     const outcome = await pipelineSteps(pi.deps, pi.deps.session.snapshot!.task, files, false).merge(files.config);
@@ -194,7 +195,7 @@ describe("retryTask", () => {
     record(pi.deps, "factory-state", { state: "running", round: 2, reason: "gates" });
     await resumeTask(pi.deps, pi.deps.session.snapshot!);
     expect(pi.states().at(-1)).toBe("blocked/interrupted");
-    expect(await retryTask(pi.deps)).toEqual({ ok: true });
+    expect(await retryTask(pi.deps, pi.deps.session.snapshot!)).toEqual({ ok: true });
     const snapshot = pi.deps.session.snapshot!;
     expect(snapshot).toMatchObject({ state: "running", round: 3, runFirstRound: 3 });
     expect([roundsUsed(snapshot), snapshot.task.settings.maxRounds]).toEqual([1, 3]);
@@ -222,13 +223,13 @@ describe("cancelTask", () => {
   test("an idle task ends cancelled, a busy one is aborted", async () => {
     const idle = fake(dir);
     idle.holdTask("blocked");
-    expect(await cancelTask(idle.deps)).toEqual({ ok: true });
+    expect(await cancelTask(idle.deps, idle.deps.session.snapshot!)).toEqual({ ok: true });
     expect(idle.states().at(-1)).toBe("cancelled/cancelled");
     expect(idle.deps.session.runner.cancelled).toBe(false);
     const busy = fake(dir);
     busy.holdTask("running");
     busy.flags.idle = false;
-    expect(await cancelTask(busy.deps)).toEqual({ ok: true });
+    expect(await cancelTask(busy.deps, busy.deps.session.snapshot!)).toEqual({ ok: true });
     expect(busy.flags.aborts).toBe(1);
     expect(busy.states()).toEqual(["running/test"]);
   });
@@ -245,10 +246,10 @@ describe("applyReviewed", () => {
     const pi = fake(dir);
     pi.holdTask("reviewing");
     record(pi.deps, "factory-round", { round: 1, trigger: "start" });
-    expect(await applyReviewed(pi.deps, command(["major"], 2))).toEqual({ ok: false, error: "the task is not reviewing round 2" });
-    expect(await applyReviewed(pi.deps, command(["major"]))).toEqual({ ok: true });
-    expect(await applyReviewed(pi.deps, command(["major"]))).toEqual({ ok: false, error: "the task is not reviewing round 1" });
+    expect(await applyReviewed(pi.deps, pi.deps.session.snapshot!, command(["major"], 2))).toEqual({ ok: false, error: "the task is not reviewing round 2" });
+    expect(await applyReviewed(pi.deps, pi.deps.session.snapshot!, command(["major"]))).toEqual({ ok: true });
+    expect(await applyReviewed(pi.deps, pi.deps.session.snapshot!, command(["major"]))).toEqual({ ok: false, error: "the task is not reviewing round 1" });
     expect(pi.states()).toEqual(["reviewing/test", "running/review"]);
-    expect(await applyReviewed(pi.deps, "{bad")).toMatchObject({ ok: false });
+    expect(await applyReviewed(pi.deps, pi.deps.session.snapshot!, "{bad")).toMatchObject({ ok: false });
   });
 });

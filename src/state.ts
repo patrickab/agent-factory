@@ -8,8 +8,7 @@
  */
 import type { CommitMessage } from "./commitmsg.ts";
 import type { CommandResult } from "./run.ts";
-import { checkValue, ROLE_MODELS, SETTINGS } from "./settings.ts";
-import { isRecord } from "./util.ts";
+import type { Usage } from "./util.ts";
 
 /**
  * `waiting_answer`: the coder asked the supervisor (`factory-question`); the next message answers it. `reviewing`: a
@@ -21,6 +20,8 @@ export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked"
 export const RESTING_STATES: readonly State[] = ["waiting_approve", "waiting_answer", "blocked", "done", "cancelled", "reviewing"];
 /** Resting states whose next step is the factory's, not someone's: no attention, and a watcher does not count them as rest. */
 export const FACTORY_TURN_STATES: readonly State[] = ["reviewing"];
+/** States nothing leaves. */
+export const FINAL_STATES: readonly State[] = ["done", "cancelled"];
 export type GatePhase = "gates" | "merge_gates" | "after_merge";
 export type Trigger = "start" | "gates" | "review" | "protected" | "message" | "retry" | "conflict";
 export type Severity = "blocker" | "major" | "minor";
@@ -93,14 +94,6 @@ export function minorFindings(round: number, findings: readonly Finding[]): Mino
   return findings.filter((finding) => finding.severity === "minor").map(({ file, line, text }) => ({ round, file, line, text }));
 }
 
-export interface ReviewUsage {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cost: number;
-}
-
 export interface ReviewData {
   round: number;
   status: ReviewStatus;
@@ -108,7 +101,7 @@ export interface ReviewData {
   findings: Finding[];
   model: string | null;
   sessionFile: string | null;
-  usage: ReviewUsage;
+  usage: Usage;
   wallMs: number;
 }
 
@@ -258,11 +251,11 @@ export function applyEntry<K extends EntryType>(snapshot: Snapshot | undefined, 
 }
 
 /** The task of a session branch, or undefined when the branch holds no `factory-task` entry. Unknown `factory-*` entries are skipped. */
-export function rebuild(entries: Iterable<{ type: string }>): Snapshot | undefined {
+export function rebuild(entries: Iterable<{ type?: unknown }>): Snapshot | undefined {
   let snapshot: Snapshot | undefined;
   for (const entry of entries) {
     if (entry.type !== "custom") continue;
-    const { customType, data } = entry as { type: string; customType?: unknown; data?: unknown };
+    const { customType, data } = entry as { customType?: unknown; data?: unknown };
     if (typeof customType === "string" && isEntryType(customType)) snapshot = applyEntry(snapshot, customType, data as EntryData[EntryType]);
   }
   return snapshot;
@@ -313,11 +306,6 @@ export function followUpMessages(entries: Iterable<{ type: string }>): string[] 
 
 export function roundsUsed(snapshot: Snapshot): number {
   return snapshot.round - snapshot.runFirstRound + 1;
-}
-
-/** A run is active only inside the process that started it, so a task loaded as `running` or `merging` was interrupted. */
-export function wasInterrupted(snapshot: Snapshot): boolean {
-  return snapshot.state === "running" || snapshot.state === "merging";
 }
 
 export function customDraft<K extends EntryType>(customType: K, data: EntryData[K]): CustomEntry<K> {
@@ -382,31 +370,24 @@ export function conflictFeedback(round: number, branch: string, files: string[],
 
 /** The next round's feedback: the blocker and major findings only, minor ones never reach the coder as a round. */
 export function reviewFeedback(round: number, findings: Finding[]): string {
-  const lines = findings
+  return `Round ${round}: the review found problems. Fix every blocker and major finding, then stop.\n\n${rejectingLines(findings)}`;
+}
+
+/** The blocker and major findings, one line each. */
+export function rejectingLines(findings: readonly Finding[]): string {
+  return findings
     .filter((finding) => finding.severity !== "minor")
-    .map((finding) => `- [${finding.severity}] ${finding.file}${finding.line === null ? "" : `:${finding.line}`}: ${finding.text}`);
-  return `Round ${round}: the review found problems. Fix every blocker and major finding, then stop.\n\n${lines.join("\n")}`;
+    .map((finding) => `- [${finding.severity}] ${finding.file}${finding.line === null ? "" : `:${finding.line}`}: ${finding.text}`)
+    .join("\n");
 }
 
 /** The roles a task runs a model for. */
 export const ROLES = ["coder", "reviewer"] as const;
 
-/** The payload of `/factory start <json>`. Throws an `Error` that names the first wrong field. */
+/** The payload of `/factory start <json>`, which `launchTask` wrote from resolved settings. Throws on a wrong one. */
 export function parseStartPayload(text: string): StartPayload {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    throw new Error("payload is not JSON");
-  }
-  if (!isRecord(raw)) throw new Error("payload is not an object");
+  const raw = JSON.parse(text) as Partial<StartPayload> | null;
+  if (typeof raw?.request !== "string" || raw.request.trim() === "" || typeof raw.title !== "string" || raw.title.trim() === "" || !raw.settings) throw new Error("the payload needs a request, a title and settings");
   const { request, title, settings, prefix } = raw;
-  if (prefix !== undefined && typeof prefix !== "string") throw new Error("prefix must be a string");
-  if (typeof request !== "string" || request.trim() === "") throw new Error("request must be a non-empty string");
-  if (typeof title !== "string" || title.trim() === "") throw new Error("title must be a non-empty string");
-  if (!isRecord(settings)) throw new Error("settings must be an object");
-  // Every key is required here: an absent one is checked as a wrong one.
-  const [branch, merge, maxRounds, review] = (["branch", "merge", "maxRounds", "review"] as const).map((key) => checkValue(SETTINGS[key].schema, settings[key], `settings.${key}`));
-  const models = checkValue(ROLE_MODELS, settings.models, "settings.models") as Settings["models"];
-  return { request, title, settings: { branch, merge, maxRounds, review, models } as Settings, ...(typeof prefix === "string" && prefix.trim() !== "" ? { prefix } : {}) };
+  return { request, title, settings, ...(prefix?.trim() ? { prefix } : {}) };
 }

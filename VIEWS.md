@@ -69,7 +69,7 @@ type TaskView = {
 
 type WaveView = {                     // as in the contract
   id: string; repo: string; tag: string; plan: string | null; title: string; request: string
-  branch: string | null; target: string   // null while queued: set when it starts
+  branch: string; target: string
   after: string[]                     // ids of the waves it waits for, [] when none
   origin: string | null; createdAt: string
   stage: "queued" | "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled"

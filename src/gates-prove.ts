@@ -7,7 +7,7 @@
  *   one, else the repo's stored branch, else its default. Refused without a committed `factory.yaml`. Answers `{proof}`
  * - The record `proofs/<id>.jsonl`: line 1 the declaration; the runner rewrites it whole with one `end` line that holds
  *   the steps (`passed`, `flaky` or `failing`; failing names the step and the path of its output,
- *   `proofs/<id>.failing.log`). Without an `end` it is `running` while the lock's holder lives, else `interrupted`.
+ *   `proofs/<id>.failing.log`). Without an `end` it is `running` while its runner holds the lock (`lockRunner`), else `interrupted`.
  *   `<id>.log` is the runner's output. The worktree an interrupted proof left is removed by the next `gates.prove` in its repo
  * - The runner: a detached worktree of the tip, `hooks.after_create` of the tip, then every `merge_gates` step through
  *   `runGateStep` (one rerun: passing then, the proof is `flaky`). `FACTORY_BASE` is the empty tree: the whole tree is
@@ -27,7 +27,7 @@ import { CommandRunner, runCommand, type CommandResult, type Exec } from "./run.
 import { factoryHome, loadSettings } from "./settings.ts";
 import { onPath, spawnDetached } from "./spawn.ts";
 import { passed } from "./state.ts";
-import { handLockFile, lockFile, lockHeld } from "./tasks.ts";
+import { handLockFile, lockFile, lockRunner } from "./tasks.ts";
 import { errorText, FactoryError, ifMissing, jsonLines, outputTail, writeAtomic } from "./util.ts";
 
 export type ProofState = "running" | "passed" | "flaky" | "failing";
@@ -99,7 +99,7 @@ async function proofIds(): Promise<string[]> {
 
 /** Proof `id` as the full view shows it. Whether its runner lives is asked first: a runner writes its end before it exits. */
 export async function proofView(id: string): Promise<ProofView> {
-  const lives = await lockHeld(proofLockPath(id));
+  const lives = (await lockRunner(proofLockPath(id), id)) !== null;
   const { declaration, end } = await readProof(id);
   const steps = end?.steps ?? [];
   return {
@@ -166,7 +166,7 @@ export const PROOF_HANDLERS = {
       origin: origin ?? null,
       createdAt: new Date().toISOString(),
     };
-    // Held by this process until the runner has it: the proof reads as running from its first line on.
+    // Held by this process until the runner has it.
     await lockFile(proofLockPath(declaration.id), `proof ${declaration.id.slice(0, 8)} is busy`);
     await writeProof(declaration);
     const pid = await spawnDetached([bun, PROOF_RUNNER_PATH, declaration.id], env ?? process.env, proofLogPath(declaration.id), import.meta.dirname).catch((error: unknown) => {

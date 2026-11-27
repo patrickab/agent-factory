@@ -28,9 +28,8 @@ function requireMemoryStore(name: string): void {
  * The contracts of a wave declared with `contracts` (undefined: none, nothing is read). `core` comes first when the store
  * holds it. Throws `invalid` for a bad name or no `plan`, `refused` without memory-store or for an unknown contract.
  */
-export async function waveContracts(plan: string | undefined, raw: unknown): Promise<string[] | undefined> {
+export async function waveContracts(plan: string | undefined, raw: string[] | undefined): Promise<string[] | undefined> {
   if (raw === undefined) return undefined;
-  if (!Array.isArray(raw) || !raw.every((name) => typeof name === "string")) throw new FactoryError("invalid", "waves.start: contracts must be an array of names");
   if (plan === undefined) throw new FactoryError("refused", "waves.start: contracts need plan, the memory-store that holds them");
   const bad = raw.find((name) => !isContractName(name));
   if (bad !== undefined) throw new FactoryError("invalid", `waves.start: ${JSON.stringify(bad)} is no contract name (A-Z a-z 0-9 . _ -)`);

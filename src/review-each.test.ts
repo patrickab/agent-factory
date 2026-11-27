@@ -9,11 +9,12 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readDiffText } from "./review-diff.ts";
+import { readDiffText } from "./review.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { stopWaveRunners, waveReviewsDir } from "./wave-poke.ts";
 import { reviewEachDeps, runWave } from "./wave-runner.ts";
 import { appendWaveEvent, createWave, foldWave, listWaves, readWave } from "./waves.ts";
+import { NO_USAGE } from "./util.ts";
 
 const savedEnv = { ...process.env };
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-review-each-test-")));
@@ -218,7 +219,7 @@ describe("review per task", () => {
     writeFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
     // b's verdict was recorded, its hand-over never happened.
     const b = (await readWave(WAVE)).events.find((event) => event.kind === "task" && event.key === "b") as { taskId: string };
-    await appendWaveEvent(WAVE, { kind: "task_review", key: "b", taskId: b.taskId, round: 1, tree: "t", base: "b", contracts: null, sessionId: WAVE, model: null, verdict: "approved", status: "ok", findings: [], usage: null, wallMs: 1 });
+    await appendWaveEvent(WAVE, { kind: "task_review", key: "b", taskId: b.taskId, round: 1, tree: "t", base: "b", contracts: null, sessionId: WAVE, model: null, verdict: "approved", status: "ok", findings: [], usage: NO_USAGE, wallMs: 1 });
     const handed = playTasks((key) => setState(key, "done", 1));
     expect(await runWave(WAVE)).toBe(0);
     expect(taskCalls().map((call) => call.key)).toEqual(["a"]);

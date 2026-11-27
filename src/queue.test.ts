@@ -1,8 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { joinQueue, leaveQueue, procAlive, queueAhead } from "./queue.ts";
+import { joinQueue, leaveQueue, queueAhead } from "./queue.ts";
+import { procAlive, procStart } from "./tasks.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-queue-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -14,8 +15,8 @@ async function deadPid(): Promise<number> {
   return child.pid;
 }
 
-test.if(existsSync("/proc/self/stat"))("a pid is alive only with the ticket's start time: a reused pid is dead", async () => {
-  const start = readFileSync(`/proc/${process.pid}/stat`, "utf8").split(") ")[1]!.split(" ")[19]!;
+test("a pid is alive only with the ticket's start time: a reused pid is dead", async () => {
+  const start = (await procStart(process.pid))!;
   expect(await procAlive(process.pid, start)).toBe(true);
   expect(await procAlive(process.pid, "1")).toBe(false);
   expect(await procAlive(await deadPid(), start)).toBe(false);

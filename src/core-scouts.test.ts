@@ -5,10 +5,13 @@ import { callAction, type TaskView } from "./core.ts";
 import { caseDir, expectError, fakeRecord, git, ID_1, makeRepo, scratch, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { cancelScout, cancelScouts, readScout, scoutDirs, scoutView, type ScoutView } from "./scouts.ts";
 import { readStore, writeFakeMemoryStore, writeStore } from "./fake-memory-store.ts";
-import { runCommand } from "./run.ts";
-import { ownRunners, signalRunner } from "./spawn.ts";
+import { signalRunner } from "./spawn.ts";
 import { writeTask } from "./tasks.ts";
 
+// Registered before the fixture's hooks, so it runs while the case's agent dir is still set: every scout of the case ends.
+afterEach(async () => {
+  for (const dir of await scoutDirs()) await cancelScout(dir).catch(() => undefined);
+});
 useCoreFixture();
 
 let scoutBin: string;
@@ -58,12 +61,6 @@ beforeEach(() => {
   }
   Object.assign(process.env, { PATH: `${scoutBin}:${process.env.PATH}`, FAKE_STORE_ROOT: storeRoot(), FACTORY_SCOUT_POLL_MS: "50" });
   delete process.env.FAKE_SCOUT;
-});
-
-afterEach(async () => {
-  // Every scout runner of this test run (its marker), whatever agent dir it belongs to.
-  const found = await runCommand(["pgrep", "-f", "scout-runner\\.ts"], { cwd: "/", maxStdoutChars: 10_000 });
-  for (const pid of await ownRunners(found.stdout.split("\n").filter((line) => line.trim() !== "").map(Number))) signalRunner(pid, "SIGKILL");
 });
 
 describe("scouts.start", () => {

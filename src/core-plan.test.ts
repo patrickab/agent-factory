@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { callAction } from "./core.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
 import { startWaveTasks } from "./core-waves.ts";
-import { caseDir, expectError, fakeRecord, fakeWaveRunner, ID_1, makeRepo, RUN, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { caseDir, expectError, fakeRecord, ID_1, makeRepo, RUN, runnerHolding, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import type { TaskView } from "./core-tasks.ts";
 import { taskInboxPath } from "./launch.ts";
 import { readTask, writeTask, type TaskRecord } from "./tasks.ts";
@@ -41,7 +41,7 @@ async function writtenWave(n: number, tasks: ReturnType<typeof spec>[], states: 
 /** A live stand-in of the wave's runner; resolves with the function that ends it. */
 async function fakeRunner(id: string): Promise<() => Promise<void>> {
   const end = join(caseDir, "runner-end");
-  const child = Bun.spawn(["bun", fakeWaveRunner, id], { env: { ...process.env, FAKE_RUNNER_END: end } });
+  const child = await runnerHolding(id, { ...process.env, FAKE_RUNNER_END: end });
   await until(async () => (await liveWaveRunners(id)).length === 1);
   return async () => {
     writeFileSync(end, "");
@@ -74,8 +74,11 @@ describe("tasks.update", () => {
     const b = (await getWave(wave.id)).tasks[1];
     // The started task carries the id it was declared with.
     expect([b.taskId, b.id]).toEqual([bId, bId]);
-    const view = (await callAction("tasks.get", { id: b.taskId })) as TaskView;
-    expect([view.title, view.settings?.models?.coder]).toEqual(["Task B", "c/d"]);
+    // Its settings once its coder's session holds them.
+    const view = async () => (await callAction("tasks.get", { id: b.taskId })) as TaskView;
+    await until(async () => (await view()).settings !== null);
+    const { title, settings } = await view();
+    expect([title, settings?.models?.coder]).toEqual(["Task B", "c/d"]);
     await until(() => existsSync(messages) && readFileSync(messages, "utf8").includes("do B, not b"));
 
     // Running: title and request only, its coder gets old and new through its runner's inbox.

@@ -6,8 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
-import { caseDir, exitingRunner, expectError, failure, fakeRecord, fakeWaveRunner, ID_1, ID_2, makeRepo, until, useCoreFixture } from "./core-test-kit.ts";
-import { liveRunners } from "./launch.ts";
+import { caseDir, expectError, failure, fakeRecord, ID_1, ID_2, makeRepo, useCoreFixture } from "./core-test-kit.ts";
 import { writeTask } from "./tasks.ts";
 
 useCoreFixture();
@@ -35,24 +34,5 @@ describe("callAction", () => {
     const error = await failure(callAction("settings.get", { repo }));
     expect(error.code).toBe("failed");
     expect(error.message).not.toContain("\n");
-  });
-});
-
-describe("liveRunners", () => {
-  test("a one-letter session id matches no other runner, nor a wave's runner", async () => {
-    const inbox = join(caseDir, "inbox");
-    const env = { ...process.env, FAKE_INBOX: inbox, FAKE_RUNNER_END: inbox };
-    const task = Bun.spawn(["bun", exitingRunner, join(caseDir, "a"), join(caseDir, "a-sessions"), "abc", "a b"], { env });
-    const wave = Bun.spawn(["bun", fakeWaveRunner, "a"], { env });
-    try {
-      await until(async () => (await liveRunners({ sessionId: "abc" })).length === 1);
-      expect(await liveRunners({ sessionId: "a" })).toEqual([]);
-      expect(await liveRunners({ sessionId: "b" })).toEqual([]);
-      expect(await liveRunners({ sessionId: "ab" })).toEqual([]);
-      expect(await liveRunners({ sessionId: "abc" })).toEqual([task.pid]);
-    } finally {
-      writeFileSync(inbox, "");
-      await Promise.all([task.exited, wave.exited]);
-    }
   });
 });

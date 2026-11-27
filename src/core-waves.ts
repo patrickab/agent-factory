@@ -5,7 +5,7 @@
  * - Build on `waves.ts` (the log and its fold) and `wave-poke.ts` (the runner): a stage change is a compare-and-append
  *   on the log, then a poke; `WaveView.actions` holds the same predicates
  * - `waves.start` declares a wave in full or not at all: a step that fails leaves no branch, no record, no task
- * - `startWaveTasks` is the scheduler the wave's runner calls; `waveMergeRefusal` keeps a task's commits off a wave's
+ * - `startWaveTasks` is the scheduler the wave's runner calls; `sessionWave` keeps a task's commits off a wave's
  *   branch once its review began (invariant 2)
  * - `noticeInputs`: the tasks and waves a Pi session started, for its notifications (`notify.ts`)
  */
@@ -15,40 +15,36 @@ import { waveContracts } from "./core-contracts.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
 import { byId, nonEmpty, oneLine, primaryOf, tagParam, type Handler } from "./core-shared.ts";
 import { branchHasConfig, defaultSmallModel, wantedModels } from "./core-settings.ts";
-import { cancelTask, cents, droppedWork, FINAL_STATES, rawUsage, removable, requireRemovable, retryRestingTask, taskView, WAVE_FINAL_STAGES, withTaskLock, type TaskView } from "./core-tasks.ts";
-import { git, mergeTrees, uncommittedFiles } from "./git.ts";
-import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, localBranchExists, type RunnerEnv, worktreePath } from "./launch.ts";
+import { cancelTask, droppedWork, rawUsage, refusal, retryRestingTask, taskView, withTaskLock, type TaskView } from "./core-tasks.ts";
+import { git, mergeTrees, worktreeChanges } from "./git.ts";
+import { defaultBranch, deleteTask, launchTask, localBranchExists, type RunnerEnv, worktreePath } from "./launch.ts";
 import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
 import { requireModels } from "./models.ts";
 import { checkSettings, loadSettings, registeredRepos, resolveSettings, type ModelSize, type StoredSettings } from "./settings.ts";
-import { minorFindings, type MinorFinding } from "./state.ts";
-import { listTasks, sessionTask, tagInGroup, TaskBusyError, type TaskRecord } from "./tasks.ts";
-import { errorText, FactoryError, short } from "./util.ts";
+import { FINAL_STATES, minorFindings, type MinorFinding } from "./state.ts";
+import { listTasks, sessionTask, tagInGroup, type TaskRecord } from "./tasks.ts";
+import { addUsage, cents, errorText, FactoryError, short, type Usage } from "./util.ts";
 import {
   appendWaveEvent,
   appendWaveEvents,
   createWave,
   foldWave,
   listWaves,
-  lockWave,
   readWave,
   removeWave,
   RESTING_WAVE_STAGES,
   WAVE_ATTENTION_STAGES,
-  reviewBegan,
+  WAVE_FINAL_STAGES,
   startableKeys,
   stuckKeys,
   unreachableKeys,
-  unlockWave,
   validateTaskSpecs,
   waveCounts,
-  waveStarted,
   waveTaskState,
   type FoldedTask,
   type NewWaveEvent,
   type WaveEvent,
-  type StartedWaveFold,
   type WaveConflict,
   type WaveDeclaration,
   type WaveFile,
@@ -59,12 +55,18 @@ import {
   type WaveTaskEntry,
   type WaveView,
 } from "./waves.ts";
-import { liveWaveRunners, pokeWave, runnerSnapshot, stopWaveRunners, waveDir, type RunnerSnapshot } from "./wave-poke.ts";
+import { liveWaveRunners, lockWave, pokeWave, stopWaveRunners, unlockWave, waveDir } from "./wave-poke.ts";
 import { cancelScouts, scoutUsage } from "./scouts.ts";
 import { waveFeedback } from "./feedback.ts";
 import { slotWaiting } from "./test-slots.ts";
 
 export type WaveActionName = "waves.add" | "waves.retry" | "waves.approve" | "waves.cancel" | "waves.remove";
+
+/** `waves.remove` removes a done task with its wave: it refuses only a running task or one waiting for its answer. */
+function requireRemovable(view: TaskView): void {
+  const refused = refusal(view, "tasks.remove", null);
+  if (refused !== null) throw refused;
+}
 
 /** Stages a wave takes no tasks in: `merging` too, whose rebased branch is in the merge queue. */
 const WAVE_ADD_REFUSED: readonly WaveStage[] = ["merged", "cancelled", "merging"];
@@ -80,46 +82,32 @@ export function waveReviewWorktree(declaration: Pick<WaveDeclaration, "id" | "re
 }
 
 /** The wave of the task in the Pi session `sessionId`, null outside one. */
-export async function taskWave(sessionId: string): Promise<string | null> {
-  return (await sessionTask(sessionId))?.wave ?? null;
-}
-
 /**
- * Why the merge of the task in the Pi session `sessionId` must not land now, null when it may
- * (invariant 2): a task of a wave whose review began (`reviewBegan`) would bring commits onto the wave's branch that
+ * The wave of the task in the Pi session `sessionId` (null: none) and why the task's merge must not land now
+ * (`mergeRefusal`, null when it may; invariant 2): a task of a wave whose review began (`reviewBegan`) would bring commits onto the wave's branch that
  * its gates and reviewer never saw, or that are lost once it merged. The plugin asks right before a task merges, so
  * no path (an action, a `/factory` command typed into the session, a resume) gets past it. A task outside a wave
  * merges as before.
  */
-export async function waveMergeRefusal(sessionId: string): Promise<string | null> {
+export async function sessionWave(sessionId: string): Promise<{ id: string; mergeRefusal: string | null } | null> {
   const record = await sessionTask(sessionId);
   if (record === undefined || record.wave === null) return null;
-  const shown = short(record.wave);
+  const id = record.wave;
   let file: WaveFile;
   try {
-    file = await readWave(record.wave);
+    file = await readWave(id);
   } catch (error) {
-    if (error instanceof FactoryError && error.code === "not_found") return `its wave ${shown} is removed: nothing more reaches its branch`;
+    if (error instanceof FactoryError && error.code === "not_found") return { id, mergeRefusal: `its wave ${short(id)} is removed: nothing more reaches its branch` };
     throw error;
   }
-  if (!reviewBegan(file.events)) return null;
-  const { stage, branch } = foldWave(file.declaration, file.events);
-  return `its wave ${shown} is ${stage}, its review began: nothing more reaches its branch ${branch} (the reviewed tree is what merges); give the work to the wave with waves.add`;
+  const { stage, branch, reviewBegan } = foldWave(file.declaration, file.events);
+  if (!reviewBegan) return { id, mergeRefusal: null };
+  return { id, mergeRefusal: `its wave ${short(id)} is ${stage}, its review began: nothing more reaches its branch ${branch} (the reviewed tree is what merges); give the work to the wave with waves.add` };
 }
 
 /** The wave whose id is `id` or starts with it. */
 export async function findWave(id: unknown): Promise<WaveFile> {
   return byId(await listWaves(), (wave) => wave.declaration.id, id, "wave");
-}
-
-/** Runs `act`, a `TaskBusyError` (the wave's log lock stayed taken) as `busy`. */
-async function busyAsFactoryError<T>(act: () => Promise<T>): Promise<T> {
-  try {
-    return await act();
-  } catch (error) {
-    if (error instanceof TaskBusyError) throw new FactoryError("busy", error.message);
-    throw error;
-  }
 }
 
 /** Pokes the wave's runner (`wave-poke.ts`); a runner that cannot start is `failed`. */
@@ -147,7 +135,7 @@ export async function waveTaskViews(fold: WaveFold, read: ListingReads = {}): Pr
         states.set(task.key, "cancelled");
         return;
       }
-      const view = await taskView(record, fold.stage, read.snapshot);
+      const view = await taskView(record, fold.stage);
       views.set(task.key, view);
       states.set(task.key, view.state);
     }),
@@ -155,37 +143,27 @@ export async function waveTaskViews(fold: WaveFold, read: ListingReads = {}): Pr
   return { states, views };
 }
 
-/** What a listing reads once for all its waves: every task record by id, the live runners (`runnerSnapshot`). */
-type ListingReads = { records?: ReadonlyMap<string, TaskRecord>; snapshot?: RunnerSnapshot };
-
-function addUsage(sum: WaveView["usage"], usage: WaveView["usage"]): WaveView["usage"] {
-  if (usage === null) return sum;
-  return { input: (sum?.input ?? 0) + usage.input, output: (sum?.output ?? 0) + usage.output, cacheRead: (sum?.cacheRead ?? 0) + usage.cacheRead, cacheWrite: (sum?.cacheWrite ?? 0) + usage.cacheWrite, cost: (sum?.cost ?? 0) + usage.cost };
-}
+/** What a listing reads once for all its waves: every task record by id. */
+type ListingReads = { records?: ReadonlyMap<string, TaskRecord> };
 
 /** A wave's view and the log it was folded from (a notice keys on it). */
 export type WaveLook = { view: WaveView; events: WaveEvent[] };
-
-/** The wave as clients see it: its fold, its tasks' states and usage, whether its runner lives. */
-async function waveView(file: WaveFile, all?: WaveFile[], read?: ListingReads): Promise<WaveView> {
-  return (await lookWave(file, all, read)).view;
-}
 
 /**
  * The waves among `files` that wait for the wave `id` and have not started (queued, or blocked at their start), not
  * cancelled ones: a merge pokes them, a cancel makes them never start, and the wave is not removed under them.
  */
 function queuedAfter(id: string, files: readonly WaveFile[]): WaveFold[] {
-  return files.map((file) => foldWave(file.declaration, file.events)).filter((fold) => !waveStarted(fold) && fold.stage !== "cancelled" && fold.after.includes(id));
+  return files.map((file) => foldWave(file.declaration, file.events)).filter((fold) => !fold.started && fold.stage !== "cancelled" && fold.after.includes(id));
 }
 
 /**
  * A queued wave that can start and that nothing starts: every wave it names is merged, and neither its runner nor one
  * of theirs lives (a merged wave's runner died before it poked). It counts as interrupted; `waves.retry` pokes it.
  */
-export async function queueStalled(fold: WaveFold, look: { waiting: string[]; never: string | null }, running: boolean, snapshot?: RunnerSnapshot): Promise<boolean> {
+async function queueStalled(fold: WaveFold, look: { waiting: string[]; never: string | null }, running: boolean): Promise<boolean> {
   if (fold.stage !== "queued" || running || look.never !== null || look.waiting.length > 0) return false;
-  for (const id of fold.after) if ((await liveWaveRunners(id, snapshot)).length > 0) return false;
+  for (const id of fold.after) if ((await liveWaveRunners(id)).length > 0) return false;
   return true;
 }
 
@@ -194,7 +172,7 @@ export async function queueStalled(fold: WaveFold, look: { waiting: string[]; ne
  * never start when one of them was cancelled or removed (`never`, the text of its `stage` event), else null. `all`:
  * the waves read already (else each is read).
  */
-export async function queueLook(fold: WaveFold, all?: readonly WaveFile[]): Promise<{ waiting: string[]; never: string | null }> {
+async function queueLook(fold: WaveFold, all?: readonly WaveFile[]): Promise<{ waiting: string[]; never: string | null }> {
   const waiting: string[] = [];
   for (const id of fold.after) {
     const shown = short(id);
@@ -223,9 +201,9 @@ async function recordNeverStart(fold: WaveFold): Promise<boolean> {
 }
 
 /**
- * The wave's runner on a queued wave: when every wave it names is `merged` it starts (a `start` event with its branch
- * and `base` = the target's tip; `startWaveTasks` cuts the branch), else it rests, recording why when it never can.
- * Its branch taken by then, or the target unreadable: `blocked`. Resolves with whether the wave moved on (look again).
+ * The wave's runner on a queued wave: when every wave it names is `merged` it starts (its branch moved to the target's
+ * tip, then a `start` event with that tip as `base`), else it rests, recording why when it never can. Its branch
+ * holding commits the target lacks, or the move failing: `blocked`. Resolves with whether the wave moved on (look again).
  */
 export async function startQueuedWave(id: string): Promise<boolean> {
   const file = await readWave(id);
@@ -235,15 +213,17 @@ export async function startQueuedWave(id: string): Promise<boolean> {
   if ((await queueLook(fold)).waiting.length > 0) return false;
   const block = async (detail: string) =>
     (await appendWaveEvents(id, (now) => (now.stage === "queued" ? [{ kind: "stage", stage: "blocked", reason: "infra", detail }] : null))) !== null;
-  const branch = waveBranchName(fold.target, fold.tag);
-  if (await localBranchExists(fold.repo, branch)) return block(`its branch ${branch} exists already (taken since the wave was declared): delete or rename it, then waves.retry`);
+  const { repo, branch, target } = fold;
   let base: string;
   try {
-    base = await git(runCommand, fold.repo, ["rev-parse", "--verify", `refs/heads/${fold.target}^{commit}`]);
+    base = await git(runCommand, repo, ["rev-parse", "--verify", `refs/heads/${target}^{commit}`]);
+    // Still empty (its tip is on the target): it moves to the target's tip, with the code of the waves it waited for.
+    if ((await runCommand(["git", "merge-base", "--is-ancestor", branch, base], { cwd: repo })).exitCode !== 0) throw new Error(`it holds commits ${target} lacks`);
+    await git(runCommand, repo, ["branch", "--force", branch, base]);
   } catch (error) {
-    return block(`its target ${fold.target}: ${oneLine(errorText(error))}; waves.retry`);
+    return block(`its branch ${branch} cannot start on ${target}: ${oneLine(errorText(error))}; waves.retry`);
   }
-  await appendWaveEvents(id, (now) => (now.stage === "queued" ? [{ kind: "start", branch, base }] : null));
+  await appendWaveEvents(id, (now) => (now.stage === "queued" ? [{ kind: "start", base }] : null));
   return true;
 }
 
@@ -259,27 +239,25 @@ export async function pokeQueuedAfter(id: string, env?: RunnerEnv): Promise<stri
   return failures;
 }
 
-/** The wave as `tasks.wait` judges it (`WaveLook`). */
-export async function waveLook(file: WaveFile): Promise<WaveLook> {
-  return lookWave(file);
-}
-
-/** `waveLook` with the waves read already (`all`: every wave), else they are read; `read`: a listing's shared reads. */
-async function lookWave(given: WaveFile, all?: readonly WaveFile[], read: ListingReads = {}): Promise<WaveLook> {
+/**
+ * The wave as clients see it: its fold, its tasks' states and usage, whether its runner lives. `all`: every wave, read
+ * already (else they are read); `read`: a listing's shared reads.
+ */
+export async function lookWave(given: WaveFile, all?: readonly WaveFile[], read: ListingReads = {}): Promise<WaveLook> {
   // Liveness before the log: a runner writes its last stage before it exits, so the log read after a dead runner is its
   // last one. The caller's copy was read before, and a runner that wrote `merged` and exited since would look interrupted.
-  const runners = await liveWaveRunners(given.declaration.id, read.snapshot);
+  const runners = await liveWaveRunners(given.declaration.id);
   const file = await readWave(given.declaration.id);
   const full = foldWave(file.declaration, file.events);
-  const { overrides: _overrides, base: _base, contracts: _contracts, conflicts: _conflicts, taskReviews: _taskReviews, ...fold } = full;
+  const { overrides: _overrides, base: _base, contracts: _contracts, conflicts: _conflicts, taskReviews: _taskReviews, fixes: _fixes, reviewBegan: _began, gatedCommit: _gated, started: _started, ...fold } = full;
   const { states, views } = await waveTaskViews(full, read);
   const running = runners.length > 0;
   const waitingForSlot = await slotWaiting(runners);
   const waves = all ?? (await listWaves());
   const queue = fold.stage === "queued" ? await queueLook(full, waves) : null;
   const stuck = (fold.stage === "building" && stuckKeys(full, states).length > 0) || (queue !== null && queue.never !== null);
-  const interrupted = (!RESTING_WAVE_STAGES.includes(fold.stage) && !running && !stuck) || (queue !== null && (await queueStalled(full, queue, running, read.snapshot)));
-  let usage: WaveView["usage"] = null;
+  const interrupted = (!RESTING_WAVE_STAGES.includes(fold.stage) && !running && !stuck) || (queue !== null && (await queueStalled(full, queue, running)));
+  let usage: Usage | null = null;
   const tasks = fold.tasks.map((task) => {
     const taskView = views.get(task.key);
     const taskUsage = taskView?.usage ?? null;
@@ -292,8 +270,7 @@ async function lookWave(given: WaveFile, all?: readonly WaveFile[], read: Listin
     ...fold.reviews.flatMap((review) => minorFindings(review.round, review.findings)),
   ];
   // The wave's own scouts (its reviewer's), then its tasks' (in their usage already).
-  const waveScouting = await scoutUsage({ kind: "wave", id: fold.id });
-  usage = addUsage(usage, waveScouting);
+  usage = addUsage(usage, await scoutUsage({ kind: "wave", id: fold.id }));
   // The predicates of the wave actions' own checks, as one list for clients.
   const allowed: Record<WaveActionName, boolean> = {
     "waves.add": !WAVE_ADD_REFUSED.includes(fold.stage),
@@ -302,11 +279,11 @@ async function lookWave(given: WaveFile, all?: readonly WaveFile[], read: Listin
     "waves.cancel": !WAVE_FINAL_STAGES.includes(fold.stage),
     // `tasks.remove` of a task maybe only with force, as for the task itself; its done tasks go with the wave. Not
     // while a wave that has not started waits for it.
-    "waves.remove": !running && [...views.values()].every(removable) && queuedAfter(fold.id, waves).length === 0,
+    "waves.remove": !running && [...views.values()].every((view) => refusal(view, "tasks.remove", null) === null) && queuedAfter(fold.id, waves).length === 0,
   };
   const actions = (Object.keys(allowed) as WaveActionName[]).filter((name) => allowed[name]);
-  const reviews = fold.reviews.map((review) => (review.usage === null ? review : { ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
-  const total = usage === null ? null : { ...(usage as NonNullable<WaveView["usage"]>), cost: cents((usage as NonNullable<WaveView["usage"]>).cost) };
+  const reviews = fold.reviews.map((review) => ({ ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
+  const total = usage === null ? null : { ...usage, cost: cents(usage.cost) };
   const attention = interrupted || stuck || WAVE_ATTENTION_STAGES.includes(fold.stage);
   return { view: { ...fold, reviews, minors, running, interrupted, stuck, attention, tasks, counts: waveCounts(full, states), usage: total, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, events: file.events };
 }
@@ -333,11 +310,7 @@ export async function noticeInputs(
  * the wave's branch as target, its tag, plan and id, and records a `task` event for each. Only the wave's runner calls
  * it, holding the runner's lock: no task starts twice. A record of this wave no `task` event names (a runner died
  * between the launch and its event) is adopted for the first pending task of its title instead of a second launch.
- * Nothing starts unless the wave is `building`. A wave that started queued gets its branch here, cut at its `base`,
- * while none of its tasks started (a runner that died between the `start` event and the branch). A branch of that
- * name it did not cut (another commit than `base`, and no task of the wave exists) throws `refused`: the runner blocks
- * the wave, as `startQueuedWave` does. Resolves with the
- * started keys; a launch that fails throws (`refused` or `failed`) after the tasks started before it are recorded.
+ * Nothing starts unless the wave is `building`. Resolves with the started keys; a launch that fails throws (`refused` or `failed`) after the tasks started before it are recorded.
  * `signal` (the runner stops): no further launch, the running one is undone (`launchTask`), and it resolves with the
  * keys started before. A conflict task (`conflictTask`) starts on the wave's branch moved to the target's tip it
  * recorded, its worktree holding the wave's change merged onto that tip with the markers left.
@@ -345,15 +318,7 @@ export async function noticeInputs(
 export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: AbortSignal): Promise<string[]> {
   const { declaration, events } = await readWave(id);
   const fold = foldWave(declaration, events);
-  if (fold.stage !== "building" || !waveStarted(fold)) return [];
-  if (fold.after.length > 0 && fold.tasks.every((task) => task.taskId === null)) {
-    if (!(await localBranchExists(fold.repo, fold.branch))) {
-      const made = await runCommand(["git", "branch", fold.branch, fold.base], { cwd: fold.repo });
-      if (made.exitCode !== 0) throw new FactoryError("failed", `cutting its branch ${fold.branch} at ${fold.base} failed: ${oneLine(made.output)}`);
-    } else if (!(await listTasks()).some((record) => record.wave === id) && (await git(runCommand, fold.repo, ["rev-parse", "--verify", `refs/heads/${fold.branch}^{commit}`])) !== fold.base) {
-      throw new FactoryError("refused", `its branch ${fold.branch} exists already and is not the one it cut at its start (taken since): delete or rename it`);
-    }
-  }
+  if (fold.stage !== "building") return [];
   const { states } = await waveTaskViews(fold);
   const { maxRounds, review } = declaration.overrides;
   // The wave's models only (`launchTask` reads no stored models for a wave's task); a name the wave sets none for runs
@@ -391,7 +356,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
       }
       try {
         // A conflict task: the wave's branch on the target's tip, its worktree the wave's change merged onto it.
-        const conflict = fold.conflicts?.find((candidate) => candidate.key === key);
+        const conflict = fold.conflicts.find((candidate) => candidate.key === key);
         if (conflict !== undefined) await conflictBranch(fold, conflict);
         const prepare = conflict === undefined ? {} : { beforeRecord: (_branch: string, worktree: string) => leaveMarkers(worktree, conflict) };
         // The task's size picks its coder's model of the wave's (`taskModels`); the reviewer's stays the wave's.
@@ -399,7 +364,7 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
       } catch (error) {
         if (signal?.aborted) break;
         const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
-        throw new FactoryError(error instanceof LaunchRefusedError ? "refused" : "failed", why);
+        throw new FactoryError(error instanceof FactoryError && error.code === "refused" ? "refused" : "failed", why);
       }
     }
     // A `tasks.update` between the launch and this event reaches the coder as a follow-up.
@@ -420,8 +385,8 @@ const SUBJECTS_SHOWN = 20;
  * `rebaseFiles`) and the task `conflict-<n>` that resolves it, its request naming the files and the subjects of both
  * sides' commits. Null once the wave had `CONFLICT_TASKS`: the conflict blocks it.
  */
-export async function conflictTask(fold: StartedWaveFold, phase: "review" | "merge", rebaseFiles: readonly string[]): Promise<{ key: string; events: NewWaveEvent[] } | null> {
-  const count = fold.conflicts?.length ?? 0;
+export async function conflictTask(fold: WaveFold, phase: "review" | "merge", rebaseFiles: readonly string[]): Promise<{ key: string; events: NewWaveEvent[] } | null> {
+  const count = fold.conflicts.length;
   if (count >= CONFLICT_TASKS) return null;
   const { repo, branch, target } = fold;
   const head = await git(runCommand, repo, ["rev-parse", `refs/heads/${branch}`]);
@@ -465,7 +430,7 @@ export async function conflictTask(fold: StartedWaveFold, phase: "review" | "mer
  * Puts the wave's branch on the target's tip the conflict recorded (from the tip it recorded; there already: nothing),
  * so its conflict task's commit lands on it. Any other tip, or the branch checked out somewhere: `failed`.
  */
-async function conflictBranch(fold: StartedWaveFold, conflict: WaveConflict): Promise<void> {
+async function conflictBranch(fold: WaveFold, conflict: WaveConflict): Promise<void> {
   const tip = await git(runCommand, fold.repo, ["rev-parse", `refs/heads/${fold.branch}`]);
   if (tip === conflict.onto) return;
   if (tip !== conflict.head) throw new FactoryError("failed", `its branch ${fold.branch} moved since the conflict of ${conflict.key} (${tip.slice(0, 12)}, not ${conflict.head.slice(0, 12)}): waves.cancel, or merge it by hand and waves.retry`);
@@ -480,8 +445,8 @@ async function conflictBranch(fold: StartedWaveFold, conflict: WaveConflict): Pr
  * sees an empty diff and records `merged` without the wave's change. The detail of the block, or null when nothing
  * is to undo.
  */
-export async function undoConflictBranch(fold: StartedWaveFold, states: TaskStates): Promise<string | null> {
-  const conflict = fold.conflicts?.at(-1);
+export async function undoConflictBranch(fold: WaveFold, states: TaskStates): Promise<string | null> {
+  const conflict = fold.conflicts.at(-1);
   if (conflict === undefined) return null;
   const task = fold.tasks.find((candidate) => candidate.key === conflict.key);
   if (task !== undefined && waveTaskState(task, states) !== "cancelled") return null;
@@ -520,7 +485,7 @@ export const WAVE_HANDLERS = {
     if (request === undefined) throw new FactoryError("invalid", "waves.start needs a request (the reviewer's instructions) that is not empty");
     if (params.plan !== undefined && nonEmpty(params.plan) === undefined) throw new FactoryError("invalid", "waves.start: plan must not be empty");
     const specs = validateTaskSpecs(params.tasks);
-    const contracts = await waveContracts(params.plan as string | undefined, params.contracts);
+    const contracts = await waveContracts(params.plan as string | undefined, params.contracts as string[] | undefined);
     const given = checkSettings(params.overrides, "wave", "waves.start: overrides.");
     let target = given.branch;
     const repo = await primaryOf(params.repo as string, cwd);
@@ -542,15 +507,11 @@ export const WAVE_HANDLERS = {
       throw new FactoryError("invalid", `waves.start: ${branch} (target and tag) is no valid branch name`);
     }
     if (await localBranchExists(repo, branch)) throw new FactoryError("refused", `${repo}: the wave branch ${branch} exists already (another wave of tag ${tag} on ${target}?)`);
-    const all = await listWaves(repo);
-    // A wave that has not started yet reserves its branch's name.
-    const reserving = all.map((file) => foldWave(file.declaration, file.events)).find((fold) => !waveStarted(fold) && fold.stage !== "cancelled" && waveBranchName(fold.target, fold.tag) === branch);
-    if (reserving !== undefined) throw new FactoryError("refused", `${repo}: the wave branch ${branch} is reserved by wave ${short(reserving.id)}, which is ${reserving.stage}`);
-    const after = resolveAfter(params.after, all, target, tag);
+    const after = resolveAfter(params.after as string[] | undefined, await listWaves(repo), target, tag);
     const queued = after.length > 0;
-    // A queued wave gets its branch when it starts: off the target's tip then, with the code of the waves it waits for.
-    const base = queued ? null : await git(runCommand, repo, ["rev-parse", "--verify", `refs/heads/${target}^{commit}`]);
-    if (base !== null) await git(runCommand, repo, ["branch", branch, base]);
+    // A queued wave's branch moves to the target's tip when it starts (`startQueuedWave`).
+    const base = await git(runCommand, repo, ["rev-parse", "--verify", `refs/heads/${target}^{commit}`]);
+    await git(runCommand, repo, ["branch", branch, base]);
     const declaration: WaveDeclaration = {
       id: crypto.randomUUID(),
       repo,
@@ -558,7 +519,7 @@ export const WAVE_HANDLERS = {
       plan: (params.plan as string | undefined) ?? null,
       title,
       request,
-      branch: queued ? null : branch,
+      branch,
       target,
       base,
       ...(queued ? { after } : {}),
@@ -570,13 +531,13 @@ export const WAVE_HANDLERS = {
     // Declared in full or not at all: a step that fails leaves no branch, no record (and no task a runner started).
     try {
       await createWave(declaration);
-      await busyAsFactoryError(() => appendWaveEvent(declaration.id, { kind: "tasks", tasks: specs }));
+      await appendWaveEvent(declaration.id, { kind: "tasks", tasks: specs });
       await pokeWaveRunner(declaration.id, env);
     } catch (error) {
       await undoWaveStart(declaration).catch(() => undefined);
       throw error;
     }
-    return { wave: await waveView(await readWave(declaration.id)) };
+    return { wave: (await lookWave(await readWave(declaration.id))).view };
   },
 
   "waves.add": async (params, { env }) => {
@@ -591,26 +552,24 @@ export const WAVE_HANDLERS = {
       await requireModels({ small: file.declaration.overrides.models?.small });
     }
     // Checked and appended under the log lock: a runner's stage change after it loses, never the added tasks.
-    await busyAsFactoryError(() =>
-      appendWaveEvents(id, (fold) => {
-        if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, it takes no more tasks`);
-        const tasks = validateTaskSpecs(params.tasks, fold.tasks);
-        // The supervisor acts on a wave whose pending tasks can never start: they leave it (count as cancelled).
-        const dropped = unreachableKeys(fold, states);
-        const events: NewWaveEvent[] = [{ kind: "tasks", tasks, ...(dropped.length > 0 ? { dropped } : {}) }];
-        // A wave that never started (queued, or blocked at its start) waits for its waves again.
-        const builds: WaveStage = waveStarted(fold) ? "building" : "queued";
-        if (fold.stage !== builds) events.push({ kind: "stage", stage: builds, reason: null });
-        return events;
-      }),
-    );
+    await appendWaveEvents(id, (fold) => {
+      if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, it takes no more tasks`);
+      const tasks = validateTaskSpecs(params.tasks, fold.tasks);
+      // The supervisor acts on a wave whose pending tasks can never start: they leave it (count as cancelled).
+      const dropped = unreachableKeys(fold, states);
+      const events: NewWaveEvent[] = [{ kind: "tasks", tasks, ...(dropped.length > 0 ? { dropped } : {}) }];
+      // A wave that never started (queued, or blocked at its start) waits for its waves again.
+      const builds: WaveStage = fold.started ? "building" : "queued";
+      if (fold.stage !== builds) events.push({ kind: "stage", stage: builds, reason: null });
+      return events;
+    });
     await pokeWaveRunner(id, env);
-    return { wave: await waveView(await readWave(id)) };
+    return { wave: (await lookWave(await readWave(id))).view };
   },
 
   "waves.get": async (params) => {
     const file = await findWave(params.id);
-    const view = await waveView(file);
+    const { view } = await lookWave(file);
     return { wave: { ...view, feedback: await waveFeedback(file.declaration.plan, view.id) } };
   },
 
@@ -619,7 +578,6 @@ export const WAVE_HANDLERS = {
     const repo = params.repo === undefined ? undefined : await primaryOf(params.repo as string, cwd);
     const origin = params.origin === undefined ? undefined : nonEmpty(params.origin)?.trim();
     if (params.origin !== undefined && origin === undefined) throw new FactoryError("invalid", "waves.list: origin must be a non-empty session id");
-    if (params.open !== undefined && typeof params.open !== "boolean") throw new FactoryError("invalid", "waves.list: open must be true or false");
     const all = await listWaves();
     const files = all.filter(
       (file) =>
@@ -629,24 +587,23 @@ export const WAVE_HANDLERS = {
         (params.open !== true || !WAVE_FINAL_STAGES.includes(foldWave(file.declaration, file.events).stage)),
     );
     if (files.length === 0) return { waves: [] };
-    // One read of the task records and one of the runners for every wave, not one per wave and task.
-    const [records, snapshot] = await Promise.all([listTasks(), runnerSnapshot()]);
-    const read: ListingReads = { records: new Map(records.map((record) => [record.id, record])), snapshot };
-    return { waves: await Promise.all(files.map((file) => waveView(file, all, read))) };
+    // One read of the task records for every wave, not one per wave and task.
+    const read: ListingReads = { records: new Map((await listTasks()).map((record) => [record.id, record])) };
+    return { waves: await Promise.all(files.map(async (file) => (await lookWave(file, all, read)).view)) };
   },
 
   "waves.retry": async (params, { env }) => {
     const file = await findWave(params.id);
-    const view = await waveView(file);
+    const { view } = await lookWave(file);
     const { id } = view;
     if (!view.actions.includes("waves.retry")) throw new FactoryError("refused", `wave ${short(id)} is ${waveStageText(view)}, retry needs blocked or interrupted`);
     // Blocked with tasks not started or not finished (a launch failed): build again, the runner starts them. Blocked
     // otherwise: review and merge again from the rebase. Interrupted: the runner resumes the stage the log holds.
     if (view.stage === "blocked") {
-      // Blocked at its start (its branch was taken): queued again, it starts once its branch name is free.
+      // Blocked at its start: queued again, it starts once its branch can.
       const unfinished = view.tasks.some((task) => task.state !== "done" && task.state !== "cancelled");
       let to: WaveStage = unfinished ? "building" : "reviewing";
-      if (view.branch === null) to = "queued";
+      if (!foldWave(file.declaration, file.events).started) to = "queued";
       await moveWave(id, "blocked", to, "retry needs blocked or interrupted");
     }
     // Its tasks a dead runner left running (`interrupted`) run again through `tasks.retry`'s internals; a refusal is
@@ -668,25 +625,23 @@ export const WAVE_HANDLERS = {
     const retried = outcomes.filter((outcome) => outcome.why === null).map((outcome) => outcome.id);
     const refused = outcomes.flatMap((outcome) => (outcome.why === null ? [] : [{ id: outcome.id, why: outcome.why }]));
     await pokeWaveRunner(id, env);
-    return { wave: await waveView(await readWave(id)), retried, refused };
+    return { wave: (await lookWave(await readWave(id))).view, retried, refused };
   },
 
   "waves.approve": async (params, { env }) => {
     const { id } = (await findWave(params.id)).declaration;
     await moveWave(id, "waiting_approve", "merging", "approve needs waiting_approve");
     await pokeWaveRunner(id, env);
-    return { wave: await waveView(await readWave(id)) };
+    return { wave: (await lookWave(await readWave(id))).view };
   },
 
   "waves.cancel": async (params, { env }) => {
     const { id } = (await findWave(params.id)).declaration;
     // The stage first: a runner (or a poke from a task's runner) that looks now sees the wave rest and starts nothing.
-    await busyAsFactoryError(() =>
-      appendWaveEvents(id, (fold) => {
-        if (WAVE_FINAL_STAGES.includes(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage} already`);
-        return [{ kind: "stage", stage: "cancelled", reason: null }];
-      }),
-    );
+    await appendWaveEvents(id, (fold) => {
+      if (WAVE_FINAL_STAGES.includes(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage} already`);
+      return [{ kind: "stage", stage: "cancelled", reason: null }];
+    });
     await stopWaveRunners(id);
     // The queued waves that wait for it can never start: each records why (once).
     for (const fold of queuedAfter(id, await listWaves())) await recordNeverStart(fold).catch(() => undefined);
@@ -704,16 +659,14 @@ export const WAVE_HANDLERS = {
     // A conflict task that did not finish moved the wave's branch onto the target's tip: back to the wave's own commits.
     const after = await readWave(id);
     const fold = foldWave(after.declaration, after.events);
-    if (waveStarted(fold)) {
-      try {
-        const undone = await undoConflictBranch(fold, (await waveTaskViews(fold)).states);
-        if (undone !== null && undone.includes("checked out")) failures.push(`its branch ${fold.branch}: ${undone}`);
-      } catch (error) {
-        failures.push(`its branch ${fold.branch}: ${oneLine(errorText(error))}`);
-      }
+    try {
+      const undone = await undoConflictBranch(fold, (await waveTaskViews(fold)).states);
+      if (undone !== null && undone.includes("checked out")) failures.push(`its branch ${fold.branch}: ${undone}`);
+    } catch (error) {
+      failures.push(`its branch ${fold.branch}: ${oneLine(errorText(error))}`);
     }
     if (failures.length > 0) throw new FactoryError("failed", `wave ${short(id)} is cancelled, but cleaning up after it failed (${failures.join("; ")}); cancel its tasks with tasks.cancel, put its branch back by hand`);
-    return { wave: await waveView(await readWave(id)) };
+    return { wave: (await lookWave(await readWave(id))).view };
   },
 
   "waves.remove": async (params) => {
@@ -724,13 +677,13 @@ export const WAVE_HANDLERS = {
     try {
       await lockWave(id);
     } catch (error) {
-      if (error instanceof TaskBusyError) throw new FactoryError("refused", `wave ${shown} has a runner, cancel it first`);
+      if (error instanceof FactoryError && error.code === "busy") throw new FactoryError("refused", `wave ${shown} has a runner, cancel it first`);
       throw error;
     }
     try {
       if ((await liveWaveRunners(id)).length > 0) throw new FactoryError("refused", `wave ${shown} has a runner, cancel it first`);
       const file = await readWave(id);
-      const { stage, branch } = foldWave(file.declaration, file.events);
+      const { stage, branch, started, target } = foldWave(file.declaration, file.events);
       const waiting = queuedAfter(id, await listWaves());
       if (waiting.length > 0) {
         const names = waiting.map((fold) => `${fold.tag} (${short(fold.id)}, ${fold.stage})`).join(", ");
@@ -751,7 +704,7 @@ export const WAVE_HANDLERS = {
       // A review worktree a block left behind: removed with the wave, unless it holds somebody's work (without force).
       const review = waveReviewWorktree(declaration);
       const hasReview = existsSync(review);
-      if (hasReview && params.force !== true && (await uncommittedFiles(runCommand, review))) {
+      if (hasReview && params.force !== true && (await worktreeChanges(runCommand, review, true))) {
         throw new FactoryError("refused", `wave ${shown}: its review worktree ${review} holds uncommitted changes, commit or remove them there, or give force: true to remove it anyway`, {
           force: true,
         });
@@ -771,9 +724,11 @@ export const WAVE_HANDLERS = {
         const removed = await runCommand(["git", "worktree", "remove", ...(params.force === true ? ["--force"] : []), review], { cwd: repo });
         if (removed.exitCode !== 0) throw new FactoryError("failed", `wave ${shown}: removing its review worktree ${review} failed: ${oneLine(removed.output)}`);
       }
-      // Only a merged wave's branch: the target has all of it (a `squash` wave's runner deleted it already, its commits
-      // stay under their ref, which the factory never deletes). Any other branch may hold work nobody merged.
-      if (stage === "merged" && branch !== null && (await localBranchExists(repo, branch))) {
+      // Only a branch the target has all of: a merged wave's (a `squash` wave's runner deleted it already, its commits
+      // stay under their ref, which the factory never deletes), or an empty one of a wave that never started. Any other
+      // branch may hold work nobody merged.
+      const empty = async () => (await runCommand(["git", "merge-base", "--is-ancestor", branch, target], { cwd: repo })).exitCode === 0;
+      if ((await localBranchExists(repo, branch)) && (stage === "merged" || (!started && (await empty())))) {
         const deleted = await runCommand(["git", "branch", "-D", branch], { cwd: repo });
         if (deleted.exitCode !== 0) throw new FactoryError("failed", `wave ${shown}: deleting its branch ${branch} failed: ${oneLine(deleted.output)}`);
       }
@@ -794,7 +749,7 @@ export const REVIEWER_FIX_CAP = 3;
  */
 export function reviewerFixEvents(fold: WaveFold, fix: { title: string; request: string; model?: ModelSize }): { key: string; events: NewWaveEvent[] } | null {
   const bare = fix.title.trim().replace(/^fix:\s*/i, "");
-  const started = fold.fixes ?? 0;
+  const started = fold.fixes;
   if (started >= REVIEWER_FIX_CAP) return null;
   const keys = new Set(fold.tasks.map((task) => task.key));
   let n = started + 1;
@@ -811,26 +766,22 @@ export function reviewerFixEvents(fold: WaveFold, fix: { title: string; request:
 export async function startReviewerFix(waveId: string, fix: { title: string; request: string; model?: ModelSize }, env?: RunnerEnv): Promise<string> {
   const bare = fix.title.trim().replace(/^fix:\s*/i, "");
   if (bare === "") throw new FactoryError("invalid", "start_fix needs a title");
-  if (fix.request.trim() === "") throw new FactoryError("invalid", "start_fix needs a request");
   let key = "";
-  await busyAsFactoryError(() =>
-    appendWaveEvents(waveId, (fold) => {
-      const shown = short(waveId);
-      if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${shown} is ${fold.stage}, it takes no more tasks`);
-      const added = reviewerFixEvents(fold, fix);
-      if (added === null) throw new FactoryError("refused", `wave ${shown} has its ${REVIEWER_FIX_CAP} fix tasks already: tell the supervisor with notify_supervisor`);
-      key = added.key;
-      return added.events;
-    }),
-  );
+  await appendWaveEvents(waveId, (fold) => {
+    const shown = short(waveId);
+    if (WAVE_ADD_REFUSED.includes(fold.stage)) throw new FactoryError("refused", `wave ${shown} is ${fold.stage}, it takes no more tasks`);
+    const added = reviewerFixEvents(fold, fix);
+    if (added === null) throw new FactoryError("refused", `wave ${shown} has its ${REVIEWER_FIX_CAP} fix tasks already: tell the supervisor with notify_supervisor`);
+    key = added.key;
+    return added.events;
+  });
   await pokeWaveRunner(waveId, env);
   return key;
 }
 
 /** The reviewer's `notify_supervisor`: one `note` event, which `notify.ts` turns into one notice to the wave's origin. */
 export async function noteToSupervisor(waveId: string, text: string, taskId: string | null): Promise<void> {
-  if (text.trim() === "") throw new FactoryError("invalid", "notify_supervisor needs a text");
-  await busyAsFactoryError(() => appendWaveEvents(waveId, [{ kind: "note", text, taskId }]));
+  await appendWaveEvents(waveId, [{ kind: "note", text, taskId }]);
 }
 
 /** The wave's stage, `interrupted (<stage> ...)` when no runner drives it. */
@@ -840,12 +791,10 @@ function waveStageText(view: WaveView): string {
 
 /** Appends the stage `to` when the wave is at `from` (compare-and-append), else `refused` naming `what`. */
 async function moveWave(id: string, from: WaveStage, to: WaveStage, what: string): Promise<void> {
-  await busyAsFactoryError(() =>
-    appendWaveEvents(id, (fold) => {
-      if (fold.stage !== from) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, ${what}`);
-      return [{ kind: "stage", stage: to, reason: null }];
-    }),
-  );
+  await appendWaveEvents(id, (fold) => {
+    if (fold.stage !== from) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, ${what}`);
+    return [{ kind: "stage", stage: to, reason: null }];
+  });
 }
 
 /** The records of the wave's tasks (those it started and that were not removed). */
@@ -859,7 +808,7 @@ async function undoWaveStart(declaration: WaveDeclaration): Promise<void> {
   for (const record of await waveRecords(declaration.id)) await deleteTask(record).catch(() => undefined);
   await rm(await realpath(waveDir(declaration.id)), { recursive: true, force: true }).catch(() => undefined);
   await removeWave(declaration.id);
-  if (declaration.branch !== null) await runCommand(["git", "branch", "-D", declaration.branch], { cwd: declaration.repo });
+  await runCommand(["git", "branch", "-D", declaration.branch], { cwd: declaration.repo });
 }
 
 /**
@@ -867,13 +816,12 @@ async function undoWaveStart(declaration: WaveDeclaration): Promise<void> {
  * prefix of one, or a tag (the newest wave carrying it that is not cancelled). The new wave's own tag, a name no wave
  * of `target` carries, a cancelled wave: `invalid`.
  */
-function resolveAfter(raw: unknown, waves: readonly WaveFile[], target: string, tag: string): string[] {
+function resolveAfter(raw: string[] | undefined, waves: readonly WaveFile[], target: string, tag: string): string[] {
   if (raw === undefined) return [];
-  if (!Array.isArray(raw)) throw new FactoryError("invalid", "waves.start: after must be an array of wave tags or ids");
   const folds = waves.map((file) => foldWave(file.declaration, file.events)).filter((fold) => fold.target === target);
   const ids: string[] = [];
   for (const item of raw) {
-    const name = typeof item === "string" ? item.trim() : "";
+    const name = item.trim();
     if (name === "") throw new FactoryError("invalid", "waves.start: after must name waves by tag or id, not by an empty string");
     if (name === tag) throw new FactoryError("invalid", `waves.start: after names ${name}, the wave itself`);
     let found = folds.find((fold) => fold.id === name);

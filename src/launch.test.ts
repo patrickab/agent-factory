@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { defaultBranch, deleteTask, launchTask, LaunchRefusedError, taskInboxPath, unmergedWork } from "./launch.ts";
+import { defaultBranch, deleteTask, launchTask, liveRunners, taskInboxPath, unmergedWork } from "./launch.ts";
 import { saveSettings } from "./settings.ts";
 import { listTasks, taskLogPath } from "./tasks.ts";
 
@@ -32,17 +32,14 @@ const pathWithoutAgentWorktree = [
   ...(savedEnv.PATH ?? "").split(":").filter((dir) => dir !== "" && !existsSync(join(dir, "agent-worktree"))),
 ].join(":");
 
-/** Waits until no runner a test started (its worktree is under `scratch`) is alive. */
+/** Waits until no runner of a task this test file started is alive. */
 async function runnersEnded(): Promise<void> {
   const deadline = Date.now() + 10_000;
-  while (true) {
-    try {
-      execFileSync("pgrep", ["-f", `runner\\.ts .*${scratch}`]);
-    } catch {
-      return;
+  for (const record of await listTasks()) {
+    while ((await liveRunners(record)).length > 0) {
+      if (Date.now() > deadline) throw new Error("a runner did not end");
+      await Bun.sleep(50);
     }
-    if (Date.now() > deadline) throw new Error("a runner did not end");
-    await Bun.sleep(50);
   }
 }
 
@@ -163,8 +160,7 @@ describe("launchTask", () => {
   test("a target branch without factory.yaml: refused before any worktree", async () => {
     const repo = makeRepo("repo", "main", { "factory.yaml": null });
     const refusal = launchTask({ repo, title: "t", request: "r" });
-    await expect(refusal).rejects.toThrow("branch main has no factory.yaml (write one with /factory init or the config.write action, and commit it)");
-    await expect(refusal).rejects.toBeInstanceOf(LaunchRefusedError);
+    await expect(refusal).rejects.toMatchObject({ code: "refused" });
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
   });
 

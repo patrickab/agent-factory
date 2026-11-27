@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RESTING_STATES, RETRY_PROMPT, roundsUsed, wasInterrupted, type Finding, type Task } from "./state.ts";
+import { applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RESTING_STATES, RETRY_PROMPT, roundsUsed, type Finding, type Task } from "./state.ts";
 
 const task: Task = {
   title: "Add notes",
@@ -55,13 +55,6 @@ describe("rebuild", () => {
     expect(applyEntry({ ...run, state: "blocked" }, "factory-round", { round: 2, trigger: "conflict" })).toMatchObject({ runFirstRound: 2 });
     expect(applyEntry({ ...run, state: "merging" }, "factory-round", { round: 2, trigger: "conflict" })).toMatchObject({ runFirstRound: 1 });
     expect(applyEntry(run, "factory-round", { round: 2, trigger: "conflict" })).toMatchObject({ runFirstRound: 1 });
-  });
-
-  test("running and merging count as interrupted, the other states do not", () => {
-    const base = rebuild([custom("factory-task", task)])!;
-    expect(wasInterrupted(base)).toBe(true);
-    expect(wasInterrupted({ ...base, state: "merging" })).toBe(true);
-    for (const state of ["waiting_approve", "waiting_answer", "blocked", "done", "cancelled"] as const) expect(wasInterrupted({ ...base, state })).toBe(false);
   });
 
   test("a factory-question and waiting_answer rebuild into the resting state with the open question; the answer clears it", () => {

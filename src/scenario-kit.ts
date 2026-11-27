@@ -125,8 +125,8 @@ export async function terminate(id: string): Promise<void> {
 
 async function stopAll(): Promise<void> {
   // Wave runners first: they would start tasks while the tasks' runners stop.
-  for (const wave of await listWaves()) if ((await liveWaveRunners(wave.declaration.id)).length > 0) await stopWaveRunners(wave.declaration.id);
-  for (const record of await listTasks()) if ((await liveRunners(record)).length > 0) await stopRunners(record);
+  for (const wave of await listWaves()) await stopWaveRunners(wave.declaration.id);
+  for (const record of await listTasks()) await stopRunners(record);
 }
 
 export interface Setup {

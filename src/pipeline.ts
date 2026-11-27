@@ -56,13 +56,13 @@ export interface PipelineSteps {
   merge(config: FactoryConfig): Promise<MergeOutcome>;
   /** The conflicting files of a rebase in progress in the task's worktree, null when none is. */
   openRebase(): Promise<string[] | null>;
-  /** True when a passed round asks the coder for the commit message before it ends. Absent: never. */
-  askCommitMessage?(): boolean;
+  /** True when a passed round asks the coder for the commit message before it ends. */
+  askCommitMessage(): boolean;
   /**
    * True when the task belongs to a wave: a passed round rests `reviewing` for the wave's reviewer instead of the
-   * task's own review, approve or merge. Absent: never.
+   * task's own review, approve or merge.
    */
-  inWave?(): Promise<boolean>;
+  inWave(): Promise<boolean>;
 }
 
 export interface RoundResult {
@@ -185,7 +185,7 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
     const touched = protectedPaths(diff.paths, config.protected);
     if (touched.length > 0) return problem("protected", protectedFeedback(round, touched));
 
-    const byWave = (await steps.inWave?.()) ?? false;
+    const byWave = await steps.inWave();
     if (task.settings.review && !byWave) {
       steps.status(`round ${round}: review`);
       const review = await steps.review(round, diff);
@@ -198,7 +198,7 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
     // The message is about a change that is neither approved nor merged yet: it goes first.
     if (steps.pendingMessages()) return messageRound();
     const passedInto: State = byWave ? "reviewing" : task.settings.merge === "review" ? "waiting_approve" : "merging";
-    if (steps.askCommitMessage?.()) {
+    if (steps.askCommitMessage()) {
       drafts.push(commitAskDraft(round));
       return { entries: drafts, continue: true, commitAsk: passedInto };
     }

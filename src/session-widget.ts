@@ -13,9 +13,8 @@
  *   the agent view's `scrub` (no paths, no long ids)
  */
 import { scrub } from "./agent-view.ts";
-import { WAVE_FINAL_STAGES } from "./core-tasks.ts";
 import { dollars } from "./util.ts";
-import type { WaveView } from "./waves.ts";
+import { WAVE_FINAL_STAGES, type WaveView } from "./waves.ts";
 
 export interface SessionWidgetOptions {
   showFinished: boolean;

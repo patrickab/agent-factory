@@ -1,9 +1,9 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { messageTask, sendCommand } from "./launch.ts";
+import { saveSettings } from "./settings.ts";
 import { lockTask, taskLockPath, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
 
 const savedEnv = { ...process.env };
@@ -201,21 +201,29 @@ async function until(check: () => boolean, timeoutMs = 10_000): Promise<void> {
   }
 }
 
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+/** Whether process `pid` (this test's own) still exists. */
+const alive = (pid: number) => existsSync(`/proc/${pid}`);
 
-function runnersOf(dir: string): string {
-  try {
-    return execFileSync("pgrep", ["-f", dir], { encoding: "utf8" }).trim();
-  } catch {
-    return "";
-  }
+/** The task of case `c`, its runner's `pi` the fake one in `mode`, the factory's state under `c`. */
+function taskOf(c: ReturnType<typeof newCase>, mode: string): TaskRecord {
+  process.env.PI_CODING_AGENT_DIR = join(c.dir, "agent");
+  process.env.PATH = `${fakeBin}:${savedEnv.PATH}`;
+  process.env.FAKE_PI_LOG = c.log;
+  process.env.FAKE_PI_MODE = mode;
+  return {
+    id: `00000000-0000-4000-8000-${String(caseCount).padStart(12, "0")}`,
+    repo: c.dir,
+    worktree: c.worktree,
+    branch: "t",
+    title: "t",
+    sessionId: c.sessionId,
+    sessionDir: c.sessionDir,
+    createdAt: new Date().toISOString(),
+    tag: "t",
+    plan: null,
+    wave: null,
+    origin: null,
+  };
 }
 
 afterEach(() => {
@@ -293,8 +301,8 @@ describe("runner", () => {
     const holder = Number(readFileSync(lock, "utf8").split(" ")[0]);
     expect(holder).not.toBe(runner.pid);
     expect(readFileSync(`${c.inbox}.read`, "utf8").trim()).toBe(String(readFileSync(c.inbox).length));
-    await until(() => runnersOf(c.dir) === "", 15_000);
-    expect(existsSync(lock)).toBe(false);
+    // The last runner removes the lock as it exits.
+    await until(() => !existsSync(lock), 15_000);
     expect(noted(c).filter((line) => line.startsWith("eof "))).toEqual(["eof done", "eof done"]);
   }, 30_000);
 
@@ -316,57 +324,38 @@ describe("runner", () => {
 describe("sendCommand", () => {
   test("starts the runner detached, its output in the task's log, hands it the task lock, and it ends with the task", async () => {
     const c = newCase();
-    process.env.PI_CODING_AGENT_DIR = join(c.dir, "agent");
-    process.env.PATH = `${fakeBin}:${savedEnv.PATH}`;
-    process.env.FAKE_PI_LOG = c.log;
-    process.env.FAKE_PI_MODE = "merge";
-    const record: TaskRecord = {
-      id: "00000000-0000-4000-8000-000000000001",
-      repo: c.dir,
-      worktree: c.worktree,
-      branch: "t",
-      title: "t",
-      sessionId: c.sessionId,
-      sessionDir: c.sessionDir,
-      createdAt: new Date().toISOString(),
-      tag: "t",
-      plan: null,
-      wave: null,
-      origin: null,
-    };
+    const record = taskOf(c, "merge");
     await lockTask(record.id);
     await sendCommand(record, "/factory approve");
     expect(existsSync(taskLogPath(record.id))).toBe(true);
     expect(readFileSync(taskLockPath(record.id), "utf8")).not.toStartWith(`${process.pid} `);
     await until(() => noted(c).includes("eof done"));
     expect(noted(c)[2]).toBe(`prompt ${JSON.stringify({ id: "1", type: "prompt", message: "/factory approve" })}`);
-    await until(() => runnersOf(c.dir) === "");
-    expect(existsSync(taskLockPath(record.id))).toBe(false);
+    await until(() => !existsSync(taskLockPath(record.id)));
   }, 15_000);
+
+  test("the coder's Pi loads every user extension, or with the repository's `extensions` only the factory's plugin and those", async () => {
+    const plugin = join(import.meta.dir, "pi", "index.ts");
+    for (const [extensions, sources] of [
+      [undefined, null],
+      [[], [plugin]],
+      [["npm:pi-lens", "builtin:codemode"], [plugin, "npm:pi-lens", "builtin:codemode"]],
+    ] as const) {
+      const c = newCase();
+      const record = taskOf(c, "merge");
+      await saveSettings(record.repo, extensions === undefined ? {} : { extensions: [...extensions] });
+      await lockTask(record.id);
+      await sendCommand(record, "/factory approve");
+      await until(() => noted(c).includes("eof done"));
+      const args: string[] = JSON.parse(noted(c)[0].slice("argv ".length));
+      expect(args.includes("-ne") ? args.filter((_, index) => args[index - 1] === "-e") : null, JSON.stringify(extensions)).toEqual(sources === null ? null : [...sources]);
+      await until(() => !existsSync(taskLockPath(record.id)));
+    }
+    expect(existsSync(plugin)).toBe(true);
+  }, 30_000);
 });
 
 describe("messageTask", () => {
-  function taskOf(c: ReturnType<typeof newCase>, mode: string): TaskRecord {
-    process.env.PI_CODING_AGENT_DIR = join(c.dir, "agent");
-    process.env.PATH = `${fakeBin}:${savedEnv.PATH}`;
-    process.env.FAKE_PI_LOG = c.log;
-    process.env.FAKE_PI_MODE = mode;
-    return {
-      id: `00000000-0000-4000-8000-${String(caseCount).padStart(12, "0")}`,
-      repo: c.dir,
-      worktree: c.worktree,
-      branch: "t",
-      title: "t",
-      sessionId: c.sessionId,
-      sessionDir: c.sessionDir,
-      createdAt: new Date().toISOString(),
-      tag: "t",
-      plan: null,
-      wave: null,
-      origin: null,
-    };
-  }
-
   test("a task whose lock another holds: refused as busy, no runner", async () => {
     const c = newCase();
     restingIn(c, "blocked");

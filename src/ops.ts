@@ -15,11 +15,12 @@ import {
   nulList,
   primaryCheckout,
   rebaseInProgress,
+  snapshotTree,
   taskBase,
-  taskDiff,
   taskGit,
+  treeDiff,
 } from "./git.ts";
-import { mergeTask, rebaseWorktree } from "./merge.ts";
+import { mergeTask, prepareTaskBranch, rebaseWorktree } from "./merge.ts";
 import { reviewedDrafts, runMerge, type PipelineSteps } from "./pipeline.ts";
 import { runReview } from "./review.ts";
 import { CommandRunner } from "./run.ts";
@@ -29,6 +30,7 @@ import {
   conflictFeedback,
   customDraft,
   FEEDBACK_TYPE,
+  FINAL_STATES,
   type MergeData,
   mergeFailedPrompt,
   parseStartPayload,
@@ -109,15 +111,11 @@ export interface OpsDeps {
   sessionModel(): string | null;
   sessionId(): string;
   /**
-   * Why this task's merge must not land now (its wave's review began: invariant 2), null when it may. Absent: it
-   * always may.
+   * The wave this task belongs to, null outside a wave, and why the task's merge must not land now (its wave's review
+   * began: invariant 2), null when it may. A wave's task merges into the wave's branch with `gates` and `task_gates`
+   * (env `FACTORY_BASE`), not `merge_gates`: the wave runs those.
    */
-  mergeRefusal?(): Promise<string | null>;
-  /**
-   * The id of the wave this task belongs to, null outside a wave. A wave's task merges into the wave's branch with
-   * `gates` and `task_gates` (env `FACTORY_BASE`), not `merge_gates`: the wave runs those. Absent: no wave.
-   */
-  wave?(): Promise<string | null>;
+  wave(): Promise<{ id: string; mergeRefusal: string | null } | null>;
 }
 
 export function newTaskSession(): TaskSession {
@@ -190,7 +188,8 @@ export async function openRun(deps: OpsDeps, current: Snapshot): Promise<RunOpen
     return { failed: `infra: ${errorText(error)}` };
   }
   try {
-    const conflicts = await rebaseWorktree(runner.cleanup, runner.cleanup, deps.cwd, task, protectedGlobs);
+    await prepareTaskBranch(runner.cleanup, deps.cwd, task, protectedGlobs);
+    const conflicts = await rebaseWorktree(runner.cleanup, runner.cleanup, deps.cwd, task.mainBranch);
     return conflicts ? { conflict: conflictFeedback(current.round, task.mainBranch, conflicts, false) } : {};
   } catch (error) {
     return { failed: `rebase_failed: ${errorText(error)}` };
@@ -200,7 +199,6 @@ export async function openRun(deps: OpsDeps, current: Snapshot): Promise<RunOpen
 export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles, liveness: boolean): PipelineSteps {
   const { session, cwd: root } = deps;
   const { runner } = session;
-  const inWave = async () => ((await deps.wave?.()) ?? null) !== null;
   const status = (text: string) => {
     deps.setStatus(STATUS_KEY, text);
     if (liveness) deps.setStatus(LIVENESS_KEY, text);
@@ -211,7 +209,7 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
     pendingMessages: () => deps.hasPendingMessages(),
     config: () => taskFilesNow.config,
     runCommand: (argv, env) => runner.run(argv, { cwd: root, ...(env ? { env } : {}) }),
-    diff: async () => taskDiff(runner.run, root, await taskBase(runner.run, root, task)),
+    diff: async () => treeDiff(runner.run, root, await taskBase(runner.run, root, task), await snapshotTree(runner.run, root)),
     review: (round, diff) =>
       runReview({
         exec: runner.run,
@@ -228,7 +226,8 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
     merge: async (config) => {
       const round = session.snapshot?.round ?? 0;
       // Asked right before the merge, whatever started it: a task of a wave under review adds nothing to its branch.
-      const refusal = (await deps.mergeRefusal?.()) ?? null;
+      const wave = await deps.wave();
+      const refusal = wave?.mergeRefusal ?? null;
       if (refusal !== null) return { gates: [], result: { kind: "failed", merge: { ok: false, commit: null, error: refusal, depsSynced: false } } };
       const mergeStatus = (text: string) => status(`round ${round}: merge, ${text}`);
       const intent = (data: MergeIntentData) => {
@@ -236,13 +235,13 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
       };
       const message = session.snapshot?.commitMessage ?? commitMessageFallback(task.title);
       // A wave's task: what its change reaches, not the whole suite (the wave runs that once, before its reviewer).
-      const gates = (await inWave()) ? { gates: [...config.gates, ...config.task_gates], baseEnv: true } : {};
+      const gates = wave !== null ? { gates: [...config.gates, ...config.task_gates], baseEnv: true } : {};
       return mergeTask({ exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent, status: mergeStatus, message, stop: () => runner.cancelled, ...gates });
     },
     openRebase: () => rebaseInProgress(runner.run, root),
     // A follow-up on a merged task is a new commit of its own: the task title already named the first one.
     askCommitMessage: () => !isConventionalTitle(task.title) || session.snapshot?.mergedCommit != null,
-    inWave,
+    inWave: async () => (await deps.wave()) !== null,
   };
 }
 
@@ -266,11 +265,15 @@ export async function finishMerge(deps: OpsDeps, current: Snapshot): Promise<voi
   deps.setStatus(STATUS_KEY, undefined);
   deps.setStatus(LIVENESS_KEY, undefined);
   session.runner.reset();
+  sendFeedback(deps, drafts, session.snapshot?.state === "running");
+}
+
+/** Sends the feedback among `drafts` to the coder, if there is one. */
+function sendFeedback(deps: OpsDeps, drafts: Draft[], triggerTurn: boolean): void {
   const feedback = drafts.find((draft): draft is FeedbackDraft => draft.type === "custom_message" && draft.customType === FEEDBACK_TYPE);
-  if (feedback) {
-    const { type: _type, ...message } = feedback;
-    deps.sendMessage(message, { triggerTurn: session.snapshot?.state === "running" });
-  }
+  if (feedback === undefined) return;
+  const { type: _type, ...message } = feedback;
+  deps.sendMessage(message, { triggerTurn });
 }
 
 /** The merge entries of a task found `merging` on resume whose merge landed after its intent was written, else undefined. */
@@ -347,9 +350,7 @@ export function startTask(deps: OpsDeps, json: string): Promise<OpResult> {
 }
 
 /** Merges a task that waits for approve. Answers at once: the merge runs in the background. */
-export async function approveTask(deps: OpsDeps): Promise<OpResult> {
-  const current = deps.session.snapshot;
-  if (!current) return { ok: false, error: "this session holds no task" };
+export async function approveTask(deps: OpsDeps, current: Snapshot): Promise<OpResult> {
   if (current.state !== "waiting_approve") return { ok: false, error: "the task is not waiting for approve" };
   if (!deps.isIdle()) return { ok: false, error: "the session is busy" };
   return guarded(async () => {
@@ -366,9 +367,7 @@ export async function approveTask(deps: OpsDeps): Promise<OpResult> {
  * (`task_gates`, commit, merge into the wave's branch); a blocker or major finding: the next round, its feedback
  * starts the coder; out of rounds or no verdict: `blocked` (`reviewedDrafts`).
  */
-export async function applyReviewed(deps: OpsDeps, json: string): Promise<OpResult> {
-  const current = deps.session.snapshot;
-  if (!current) return { ok: false, error: "this session holds no task" };
+export async function applyReviewed(deps: OpsDeps, current: Snapshot, json: string): Promise<OpResult> {
   let payload: { round?: unknown; review?: unknown };
   try {
     payload = JSON.parse(json) as typeof payload;
@@ -388,19 +387,13 @@ export async function applyReviewed(deps: OpsDeps, json: string): Promise<OpResu
       void finishMerge(deps, now).catch(() => undefined);
       return { ok: true };
     }
-    const feedback = result.entries.find((draft): draft is FeedbackDraft => draft.type === "custom_message" && draft.customType === FEEDBACK_TYPE);
-    if (feedback && result.continue) {
-      const { type: _type, ...message } = feedback;
-      deps.sendMessage(message, { triggerTurn: true });
-    }
+    if (result.continue) sendFeedback(deps, result.entries, true);
     return { ok: true };
   });
 }
 
 /** Another coder turn on a blocked or cancelled task. */
-export async function retryTask(deps: OpsDeps): Promise<OpResult> {
-  const current = deps.session.snapshot;
-  if (!current) return { ok: false, error: "this session holds no task" };
+export async function retryTask(deps: OpsDeps, current: Snapshot): Promise<OpResult> {
   if (current.state !== "blocked" && current.state !== "cancelled") return { ok: false, error: "retry needs a blocked or cancelled task" };
   if (!deps.isIdle()) return { ok: false, error: "the session is busy" };
   return guarded(async () => {
@@ -419,11 +412,9 @@ export async function retryTask(deps: OpsDeps): Promise<OpResult> {
 }
 
 /** Kills the running command group. A merge or a round in flight ends itself `cancelled`, an idle task is cancelled here. */
-export async function cancelTask(deps: OpsDeps): Promise<OpResult> {
-  const current = deps.session.snapshot;
-  if (!current) return { ok: false, error: "this session holds no task" };
+export async function cancelTask(deps: OpsDeps, current: Snapshot): Promise<OpResult> {
   const { state } = current;
-  if (state === "done" || state === "cancelled") return { ok: false, error: "the task is not active" };
+  if (FINAL_STATES.includes(state)) return { ok: false, error: "the task is not active" };
   return guarded(async () => {
     const { runner } = deps.session;
     runner.cancel();

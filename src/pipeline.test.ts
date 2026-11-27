@@ -68,6 +68,8 @@ function fakeSteps(overrides: Partial<PipelineSteps> = {}): PipelineSteps & { ca
       return { gates: [], result: { kind: "merged", merge: merged } };
     },
     openRebase: async () => null,
+    askCommitMessage: () => false,
+    inWave: async () => false,
     ...overrides,
   };
 }

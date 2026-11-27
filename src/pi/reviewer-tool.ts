@@ -6,7 +6,7 @@
  * - The parent reads the findings from `details.findings` of the tool result (`review.ts`). Whether the review
  *   approves is derived there from the severities, so the tool does not ask for it
  * - Provides `read_diff({paths?})` when the factory names a diff file (`REVIEW_DIFF_ENV`, a `TaskDiff` as JSON, written
- *   by `review-each.ts` per review): the only way the diff reaches a task's reviewer. Lockfiles last, cut as the review
+ *   by `runReviewer` per review): the only way the diff reaches a reviewer. Lockfiles last, cut as the review
  *   patch is (`reviewPatch`); `paths` keeps only those files (or directories)
  * - A wave's reviewer session is resumed for every review: each tool result older than this process (an earlier review,
  *   one cut short included) reaches the model as a `STUB_PREFIX` line through Pi's `context` hook. The session keeps it
@@ -24,7 +24,7 @@ import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { findWave, noteToSupervisor, REVIEWER_FIX_CAP, startReviewerFix, waveReviewWorktree } from "../core-waves.ts";
 import { factoryToolError } from "../factory-tool.ts";
-import { REVIEW_DIFF_ENV, readDiffText, STUB_PREFIX } from "../review-diff.ts";
+import { REVIEW_DIFF_ENV, readDiffText, STUB_PREFIX } from "../review.ts";
 import { listTasks } from "../tasks.ts";
 import { isRecord } from "../util.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";

@@ -3,75 +3,19 @@
  * temp dir: the wave's tasks are records whose sessions say `done`, their work commits on the wave's branch, the
  * reviewer a fake `pi` on PATH that approves.
  */
-import { randomBytes } from "node:crypto";
-import { afterAll, afterEach, beforeEach, describe, expect } from "bun:test";
+import { describe, expect } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { caseDigits, caseSerial, caseTests } from "./test-case.ts";
+import { caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
-import { worktreePath } from "./launch.ts";
-import { writeTask, type TaskRecord } from "./tasks.ts";
-import { stopWaveRunners } from "./wave-poke.ts";
+import { lockWave, unlockWave, wavePath } from "./wave-poke.ts";
 import { runWave, waveCommitsRef } from "./wave-runner.ts";
-import { appendWaveEvent, createWave, listWaves, lockWave, readWave, unlockWave, wavePath, type WaveView } from "./waves.ts";
+import { BRANCH, caseDir, commit, getWave, reviewWorktree, TAG, useWaveFixture, WAVE, waveRepo } from "./wave-test-kit.ts";
+import { readWave } from "./waves.ts";
 
 const test = caseTests();
-const savedEnv = { ...process.env };
-const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-wave-squash-test-")));
-const fakeBin = join(scratch, "bin");
-
-mkdirSync(fakeBin);
-writeFileSync(
-  join(fakeBin, "pi"),
-  `#!/usr/bin/env bun
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-const args = process.argv.slice(2);
-if (!args.includes("json")) process.exit(3);
-const dir = args[args.indexOf("--session-dir") + 1];
-const id = "11111111-2222-4333-8444-555555555555";
-mkdirSync(dir, { recursive: true });
-writeFileSync(join(dir, "2026-01-01T00-00-00-000Z_" + id + ".jsonl"), JSON.stringify({ type: "session", id }) + "\\n");
-const emit = (record) => console.log(JSON.stringify(record));
-emit({ type: "session", id });
-emit({ type: "tool_execution_end", toolName: "submit_verdict", isError: false, result: { details: { findings: [] } } });
-emit({ type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } });
-`,
-);
-chmodSync(join(fakeBin, "pi"), 0o755);
-
-let caseDir: string;
-let caseCount = 0;
-
-beforeEach(() => {
-  caseDir = join(scratch, `case-${++caseCount}`);
-  mkdirSync(caseDir);
-  Object.assign(process.env, {
-    PATH: `${fakeBin}:${savedEnv.PATH ?? ""}`,
-    HOME: scratch,
-    PI_CODING_AGENT_DIR: join(caseDir, "agent"),
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_AUTHOR_NAME: "test",
-    GIT_COMMITTER_NAME: "test",
-    GIT_AUTHOR_EMAIL: "test@example.com",
-    GIT_COMMITTER_EMAIL: "test@example.com",
-  });
-});
-
-afterEach(async () => {
-  for (const wave of await listWaves()) await stopWaveRunners(wave.declaration.id);
-  for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
-  Object.assign(process.env, savedEnv);
-});
-
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-}
+useWaveFixture();
 
 function gitOk(cwd: string, ...args: string[]): boolean {
   try {
@@ -82,66 +26,12 @@ function gitOk(cwd: string, ...args: string[]): boolean {
   }
 }
 
-function commit(cwd: string, file: string, text: string, message: string): string {
-  writeFileSync(join(cwd, file), text);
-  git(cwd, "add", "-A");
-  git(cwd, "commit", "--quiet", "-m", message);
-  return git(cwd, "rev-parse", "HEAD");
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-const RUN = randomBytes(2).toString("hex");
-const WAVE = (): string => `32000000-${RUN}-4000-8000-${caseDigits()}`;
-const BRANCH = "main-squash-w1";
-const TAG = "squash/w1";
 const REF = () => waveCommitsRef({ id: WAVE(), tag: TAG });
-const taskId = (n: number) => `42000000-${RUN}-4000-8000-${caseDigits(caseSerial() * 10 + n)}`;
-
-/**
- * A repo on `main` with `factory.yaml` (`config`), the wave's branch off it holding one commit per task (`files`), the
- * tasks' records with `done` sessions, and the wave's log. Returns the repo.
- */
-async function waveRepo(overrides: object = { squash: true }, files = ["b", "c"], config = 'gates:\n  - ["true"]\n'): Promise<string> {
-  const repo = join(caseDir, "repo");
-  mkdirSync(repo);
-  git(repo, "init", "--quiet", "-b", "main");
-  writeFileSync(join(repo, "factory.yaml"), config);
-  commit(repo, "a.txt", "a\n", "init");
-  const base = git(repo, "rev-parse", "main");
-  git(repo, "branch", BRANCH);
-  const work = join(caseDir, "work");
-  git(repo, "worktree", "add", "--quiet", work, BRANCH);
-  for (const file of files) commit(work, `${file}.txt`, `${file}\n`, `feat: add ${file}`);
-  git(repo, "worktree", "remove", work);
-  await createWave({ id: WAVE(), repo, tag: TAG, plan: null, title: "Wave one", request: "r", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides });
-  const specs = files.map((file, index) => ({ key: file, title: `Add ${file}`, request: `add ${file}`, after: index === 0 ? [] : [files[index - 1]], id: crypto.randomUUID() }));
-  await appendWaveEvent(WAVE(), { kind: "tasks", tasks: specs });
-  for (const [index, spec] of specs.entries()) {
-    const record: TaskRecord = {
-      id: taskId(index + 1),
-      repo,
-      worktree: join(caseDir, `task-${spec.key}`),
-      branch: `task-${spec.key}`,
-      title: spec.title,
-      sessionId: `session-${RUN}-${caseSerial()}-${spec.key}`,
-      sessionDir: join(caseDir, "sessions"),
-      createdAt: `2026-01-01T00:00:0${index + 1}.000Z`,
-      tag: TAG,
-      plan: null,
-      wave: WAVE(),
-      origin: null,
-    };
-    await writeTask(record);
-    mkdirSync(record.sessionDir, { recursive: true });
-    const entry = { type: "custom", customType: "factory-state", data: { state: "done", round: 1, reason: "r" } };
-    writeFileSync(join(record.sessionDir, `2026-01-01T00-00-00-000Z_${record.sessionId}.jsonl`), `${JSON.stringify(entry)}\n`);
-    await appendWaveEvent(WAVE(), { kind: "task", key: spec.key, taskId: record.id, sessionId: record.sessionId });
-  }
-  return repo;
-}
-
-const getWave = async () => ((await callAction("waves.get", { id: WAVE() })) as { wave: WaveView }).wave;
 const kinds = async () => (await readWave(WAVE())).events.map((event) => ("stage" in event ? event.stage : event.kind));
-const reviewWorktree = (repo: string) => worktreePath(repo, `wave-${WAVE().slice(0, 8)}-review`);
 const branchExists = (repo: string) => gitOk(repo, "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`);
 
 /** Cuts the wave's log back to before its `merge` event: as if its runner died after the target moved. */
@@ -168,7 +58,7 @@ async function expectLanded(repo: string, from: string, subjects: string[]): Pro
 
 describe("a squash wave", () => {
   test("a rerun after the move, the branch still there: no second commit, the branch deleted, one merge event", async () => {
-    const repo = await waveRepo();
+    const repo = await waveRepo(undefined, "done", { squash: true });
     const init = git(repo, "rev-parse", "main");
     expect(await runWave(WAVE())).toBe(0);
     const landed = git(repo, "rev-parse", "main");
@@ -180,7 +70,7 @@ describe("a squash wave", () => {
   });
 
   test("a rerun after the branch was deleted: the landing is recognised from git, one merge event", async () => {
-    const repo = await waveRepo();
+    const repo = await waveRepo(undefined, "done", { squash: true });
     const init = git(repo, "rev-parse", "main");
     expect(await runWave(WAVE())).toBe(0);
     const landed = git(repo, "rev-parse", "main");
@@ -195,7 +85,7 @@ describe("a squash wave", () => {
     const count = join(caseDir, "gate-runs");
     const repoPath = join(caseDir, "repo");
     const gate = `echo run >> ${count}; n=$(wc -l < ${count}); if [ $n -ge 2 ] && [ $n -le 3 ]; then echo $n > ${repoPath}/m$n.txt && git -C ${repoPath} add m$n.txt && git -C ${repoPath} commit --quiet -m "main: m$n"; fi`;
-    const repo = await waveRepo({ squash: true, merge: "review" }, ["b", "c"], `gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", ${JSON.stringify(gate)}]\n`);
+    const repo = await waveRepo(`gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", ${JSON.stringify(gate)}]\n`, "done", { squash: true, merge: "review" });
     await runWave(WAVE());
     expect((await getWave()).stage).toBe("waiting_approve");
     commit(repo, "d.txt", "d\n", "main: add d");
@@ -215,7 +105,7 @@ describe("a squash wave", () => {
   }, 30_000);
 
   test("squash off: the task commits land as they are, the branch stays, no ref, the merge event as before", async () => {
-    const repo = await waveRepo({});
+    const repo = await waveRepo();
     const init = git(repo, "rev-parse", "main");
     expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();

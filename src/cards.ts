@@ -121,7 +121,7 @@ export function taskCard(task: TaskView, title: string, tone: CardTone = "quiet"
       ...row("flaky", task.flaky.join(", ")),
       next(task.actions.map((action) => (action === "tasks.message" && asked ? "tasks.message (answers it)" : action))),
     ],
-    findings: findingsOf(review?.findings ?? [], task.minors ?? []),
+    findings: findingsOf(review?.findings ?? [], task.minors),
     text: asked ? (task.question ?? "(the question is not recorded)") : task.state === "blocked" && task.failure !== null ? fenced(tail(task.failure)) : (task.lastMessage ?? undefined),
   });
 }
@@ -185,14 +185,14 @@ export function waveCard(view: WaveView, title: string, tone: CardTone = "quiet"
       ...row("history", view.merge?.ref !== undefined && `${view.merge.ref} (${plural(view.merge.commits ?? 0, "commit")})`),
       ...row("slot", view.waitingForSlot && "waits for a test slot"),
       ...row("flaky", [...new Set(view.gates.flatMap((gate) => gate.flaky ?? []))].join(", ")),
-      ...row("updated", updated(view.updates ?? [])),
+      ...row("updated", updated(view.updates)),
       ...(view.feedback ?? []).map((entry) => ({
         label: `feedback ${entry.kind}`,
         text: [`${entry.role}, ${entry.task === null ? "the wave" : `task ${short(entry.task)}`}: ${entry.what}`, entry.cost && `cost: ${entry.cost}`, entry.suggestion && `suggestion: ${entry.suggestion}`].filter(Boolean).join(" · "),
       })),
       next(view.actions),
     ],
-    findings: findingsOf(last?.findings ?? [], view.minors ?? []),
+    findings: findingsOf(last?.findings ?? [], view.minors),
     text: [multiline ? fenced(view.detail) : undefined, failedGate && (fenced(tail(failedGate.log ?? "")) ?? "no output")].filter(Boolean).join("\n\n"),
   });
 }

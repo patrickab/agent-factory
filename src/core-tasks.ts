@@ -4,7 +4,7 @@
  *
  * - Reads a task's session file for its state, settings, usage (assistant messages plus recorded reviews), outcome
  *   and timeline (by byte offset, so a client polls with `next`)
- * - `TaskView.actions` holds the predicates of the actions' own checks (`taskActions`)
+ * - One check per task action (`refusal`): the handlers throw it, `TaskView.actions` lists the actions without one
  * - A task that checks its state and then acts on it holds the task lock (`tasks.ts`) from the check on; a runner it
  *   spawns takes the lock over until it exits. `cancel` stops a live runner first: two Pi processes never share a session
  * - A task of a wave is continued only while its wave builds (invariant 2), a done one its wave counts on is not
@@ -14,16 +14,14 @@
 import { existsSync } from "node:fs";
 import { readFile, stat, truncate } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { byId, nonEmpty, oneLine, primaryOf, tagParam, type Handler } from "./core-shared.ts";
+import { byId, nonEmpty, primaryOf, tagParam, type Handler } from "./core-shared.ts";
 import { diffFileCounts, git, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
 import {
   defaultBranch,
   deleteTask,
   launchTask,
-  LaunchRefusedError,
   liveRunners,
   messageTask,
-  MessageRefusedError,
   sendCommand,
   stopRunners,
   taskInboxPath,
@@ -35,12 +33,12 @@ import { inboxReadPath, readFactoryStates, sessionFilePath, taskMainBranch } fro
 import { runCommand } from "./run.ts";
 import { requireModels } from "./models.ts";
 import { checkSettings, factoryHome, loadSettings, resolveSettings } from "./settings.ts";
-import { COMMIT_ASK_TYPE, FACTORY_TURN_STATES, isFactoryPrompt, messageText, minorFindings, RESTING_STATES, type Finding, type MinorFinding, type ReviewData, type Settings, type State } from "./state.ts";
-import { listTasks, lockTask, tagInGroup, TaskBusyError, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
-import { cents, errorText, FactoryError, isRecord, jsonLines, short, writeAtomic } from "./util.ts";
-import { foldWave, listWaves, readWave, type WaveStage } from "./waves.ts";
-import { pokeWave, type RunnerSnapshot } from "./wave-poke.ts";
-import { addScoutUsage, cancelScouts, scoutUsage } from "./scouts.ts";
+import { COMMIT_ASK_TYPE, FACTORY_TURN_STATES, FINAL_STATES, isFactoryPrompt, messageText, minorFindings, rebuild, RESTING_STATES, type EntryData, type EntryType, type Finding, type GateData, type MergeData, type MinorFinding, type ReviewData, type Settings, type State, type StateData } from "./state.ts";
+import { listTasks, lockTask, tagInGroup, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
+import { addUsage, cents, FactoryError, isRecord, jsonLines, piUsage, readJsonl, short, writeAtomic, type Usage } from "./util.ts";
+import { foldWave, listWaves, readWave, WAVE_FINAL_STAGES, type WaveStage } from "./waves.ts";
+import { pokeWave } from "./wave-poke.ts";
+import { cancelScouts, scoutUsage } from "./scouts.ts";
 import { slotWaiting } from "./test-slots.ts";
 
 /** A task as every client sees it. `running`: a live runner holds the task. */
@@ -74,19 +72,19 @@ export interface TaskView {
   /** The settings of the session's `factory-task` entry, null before it. */
   settings: Settings | null;
   /** Coder messages, reviews and the task's scouts together; `input` is uncached input tokens. Null before any. */
-  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number } | null;
-  /** The coder's last message (its text), null before one. The answer to the commit message ask does not count. Added in factory/w2. */
+  usage: Usage | null;
+  /** The coder's last message (its text), null before one. The answer to the commit message ask does not count. */
   lastMessage: string | null;
   /**
    * Why the task is blocked, from the round it stopped in: the failed gate (`<argv> (exit N)` and its output tail) or
-   * the failed merge's error; null unless the state is `blocked` and one of them says why. Added in factory/w2.
+   * the failed merge's error; null unless the state is `blocked` and one of them says why.
    */
   failure: string | null;
-  /** The task's last review (`factory-review`), null before one. Added in factory/w2. */
+  /** The task's last review (`factory-review`), null before one. */
   review: { round: number; status: string; approved: boolean; findings: Finding[] } | null;
-  /** The minor findings of every review (`factory-review`), oldest first: stored, they never start a round. Always set by the core. */
-  minors?: MinorFinding[];
-  /** The commit the last successful merge landed, null before one. Added in factory/w2. */
+  /** The minor findings of every review (`factory-review`), oldest first: stored, they never start a round. */
+  minors: MinorFinding[];
+  /** The commit the last successful merge landed, null before one. */
   merged: string | null;
   /** The `flaky` names of the task's gate records (steps that failed and then passed on their rerun), in order. */
   flaky: string[];
@@ -94,7 +92,8 @@ export interface TaskView {
   actions: TaskActionName[];
 }
 
-export type TaskActionName = "tasks.approve" | "tasks.retry" | "tasks.cancel" | "tasks.remove" | "tasks.message";
+const TASK_ACTIONS = ["tasks.approve", "tasks.retry", "tasks.cancel", "tasks.remove", "tasks.message"] as const;
+export type TaskActionName = (typeof TASK_ACTIONS)[number];
 
 export type TimelineKind = "task" | "round" | "gate" | "review" | "merge" | "state" | "coder" | "user" | "spawn" | "question";
 
@@ -128,18 +127,6 @@ export async function pendingWaveTask(wanted: string): Promise<{ id: string; key
   return undefined;
 }
 
-function numberOr0(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function customData(entry: Record<string, unknown>, customType: string): Record<string, unknown> | undefined {
-  return entry.type === "custom" && entry.customType === customType && isRecord(entry.data) ? entry.data : undefined;
-}
-
-function assistantMessage(entry: Record<string, unknown>): Record<string, unknown> | undefined {
-  return entry.type === "message" && isRecord(entry.message) && entry.message.role === "assistant" ? entry.message : undefined;
-}
-
 /**
  * The stage of the record's wave, null outside one, `removed` when its wave is gone. `known`: the stage the caller
  * read already (`waveTaskViews`).
@@ -157,73 +144,17 @@ async function taskWaveStage(record: TaskRecord, known?: WaveStage): Promise<Wav
 }
 
 /** A failed gate as `<argv> (exit N)` and its output tail; null for a passed one. */
-function failedGateText(gate: Record<string, unknown>): string | null {
-  if (!Array.isArray(gate.argv) || (gate.exitCode === 0 && gate.killed !== true)) return null;
-  const exit = gate.killed === true ? "killed" : `exit ${String(gate.exitCode)}`;
-  const tail = typeof gate.outputTail === "string" ? gate.outputTail.trimEnd() : "";
-  return `${gate.argv.join(" ")} (${exit})${tail === "" ? "" : `\n${tail}`}`;
-}
-
-function reviewOf(data: Record<string, unknown>): NonNullable<TaskView["review"]> {
-  // SAFETY: the factory-review entry is written by the plugin from a `ReviewData`.
-  const { round, status, approved, findings } = data as unknown as ReviewData;
-  return { round, status, approved, findings };
-}
-
-/**
- * What a task's session says about how its work went (the fields factory/w2 added to `TaskView`): the coder's last
- * message (not its answer to the commit message ask), the failure of the round it stopped in when `blocked`, its last
- * review, the commit its last merge landed.
- */
-function taskOutcome(entries: Record<string, unknown>[], blocked: boolean): Pick<TaskView, "lastMessage" | "failure" | "review" | "merged" | "minors"> {
-  let lastMessage: string | null = null;
-  let answeringCommitAsk = false;
-  let failedGate: string | null = null;
-  let mergeError: string | null = null;
-  let review: TaskView["review"] = null;
-  let merged: string | null = null;
-  const minors: MinorFinding[] = [];
-  for (const entry of entries) {
-    if (customData(entry, "factory-round")) {
-      // A new round: what failed before it was fed back to the coder.
-      [failedGate, mergeError, answeringCommitAsk] = [null, null, false];
-    }
-    if (entry.type === "custom_message" && entry.customType === COMMIT_ASK_TYPE) answeringCommitAsk = true;
-    const gate = customData(entry, "factory-gate");
-    if (gate) failedGate = failedGateText(gate) ?? failedGate;
-    const merge = customData(entry, "factory-merge");
-    if (merge?.ok === true && typeof merge.commit === "string") merged = merge.commit;
-    if (merge) mergeError = merge.ok !== true && typeof merge.error === "string" ? merge.error : null;
-    const reviewed = customData(entry, "factory-review");
-    if (reviewed) {
-      review = reviewOf(reviewed);
-      minors.push(...minorFindings(review.round, review.findings));
-    }
-    if (entry.type !== "message" || !isRecord(entry.message)) continue;
-    const text = messageText(entry.message).trim();
-    if (entry.message.role === "user" && !isFactoryPrompt(text)) answeringCommitAsk = false;
-    if (entry.message.role === "assistant" && text !== "" && !answeringCommitAsk) lastMessage = text;
-  }
-  return { lastMessage, failure: blocked ? (failedGate ?? mergeError) : null, review, merged, minors };
-}
-
-/** The `flaky` names of every `factory-gate` entry, without repeats. */
-function flakyNames(entries: Record<string, unknown>[]): string[] {
-  const names = new Set<string>();
-  for (const entry of entries) {
-    const flaky = customData(entry, "factory-gate")?.flaky;
-    if (Array.isArray(flaky)) for (const name of flaky) if (typeof name === "string") names.add(name);
-  }
-  return [...names];
+function failedGateText(gate: GateData): string | null {
+  if (gate.exitCode === 0 && !gate.killed) return null;
+  const tail = gate.outputTail.trimEnd();
+  return `${gate.argv.join(" ")} (${gate.killed ? "killed" : `exit ${String(gate.exitCode)}`})${tail === "" ? "" : `\n${tail}`}`;
 }
 
 /** The unrounded usage of a task view, for sums (the view itself shows cost in cents). */
-const unroundedUsage = new WeakMap<object, NonNullable<TaskView["usage"]>>();
-export function rawUsage(view: TaskView): TaskView["usage"] {
+const unroundedUsage = new WeakMap<object, Usage>();
+export function rawUsage(view: TaskView): Usage | null {
   return unroundedUsage.get(view) ?? view.usage;
 }
-
-export { cents };
 
 /** What a task's session file says (`sessionSummary`): a function of its content only. `usage` unrounded. */
 interface SessionSummary extends Pick<TaskView, "settings" | "question" | "lastMessage" | "failure" | "review" | "merged" | "minors" | "flaky"> {
@@ -231,41 +162,75 @@ interface SessionSummary extends Pick<TaskView, "settings" | "question" | "lastM
   usage: TaskView["usage"];
 }
 
+/**
+ * The plugin's reducer (`rebuild`) gives the settings, the question and the merged commit; one loop adds the rest: the
+ * last state with its time, usage, the coder's last message (not its answer to the commit message ask), the failure of
+ * the round it stopped in when `blocked`, the last review, minors and flaky names.
+ */
 function summarize(entries: Record<string, unknown>[]): SessionSummary {
+  const snapshot = rebuild(entries);
   let last: SessionSummary["last"] = null;
-  let settings: Settings | null = null;
-  let question: string | null = null;
-  let usage: TaskView["usage"] = null;
-  const addUsage = (input: unknown, output: unknown, cost: unknown, cacheRead: unknown, cacheWrite: unknown) => {
-    usage ??= { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-    usage.cacheRead += numberOr0(cacheRead);
-    usage.cacheWrite += numberOr0(cacheWrite);
-    usage.input += numberOr0(input);
-    usage.output += numberOr0(output);
-    usage.cost += numberOr0(cost);
-  };
+  let usage: Usage | null = null;
+  let lastMessage: string | null = null;
+  let answeringCommitAsk = false;
+  let failedGate: string | null = null;
+  let mergeError: string | null = null;
+  let review: TaskView["review"] = null;
+  const minors: MinorFinding[] = [];
+  const flaky = new Set<string>();
   for (const entry of entries) {
-    const state = customData(entry, "factory-state");
-    if (state && typeof state.state === "string" && typeof state.round === "number" && typeof state.reason === "string") {
-      last = { state: state.state as State, round: state.round, reason: state.reason, at: typeof entry.timestamp === "string" ? entry.timestamp : "" };
+    if (entry.type === "custom_message" && entry.customType === COMMIT_ASK_TYPE) answeringCommitAsk = true;
+    if (entry.type === "custom") {
+      const data = entry.data as EntryData[EntryType];
+      switch (entry.customType as EntryType) {
+        case "factory-state": {
+          const { state, round, reason } = data as StateData;
+          last = { state, round, reason, at: typeof entry.timestamp === "string" ? entry.timestamp : "" };
+          break;
+        }
+        case "factory-round":
+          // A new round: what failed before it was fed back to the coder.
+          [failedGate, mergeError, answeringCommitAsk] = [null, null, false];
+          break;
+        case "factory-gate": {
+          const gate = data as GateData;
+          failedGate = failedGateText(gate) ?? failedGate;
+          for (const name of gate.flaky ?? []) flaky.add(name);
+          break;
+        }
+        case "factory-merge":
+          mergeError = (data as MergeData).ok ? null : (data as MergeData).error;
+          break;
+        case "factory-review": {
+          const { round, status, approved, findings, usage: used } = data as ReviewData;
+          review = { round, status, approved, findings };
+          minors.push(...minorFindings(round, findings));
+          usage = addUsage(usage, used);
+          break;
+        }
+      }
     }
-    const asked = customData(entry, "factory-question");
-    if (asked && typeof asked.text === "string") question = asked.text;
-    const task = customData(entry, "factory-task");
-    if (task && isRecord(task.settings)) {
-      // SAFETY: the factory-task entry is written by the plugin from a parsed StartPayload, whose settings are Settings.
-      settings = task.settings as unknown as Settings;
-    }
-    const review = customData(entry, "factory-review");
-    if (review && isRecord(review.usage)) addUsage(review.usage.input, review.usage.output, review.usage.cost, review.usage.cacheRead, review.usage.cacheWrite);
-    const message = assistantMessage(entry);
-    if (message && isRecord(message.usage)) {
-      const { input, output, cost, cacheRead, cacheWrite } = message.usage;
-      addUsage(input, output, isRecord(cost) ? cost.total : undefined, cacheRead, cacheWrite);
-    }
+    if (entry.type !== "message" || !isRecord(entry.message)) continue;
+    const message = entry.message;
+    const text = messageText(message).trim();
+    if (message.role === "user" && !isFactoryPrompt(text)) answeringCommitAsk = false;
+    if (message.role !== "assistant") continue;
+    if (text !== "" && !answeringCommitAsk) lastMessage = text;
+    usage = addUsage(usage, piUsage(message.usage));
   }
-  const lastState = last as SessionSummary["last"];
-  return { last: lastState, settings, question, usage, ...taskOutcome(entries, lastState?.state === "blocked"), flaky: flakyNames(entries) };
+  const blocked = (last as SessionSummary["last"])?.state === "blocked";
+  return {
+    last,
+    usage,
+    settings: snapshot?.task.settings ?? null,
+    question: snapshot?.question ?? null,
+    merged: snapshot?.mergedCommit ?? null,
+    lastMessage,
+    failure: blocked ? (failedGate ?? mergeError) : null,
+    review,
+    minors,
+    flaky: [...flaky],
+  };
 }
 
 /** Where the summary of the session file `sessionPath` is kept once its task finished: `cache/sessions/<file name>.json`. */
@@ -273,51 +238,47 @@ function summaryCachePath(sessionPath: string): string {
   return join(factoryHome(), "cache", "sessions", `${basename(sessionPath)}.json`);
 }
 
+/** Summaries read in this process, by session path, with the file's size and mtime: a poll parses only what changed. */
+const summaries = new Map<string, { size: number; mtimeMs: number; summary: SessionSummary }>();
+
 /**
- * The summary of the session file `sessionPath` (none: empty). A finished task's (`done`, `cancelled`) is kept on disk
- * with the file's size and mtime and read from there while both are the same: a listing does not read and parse the
- * sessions of every task ever run again.
+ * The summary of the session file `sessionPath` (none: empty), parsed again only when its size or mtime changed. A
+ * finished task's (`done`, `cancelled`) is kept on disk too: a listing does not read and parse the sessions of every
+ * task ever run again.
  */
 async function sessionSummary(sessionPath: string | null): Promise<SessionSummary> {
   if (sessionPath === null) return summarize([]);
   const file = await stat(sessionPath).catch(() => null);
   const cachePath = summaryCachePath(sessionPath);
   if (file !== null) {
+    const known = summaries.get(sessionPath);
+    if (known?.size === file.size && known.mtimeMs === file.mtimeMs) return known.summary;
     const cached: unknown = await readFile(cachePath, "utf8").then(JSON.parse, () => null).catch(() => null);
     if (isRecord(cached) && cached.size === file.size && cached.mtimeMs === file.mtimeMs && isRecord(cached.summary)) return cached.summary as unknown as SessionSummary;
   }
-  const summary = summarize(jsonLines(await readFile(sessionPath, "utf8")));
-  if (file !== null && summary.last !== null && FINAL_STATES.includes(summary.last.state)) {
+  const summary = summarize(await readJsonl(sessionPath));
+  if (file === null) return summary;
+  summaries.set(sessionPath, { size: file.size, mtimeMs: file.mtimeMs, summary });
+  if (summary.last !== null && FINAL_STATES.includes(summary.last.state)) {
     // Only a cache: on a failure the next listing reads the session again.
     await writeAtomic(cachePath, JSON.stringify({ size: file.size, mtimeMs: file.mtimeMs, summary })).catch(() => undefined);
   }
   return summary;
 }
 
-/** The task as clients see it. `knownWaveStage`: its wave's stage, read already; `snapshot`: the runners, looked up already. */
-export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage, snapshot?: RunnerSnapshot): Promise<TaskView> {
+/** The task as clients see it. `knownWaveStage`: its wave's stage, read already. */
+export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage): Promise<TaskView> {
   // Liveness before the state: a runner writes its last state before it exits, so a state read after a dead runner is
   // its last one; read the other way round, a runner that wrote `done` and exited in between looks interrupted.
-  const runners = await liveRunners(record, snapshot);
+  const runners = await liveRunners(record);
   const running = runners.length > 0;
   const waitingForSlot = await slotWaiting(runners);
   const sessionPath = (await sessionFilePath(record.sessionDir, record.sessionId)) ?? null;
   const { last, settings, question, usage: sessionUsage, ...outcome } = await sessionSummary(sessionPath);
-  let usage: TaskView["usage"] = sessionUsage === null ? null : { ...sessionUsage };
-  const scouting = await scoutUsage({ kind: "task", id: record.id });
-  usage = addScoutUsage(usage, scouting) as TaskView["usage"];
+  const usage = addUsage(sessionUsage, await scoutUsage({ kind: "task", id: record.id }));
+  const { sessionDir: _dir, contracts: _contracts, contractNotes: _notes, ...fields } = record;
   const view: Omit<TaskView, "actions"> = {
-    id: record.id,
-    repo: record.repo,
-    worktree: record.worktree,
-    branch: record.branch,
-    title: record.title,
-    createdAt: record.createdAt,
-    tag: record.tag,
-    plan: record.plan,
-    wave: record.wave,
-    origin: record.origin,
-    sessionId: record.sessionId,
+    ...fields,
     sessionPath,
     state: last?.state ?? null,
     round: last?.round ?? null,
@@ -327,73 +288,60 @@ export async function taskView(record: TaskRecord, knownWaveStage?: WaveStage, s
     running,
     interrupted: last !== null && !RESTING_STATES.includes(last.state) && !running,
     settings,
-    usage: usage === null ? null : { ...(usage as NonNullable<TaskView["usage"]>), cost: cents((usage as NonNullable<TaskView["usage"]>).cost) },
-    lastMessage: outcome.lastMessage,
-    failure: outcome.failure,
-    review: outcome.review,
-    merged: outcome.merged,
-    minors: outcome.minors,
-    flaky: outcome.flaky,
+    usage: usage === null ? null : { ...usage, cost: cents(usage.cost) },
+    ...outcome,
     ...(waitingForSlot ? { waitingForSlot } : {}),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
-  const continuable = waveStage === null || waveStage === "building";
-  const result = { ...view, actions: taskActions(view, continuable, keptByWave(view, waveStage)) };
+  const result = { ...view, actions: TASK_ACTIONS.filter((action) => refusal(view, action, waveStage) === null) };
   if (usage !== null) unroundedUsage.set(result, usage);
   return result;
 }
 
 /**
- * A done task its wave still counts on: the wave is neither merged nor cancelled (nor removed). Removed, it would count
- * as cancelled and strand the tasks waiting for it, so `tasks.remove` refuses it; `waves.remove` removes it with its wave.
+ * Why the task refuses `action`, null when it takes it: the one check of each task action, which its handler throws and
+ * `TaskView.actions` lists. `waveStage`: its wave's (`taskWaveStage`). A task of a wave that left `building` takes no
+ * more work but the answer to its question (invariant 2): from its review on, the gates and the reviewer have seen the
+ * wave's branch, and a commit of the task would reach it unseen (or, once merged, be lost). A done task its wave still
+ * counts on (neither merged, cancelled nor removed) is not removed: removed, it would count as cancelled and strand the
+ * tasks waiting for it; `waves.remove` removes it with its wave (`waveStage` null).
  */
-function keptByWave(view: Pick<TaskView, "state">, waveStage: WaveStage | "removed" | null): boolean {
-  return view.state === "done" && waveStage !== null && waveStage !== "removed" && !WAVE_FINAL_STAGES.includes(waveStage);
+export function refusal(view: Omit<TaskView, "actions">, action: TaskActionName, waveStage: WaveStage | "removed" | null): FactoryError | null {
+  const task = `task ${short(view.id)}`;
+  const refused = (why: string) => new FactoryError("refused", `${task} ${why}`);
+  const leftBuilding = (what: string) =>
+    waveStage === null || waveStage === "building"
+      ? null
+      : refused(`belongs to wave ${short(view.wave)}, which is ${waveStage}: its tasks take no more work once it left building, ${what} is refused; give the work to the wave with waves.add`);
+  // A resting task whose runner has not exited yet.
+  const ending = view.running ? new FactoryError("busy", `the runner of ${task} is still ending, try again in a few seconds`) : null;
+  switch (action) {
+    case "tasks.approve":
+      if (view.state !== "waiting_approve" || view.interrupted) return refused(`is ${stateText(view)}, approve needs waiting_approve`);
+      return ending ?? leftBuilding("approve");
+    case "tasks.retry":
+      if (!view.interrupted && view.state !== "blocked" && view.state !== "cancelled") return refused(`is ${stateText(view)}, retry needs blocked, cancelled or interrupted`);
+      return ending ?? leftBuilding("retry");
+    case "tasks.cancel":
+      return view.state !== null && FINAL_STATES.includes(view.state) ? refused(`is ${view.state} already`) : null;
+    case "tasks.remove":
+      if (view.running) return refused("is running, cancel it first");
+      if (view.state === "waiting_answer") return refused("waits for the answer to its question, answer it with tasks.message or cancel it first");
+      if (view.state !== "done" || waveStage === null || waveStage === "removed" || WAVE_FINAL_STAGES.includes(waveStage)) return null;
+      return refused(
+        `is done in wave ${short(view.wave)}, which is ${waveStage}: the wave counts on it (removed, the tasks waiting for it could never start); remove it once the wave is merged or cancelled, or with its wave (waves.remove)`,
+      );
+    case "tasks.message":
+      if (view.state === null) return refused("has not started yet, send the message once it runs");
+      if (view.state === "merging") return refused("is merging, send the message when the merge has ended");
+      return view.state === "waiting_answer" ? null : leftBuilding("a message");
+  }
 }
 
-const APPROVE_STATES: readonly State[] = ["waiting_approve"];
-const RETRY_STATES: readonly State[] = ["blocked", "cancelled"];
-export const FINAL_STATES: readonly State[] = ["done", "cancelled"];
-
-/** A live runner holds it, or its state is `running`/`merging` with a live runner. */
-function isActive(view: Omit<TaskView, "actions">): boolean {
-  return view.running || (view.state !== null && !RESTING_STATES.includes(view.state) && !view.interrupted);
-}
-
-/** The check of `requireRemovable` as a predicate: it neither runs nor waits for an answer. */
-export function removable(view: Omit<TaskView, "actions">): boolean {
-  return !isActive(view) && view.state !== "waiting_answer";
-}
-
-/**
- * The predicates of the task actions' own checks (`requireState`, the lock, the runner, `requireContinuable`), as one
- * list for clients. A task of a wave that does not build
- * (`continuable` false) is not continued: no approve, retry or message but the answer to its question. A done task its
- * wave still counts on (`kept`) is not removed.
- */
-function taskActions(view: Omit<TaskView, "actions">, continuable = true, kept = false): TaskActionName[] {
-  const allowed: Record<TaskActionName, boolean> = {
-    "tasks.approve": continuable && !view.running && !view.interrupted && view.state !== null && APPROVE_STATES.includes(view.state),
-    "tasks.retry": continuable && !view.running && (view.interrupted || (view.state !== null && RETRY_STATES.includes(view.state))),
-    "tasks.cancel": view.state === null || !FINAL_STATES.includes(view.state),
-    "tasks.remove": removable(view) && !kept,
-    "tasks.message": view.state !== null && view.state !== "merging" && (continuable || view.state === "waiting_answer"),
-  };
-  return (Object.keys(allowed) as TaskActionName[]).filter((name) => allowed[name]);
-}
-
-/**
- * Refuses `what` for a task of a wave that is not `building` (invariant 2): from its review on, the gates and the
- * reviewer have seen the wave's branch, and a commit of the task would reach it unseen (or, once merged, be lost).
- */
-async function requireContinuable(record: TaskRecord, what: string): Promise<void> {
-  const stage = await taskWaveStage(record);
-  if (stage === null || stage === "building") return;
-  const wave = short(record.wave);
-  throw new FactoryError(
-    "refused",
-    `task ${short(record.id)} belongs to wave ${wave}, which is ${stage === "removed" ? "removed" : stage}: its tasks take no more work once it left building, ${what} is refused; give the work to the wave with waves.add`,
-  );
+/** Throws the task's refusal of `action`. */
+async function requireAction(record: TaskRecord, view: TaskView, action: TaskActionName): Promise<void> {
+  const refused = refusal(view, action, await taskWaveStage(record));
+  if (refused !== null) throw refused;
 }
 
 /**
@@ -409,27 +357,10 @@ export function needsAttention(view: TaskView): boolean {
   return rests(view) && view.state !== "done";
 }
 
-function stateText(view: TaskView): string {
+function stateText(view: Omit<TaskView, "actions">): string {
   if (view.state === null) return "starting";
   if (view.interrupted) return `interrupted (${view.state} when its runner ended, round ${view.round}, ${view.reason})`;
   return `${view.state} (round ${view.round}, ${view.reason})`;
-}
-
-function requireState(view: TaskView, allowed: readonly State[], what: string, orInterrupted = false): void {
-  if (orInterrupted && view.interrupted) return;
-  if (view.state === null || view.interrupted || !allowed.includes(view.state)) {
-    throw new FactoryError("refused", `task ${short(view.id)} is ${stateText(view)}, ${what}`);
-  }
-}
-
-/** Takes the task lock; a live holder is `busy`. */
-async function lock(record: TaskRecord): Promise<void> {
-  try {
-    await lockTask(record.id);
-  } catch (error) {
-    if (error instanceof TaskBusyError) throw new FactoryError("busy", error.message);
-    throw error;
-  }
 }
 
 /**
@@ -438,7 +369,7 @@ async function lock(record: TaskRecord): Promise<void> {
  */
 export async function withTaskLock<T>(record: TaskRecord, check: (view: TaskView) => Promise<void>, act: (view: TaskView) => Promise<T>): Promise<T> {
   await check(await taskView(record));
-  await lock(record);
+  await lockTask(record.id);
   try {
     const view = await taskView(record);
     await check(view);
@@ -578,25 +509,6 @@ export async function cancelTask(record: TaskRecord, env: RunnerEnv | undefined)
   if (sent?.interrupted) await requireRunnerStarted(record, sent.statesBefore);
 }
 
-/** The check of `tasks.remove` before it looks at the work: refused while the task runs or waits for an answer. */
-export function requireRemovable(view: TaskView): void {
-  if (isActive(view)) throw new FactoryError("refused", `task ${short(view.id)} is running, cancel it first`);
-  if (view.state === "waiting_answer") {
-    throw new FactoryError("refused", `task ${short(view.id)} waits for the answer to its question, answer it with tasks.message or cancel it first`);
-  }
-}
-
-/** The wave's check of `tasks.remove` (`keptByWave`): a done task its wave still counts on stays. */
-async function requireNotKeptByWave(record: TaskRecord, view: TaskView): Promise<void> {
-  const stage = await taskWaveStage(record);
-  if (!keptByWave(view, stage)) return;
-  const wave = short(record.wave);
-  throw new FactoryError(
-    "refused",
-    `task ${short(record.id)} is done in wave ${wave}, which is ${stage}: the wave counts on it (removed, the tasks waiting for it could never start); remove it once the wave is merged or cancelled, or with its wave (waves.remove)`,
-  );
-}
-
 /** What removing the task would drop; refused (detail `force`) without `force` when that is anything. */
 export async function droppedWork(record: TaskRecord, force: boolean): Promise<string | null> {
   const target = await taskMainBranch(record.sessionDir, record.sessionId);
@@ -609,9 +521,6 @@ export async function droppedWork(record: TaskRecord, force: boolean): Promise<s
   return dropsWork ? `${unmergedText(work, target)}${work.dirty ? " and uncommitted changes" : ""}` : null;
 }
 
-/** Stages nothing leaves. */
-export const WAVE_FINAL_STAGES: readonly WaveStage[] = ["merged", "cancelled"];
-
 /**
  * Refuses a task outside a wave whose target is the branch of a wave not merged or cancelled (invariant 13): the wave
  * would neither wait for it nor watch it, and its gates and reviewer would see a change none of its tasks made.
@@ -619,7 +528,6 @@ export const WAVE_FINAL_STAGES: readonly WaveStage[] = ["merged", "cancelled"];
 async function requireNoOpenWaveBranch(repo: string, target: string): Promise<void> {
   for (const file of await listWaves()) {
     if (file.declaration.repo !== repo) continue;
-    // A queued wave's branch is set by its `start` event, not in its declaration.
     const { stage, id, branch } = foldWave(file.declaration, file.events);
     if (branch !== target) continue;
     if (WAVE_FINAL_STAGES.includes(stage)) continue;
@@ -646,11 +554,7 @@ async function pokeWaveOf(record: TaskRecord, env?: RunnerEnv): Promise<void> {
  */
 export async function retryRestingTask(record: TaskRecord, env?: RunnerEnv): Promise<void> {
   // An interrupted task is set right by the session's start (`resumeTask`) before the retry runs.
-  const check = async (view: TaskView) => {
-    requireState(view, RETRY_STATES, "retry needs blocked, cancelled or interrupted", true);
-    await requireContinuable(record, "retry");
-  };
-  const sent = await withTaskLock(record, check, async (view) => {
+  const sent = await withTaskLock(record, (view) => requireAction(record, view, "tasks.retry"), async (view) => {
     const statesBefore = (await readFactoryStates(record.sessionDir, record.sessionId)).count;
     await sendToRestingTask(record, "/factory retry", env);
     return { interrupted: view.interrupted, statesBefore };
@@ -696,21 +600,12 @@ export const TASK_HANDLERS = {
     if (target !== undefined) await requireNoOpenWaveBranch(repo, target);
     // Again once the worktree exists: a wave declared on the branch meanwhile (a racing `waves.start`) wins.
     const beforeRecord = (branch: string) => requireNoOpenWaveBranch(repo, branch);
-    try {
-      return taskView(await launchTask({ repo, title, request, overrides, tag, origin: origin ?? null, signal, env, beforeRecord }));
-    } catch (error) {
-      if (error instanceof LaunchRefusedError) throw new FactoryError("refused", error.message);
-      throw error;
-    }
+    return taskView(await launchTask({ repo, title, request, overrides, tag, origin: origin ?? null, signal, env, beforeRecord }));
   },
 
   "tasks.approve": async (params, { env }) => {
     const record = await findTask(params.id);
-    const check = async (view: TaskView) => {
-      requireState(view, APPROVE_STATES, "approve needs waiting_approve");
-      await requireContinuable(record, "approve");
-    };
-    await withTaskLock(record, check, () => sendToRestingTask(record, "/factory approve", env));
+    await withTaskLock(record, (view) => requireAction(record, view, "tasks.approve"), () => sendToRestingTask(record, "/factory approve", env));
     await pokeWaveOf(record, env);
     return taskView(record);
   },
@@ -724,8 +619,7 @@ export const TASK_HANDLERS = {
 
   "tasks.cancel": async (params, { env }) => {
     const record = await findTask(params.id);
-    const before = await taskView(record);
-    if (before.state !== null && FINAL_STATES.includes(before.state)) throw new FactoryError("refused", `task ${short(record.id)} is ${before.state} already`);
+    await requireAction(record, await taskView(record), "tasks.cancel");
     await cancelTask(record, env);
     return taskView(record);
   },
@@ -734,10 +628,7 @@ export const TASK_HANDLERS = {
     const record = await findTask(params.id);
     return withTaskLock(
       record,
-      async (view) => {
-        requireRemovable(view);
-        await requireNotKeptByWave(record, view);
-      },
+      (view) => requireAction(record, view, "tasks.remove"),
       async () => {
         const dropped = await droppedWork(record, params.force === true);
         await deleteTask(record);
@@ -750,21 +641,9 @@ export const TASK_HANDLERS = {
     const record = await findTask(params.id);
     const text = nonEmpty(params.text);
     if (text === undefined) throw new FactoryError("invalid", "tasks.message needs a text that is not empty");
-    const view = await taskView(record);
-    if (view.state === null) throw new FactoryError("refused", `task ${short(record.id)} has not started yet, send the message once it runs`);
-    if (view.state === "merging") throw new FactoryError("refused", `task ${short(record.id)} is merging, send the message when the merge has ended`);
-    // The answer to its question continues the round it asked in, a wave's task or not; anything else is more work.
-    if (view.state !== "waiting_answer") await requireContinuable(record, "a message");
+    await requireAction(record, await taskView(record), "tasks.message");
     // `messageTask` takes the task lock itself (resting) or appends to the live runner's inbox (running).
-    const deliver = async () => {
-      try {
-        await messageTask(record, text, env);
-      } catch (error) {
-        if (error instanceof MessageRefusedError) throw new FactoryError("refused", error.message);
-        if (error instanceof TaskBusyError) throw new FactoryError("busy", oneLine(errorText(error)));
-        throw new FactoryError("failed", oneLine(errorText(error)));
-      }
-    };
+    const deliver = () => messageTask(record, text, env);
     await deliver();
     // A runner that ended as the line was appended never sends it: take it back and start a runner with it.
     if ((await liveRunners(record)).length === 0 && (await withdrawUnsentLine(record, text))) await deliver();

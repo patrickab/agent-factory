@@ -11,17 +11,17 @@
  * - `waves.update`: the wave's title and reviewer instructions; a review reads them when it starts
  */
 import { withContractsLock } from "./contracts.ts";
-import { nonEmpty, oneLine, type Handler, type Params } from "./core-shared.ts";
+import { nonEmpty, type Handler, type Params } from "./core-shared.ts";
 import { findTask, pendingWaveTask } from "./core-tasks.ts";
-import { findWave, waveLook } from "./core-waves.ts";
+import { findWave, lookWave } from "./core-waves.ts";
 import { liveRunners, messageTask, type RunnerEnv } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { requireModels } from "./models.ts";
-import { MODEL_SIZES, type ModelSize } from "./settings.ts";
-import { readTask, TaskBusyError, writeTask, type TaskRecord } from "./tasks.ts";
-import { errorText, FactoryError, short } from "./util.ts";
+import type { ModelSize } from "./settings.ts";
+import { readTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { FactoryError, short } from "./util.ts";
 import { liveWaveRunners, pokeWave } from "./wave-poke.ts";
-import { appendWaveEvents, foldWave, readWave, type FoldedTask, type NewWaveEvent, type WaveFold } from "./waves.ts";
+import { appendWaveEvents, checkTaskGraph, foldWave, readWave, WAVE_FINAL_STAGES, type FoldedTask, type NewWaveEvent, type WaveFold } from "./waves.ts";
 
 /** A task's text as its coder knows it. */
 type TaskText = Pick<FoldedTask, "title" | "request">;
@@ -99,25 +99,6 @@ function textParam(action: string, params: Params, key: "title" | "request"): st
   return value;
 }
 
-/** `after` of a pending task checked against its wave: keys of the wave, not itself, no cycle. */
-function checkAfter(fold: WaveFold, key: string, after: string[]): void {
-  const keys = new Set(fold.tasks.map((task) => task.key));
-  for (const name of after) {
-    if (name === key) throw new FactoryError("invalid", `tasks.update: task ${key} waits for itself`);
-    if (!keys.has(name)) throw new FactoryError("invalid", `tasks.update: task ${key} waits for ${name}, no task of the wave`);
-  }
-  const graph = new Map(fold.tasks.map((task) => [task.key, task.key === key ? after : task.after]));
-  // A cycle through the changed task leads back to it.
-  const seen = new Set<string>();
-  const walk = (name: string, path: string[]): void => {
-    if (name === key) throw new FactoryError("invalid", `tasks.update: tasks wait for each other in a cycle: ${[key, ...path, key].join(" -> ")}`);
-    if (seen.has(name)) return;
-    seen.add(name);
-    for (const next of graph.get(name) ?? []) walk(next, [...path, name]);
-  };
-  for (const name of after) walk(name, []);
-}
-
 /** Where the update went: the declaration (pending), the coder now, its next turn, or its start (being launched). */
 type Delivery = "pending" | "sent" | "kept" | "starting";
 
@@ -126,13 +107,8 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   if (wanted === undefined || wanted === "") throw new FactoryError("invalid", "tasks.update needs the id of a wave's task (waves.get shows a pending one's)");
   const title = textParam("tasks.update", params, "title");
   const request = textParam("tasks.update", params, "request");
-  let after: string[] | undefined;
-  if (params.after !== undefined) {
-    if (!Array.isArray(params.after) || !params.after.every((name) => typeof name === "string")) throw new FactoryError("invalid", "tasks.update: after must be an array of keys");
-    after = [...new Set(params.after as string[])];
-  }
+  const after = params.after === undefined ? undefined : [...new Set(params.after as string[])];
   const model = params.model as ModelSize | undefined;
-  if (model !== undefined && !MODEL_SIZES.includes(model)) throw new FactoryError("invalid", `tasks.update: model must be "small" or "big", not ${JSON.stringify(model)}`);
   if (title === undefined && request === undefined && after === undefined && model === undefined) throw new FactoryError("invalid", "tasks.update needs title, request, after or model");
 
   let waveId: string;
@@ -169,37 +145,36 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   let delivery = "pending" as Delivery;
   let old: TaskText = { title: "", request: "" };
   let taskId = null as string | null;
-  const appended = await busy(() =>
-    appendWaveEvents(waveId, async (fold) => {
-      if (fold.stage === "merged" || fold.stage === "cancelled") throw new FactoryError("refused", `wave ${shown} is ${fold.stage}, its tasks cannot change`);
-      const task = fold.tasks.find((candidate) => candidate.key === key);
-      if (task === undefined) throw new FactoryError("not_found", `wave ${shown} has no task ${key}`);
-      if (task.dropped) throw refuse("was dropped (it could never start): add a task with waves.add");
-      old = { title: task.title, request: task.request };
-      taskId = task.taskId;
-      const event: NewWaveEvent = { kind: "update", key };
-      // Read under the log lock, so no launch slips in between. A record under its declared id: `launchTask` wrote it,
-      // its coder has the launched text (a runner that died before its `task` event; the next one adopts it). A `launch`
-      // event without a live runner and without a record is a launch that died with it: the task is pending.
-      const recorded = task.taskId === null && task.id !== undefined && (await readTask(task.id).then(() => true, () => false));
-      const launching = task.taskId === null && (recorded || (task.launching === true && (await liveWaveRunners(waveId)).length > 0));
-      if (task.taskId === null && !launching) {
-        if (after !== undefined) checkAfter(fold, key, after);
-        if (after !== undefined && after.join("\0") !== task.after.join("\0")) event.after = after;
-        if (model !== undefined && model !== task.model) event.model = model;
-      } else {
-        // Started since the state was read: it has just begun, as good as one being launched.
-        const current = task.taskId !== null && task.taskId === before?.taskId ? (state ?? "starting") : "starting";
-        if (current === "done" || current === "cancelled" || current === "merging") throw refuse(`is ${current}, it cannot change: add a task with waves.add`);
-        if (current === "waiting_approve") throw refuse("waits for approve, its work is finished: add a task with waves.add");
-        if (after !== undefined || model !== undefined) throw refuse(`has started (${current}): its after and model are fixed; change only title or request, or add a task with waves.add`);
-        delivery = task.taskId === null ? "starting" : "kept";
-      }
-      if (title !== undefined && title !== task.title) event.title = title;
-      if (request !== undefined && request !== task.request) event.request = request;
-      return Object.keys(event).length > 2 ? [event] : null;
-    }),
-  );
+  const appended = await appendWaveEvents(waveId, async (fold) => {
+    if (WAVE_FINAL_STAGES.includes(fold.stage)) throw new FactoryError("refused", `wave ${shown} is ${fold.stage}, its tasks cannot change`);
+    const task = fold.tasks.find((candidate) => candidate.key === key);
+    if (task === undefined) throw new FactoryError("not_found", `wave ${shown} has no task ${key}`);
+    if (task.dropped) throw refuse("was dropped (it could never start): add a task with waves.add");
+    old = { title: task.title, request: task.request };
+    taskId = task.taskId;
+    const event: NewWaveEvent = { kind: "update", key };
+    // Read under the log lock, so no launch slips in between. A record under its declared id: `launchTask` wrote it,
+    // its coder has the launched text (a runner that died before its `task` event; the next one adopts it). A `launch`
+    // event without a live runner and without a record is a launch that died with it: the task is pending.
+    const recorded = task.taskId === null && task.id !== undefined && (await readTask(task.id).then(() => true, () => false));
+    const launching = task.taskId === null && (recorded || (task.launching === true && (await liveWaveRunners(waveId)).length > 0));
+    if (task.taskId === null && !launching) {
+      // The changed task first: a cycle through it is named from it.
+      if (after !== undefined) checkTaskGraph([{ key, after }, ...fold.tasks.filter((other) => other.key !== key)]);
+      if (after !== undefined && after.join("\0") !== task.after.join("\0")) event.after = after;
+      if (model !== undefined && model !== task.model) event.model = model;
+    } else {
+      // Started since the state was read: it has just begun, as good as one being launched.
+      const current = task.taskId !== null && task.taskId === before?.taskId ? (state ?? "starting") : "starting";
+      if (current === "done" || current === "cancelled" || current === "merging") throw refuse(`is ${current}, it cannot change: add a task with waves.add`);
+      if (current === "waiting_approve") throw refuse("waits for approve, its work is finished: add a task with waves.add");
+      if (after !== undefined || model !== undefined) throw refuse(`has started (${current}): its after and model are fixed; change only title or request, or add a task with waves.add`);
+      delivery = task.taskId === null ? "starting" : "kept";
+    }
+    if (title !== undefined && title !== task.title) event.title = title;
+    if (request !== undefined && request !== task.request) event.request = request;
+    return Object.keys(event).length > 2 ? [event] : null;
+  });
   if (appended !== null && delivery === "kept" && taskId !== null) {
     const note = taskChangeNote(old, { title: title ?? old.title, request: request ?? old.request });
     const record = await readTask(taskId).catch(() => undefined);
@@ -207,7 +182,7 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   }
   // A pending task's new `after` may let it start now; a failed poke is left to the next one.
   if (appended !== null && delivery === "pending") await pokeWave(waveId, env).catch(() => undefined);
-  return { wave: (await waveLook(await readWave(waveId))).view, key, changed: appended !== null, delivery };
+  return { wave: (await lookWave(await readWave(waveId))).view, key, changed: appended !== null, delivery };
 }
 
 async function updateWave(params: Params): Promise<unknown> {
@@ -215,26 +190,14 @@ async function updateWave(params: Params): Promise<unknown> {
   const request = textParam("waves.update", params, "request");
   if (title === undefined && request === undefined) throw new FactoryError("invalid", "waves.update needs title or request");
   const { id } = (await findWave(params.id)).declaration;
-  const appended = await busy(() =>
-    appendWaveEvents(id, (fold) => {
-      if (fold.stage === "merged" || fold.stage === "cancelled") throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, it cannot change`);
-      const event: NewWaveEvent = { kind: "update" };
-      if (title !== undefined && title !== fold.title) event.title = title;
-      if (request !== undefined && request !== fold.request) event.request = request;
-      return Object.keys(event).length > 1 ? [event] : null;
-    }),
-  );
-  return { wave: (await waveLook(await readWave(id))).view, changed: appended !== null };
-}
-
-/** Runs `act`, a `TaskBusyError` (the log lock stayed taken) as `busy`. */
-async function busy<T>(act: () => Promise<T>): Promise<T> {
-  try {
-    return await act();
-  } catch (error) {
-    if (error instanceof TaskBusyError) throw new FactoryError("busy", oneLine(errorText(error)));
-    throw error;
-  }
+  const appended = await appendWaveEvents(id, (fold) => {
+    if (WAVE_FINAL_STAGES.includes(fold.stage)) throw new FactoryError("refused", `wave ${short(id)} is ${fold.stage}, it cannot change`);
+    const event: NewWaveEvent = { kind: "update" };
+    if (title !== undefined && title !== fold.title) event.title = title;
+    if (request !== undefined && request !== fold.request) event.request = request;
+    return Object.keys(event).length > 1 ? [event] : null;
+  });
+  return { wave: (await lookWave(await readWave(id))).view, changed: appended !== null };
 }
 
 export const PLAN_HANDLERS = {

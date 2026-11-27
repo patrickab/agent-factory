@@ -71,12 +71,12 @@ describe("tasks.wait", () => {
   describe("a queued wave", () => {
     const FIRST = "60000000-0000-4000-8000-000000000001";
     const QUEUED = "60000000-0000-4000-8000-000000000002";
-    /** `FIRST` resting `rejected` on the branch `main-q-first`, `QUEUED` declared after it (no branch yet). */
+    /** `FIRST` resting `rejected` on the branch `main-q-first`, `QUEUED` declared after it. */
     async function waves(): Promise<void> {
       const common = { repo: "/r", plan: null, request: "r", target: "main", origin: null, overrides: {} };
       await createWave({ ...common, id: FIRST, tag: "q/first", title: "first", branch: "main-q-first", base: "abc", createdAt: "2026-01-01T00:00:00.000Z" });
       await appendWaveEvent(FIRST, { kind: "stage", stage: "rejected", reason: null });
-      await createWave({ ...common, id: QUEUED, tag: "q/next", title: "next", branch: null, base: null, after: [FIRST], createdAt: "2026-01-02T00:00:00.000Z" });
+      await createWave({ ...common, id: QUEUED, tag: "q/next", title: "next", branch: "main-q-next", base: "abc", after: [FIRST], createdAt: "2026-01-02T00:00:00.000Z" });
     }
 
     test("one that can never start (the wave it waits for was cancelled) needs attention at once", async () => {

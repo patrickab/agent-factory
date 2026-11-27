@@ -30,14 +30,13 @@
 import { oneLine, type Handler, type Params } from "./core-shared.ts";
 import type { ActionSpec, Feature } from "./feature.ts";
 import { FEATURES } from "./features.ts";
-import { TaskBusyError } from "./tasks.ts";
 import { errorText, FactoryError, isRecord } from "./util.ts";
 
 export { oneLine } from "./core-shared.ts";
 export { FactoryError, type FactoryErrorCode, type FactoryErrorDetail } from "./util.ts";
 export type { ActionSpec } from "./feature.ts";
 export type { TaskActionName, TaskView, TimelineEntry, TimelineKind } from "./core-tasks.ts";
-export { noticeInputs, pokeQueuedAfter, queueLook, startQueuedWave, startWaveTasks, taskWave, waveBranchName, waveMergeRefusal, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
+export { noticeInputs, pokeQueuedAfter, startQueuedWave, sessionWave, startWaveTasks, waveBranchName, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
 
 /** Every feature's actions (`features.ts`), in the features' order. Two features naming one action fail on load. */
 export const ACTIONS = Object.freeze(
@@ -77,7 +76,7 @@ const TYPE_CHECKS: Record<string, (value: unknown) => boolean> = {
   array: (value) => Array.isArray(value),
 };
 
-/** The params checked against the action's schema (top-level keys only; unknown keys are dropped). */
+/** The params checked against the action's schema: top-level keys, an `enum`, an array's item type; unknown keys dropped. */
 function checkParams(name: ActionName, raw: unknown, cwd: string | undefined): Params {
   if (raw !== undefined && raw !== null && !isRecord(raw)) throw new FactoryError("invalid", `${name} needs its params as an object`);
   const { required, properties } = ACTIONS[name].params as ActionSpec["params"];
@@ -94,6 +93,9 @@ function checkParams(name: ActionName, raw: unknown, cwd: string | undefined): P
     if (!TYPE_CHECKS[type](value)) throw new FactoryError("invalid", `${name}: ${key} must be ${type === "integer" || type === "array" ? `an ${type}` : `a ${type}`}`);
     if (typeof schema.minimum === "number" && (value as number) < schema.minimum) throw new FactoryError("invalid", `${name}: ${key} must be at least ${schema.minimum}`);
     if (typeof schema.maximum === "number" && (value as number) > schema.maximum) throw new FactoryError("invalid", `${name}: ${key} must be at most ${schema.maximum}`);
+    if (Array.isArray(schema.enum) && !schema.enum.includes(value)) throw new FactoryError("invalid", `${name}: ${key} must be one of ${schema.enum.join(", ")}`);
+    const items = isRecord(schema.items) ? String(schema.items.type) : undefined;
+    if (items !== undefined && !(value as unknown[]).every(TYPE_CHECKS[items])) throw new FactoryError("invalid", `${name}: ${key} must hold ${items}s`);
     params[key] = value;
   }
   return params;
@@ -119,7 +121,6 @@ export async function callAction(name: string, params: unknown, options: CallOpt
     return await handlersByName()[name](checked, { cwd, signal, env, origin });
   } catch (error) {
     if (error instanceof FactoryError) throw error;
-    if (error instanceof TaskBusyError) throw new FactoryError("busy", error.message);
     throw new FactoryError("failed", oneLine(errorText(error)));
   }
 }

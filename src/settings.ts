@@ -7,7 +7,7 @@
  *   schemas show, `schemaOf`), its default and the scopes it may be given in: `repo` (stored), `task` and `wave`
  *   (overrides). `preview` the plugin stores for its clients and never acts on; `squash`: a wave lands as one commit
  *   (`merge.ts`; stored in the wave's declaration only when on). Models name sizes: `big`, `small` (a wave's easy
- *   tasks), `reviewer`; a task's record names roles (`taskModels`)
+ *   tasks), `reviewer`; a task's record names roles (`taskModels`). `extensions`: the coder's Pi extensions (`runner.ts`)
  * - Provides the settings of a repository, one YAML file per repository named after its URI-encoded path, read and
  *   written (`loadSettings`, `saveSettings`). The file is the repository's registration (`registeredRepos`)
  * - Provides the default models, `defaults.yaml` at the package root (`loadDefaults`, `defaultModels`): a broken or
@@ -50,15 +50,21 @@ export const SETTINGS: Record<string, { schema: Schema; default?: unknown; scope
     default: false,
     scopes: ["repo", "wave"],
   },
+  extensions: {
+    schema: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Extension sources the coder's Pi loads, as Pi's -e takes them (npm:pi-lens, a path, builtin:codemode). Absent: every user extension. Set, an empty list too: Pi starts with -ne, the factory's plugin and these; -ne also turns off Pi's built-in extensions (mcp, llama.cpp, codemode, tool-search) unless listed as builtin:<name>",
+    },
+    scopes: ["repo"],
+  },
 };
-
-/** The models of a task's record: the roles it runs (`taskModels`). */
-export const ROLE_MODELS: Schema = { type: "object", properties: { coder: MODEL, reviewer: MODEL } };
 
 export type SizeModels = Partial<Record<ModelSize | "reviewer", string>>;
 /** Settings as stored or given: every key optional, `branch` absent = the repository's default branch. */
-export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: SizeModels; preview?: boolean; squash?: boolean };
-export type ResolvedSettings = Required<StoredSettings>;
+export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: SizeModels; preview?: boolean; squash?: boolean; extensions?: string[] };
+export type ResolvedSettings = Required<Omit<StoredSettings, "extensions">> & Pick<StoredSettings, "extensions">;
 
 /** The table's schemas of `scope`, for an action's parameters. */
 export function schemaOf(scope: Scope): Record<string, Schema> {
@@ -80,6 +86,10 @@ export function checkValue(schema: Schema, value: unknown, name: string): unknow
     if (typeof value !== "string" || value.trim() === "") fail("a non-empty string");
     // The table's only pattern is a model's.
     if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value as string)) fail('"provider/model"');
+  }
+  if (schema.type === "array") {
+    if (!Array.isArray(value)) fail("a list");
+    return (value as unknown[]).map((item, index) => checkValue(schema.items as Schema, item, `${name}[${index}]`));
   }
   if (schema.type !== "object") return value;
   if (!isRecord(value)) return fail("a mapping");

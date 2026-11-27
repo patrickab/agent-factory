@@ -7,14 +7,13 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_PROTECTED, protectedPaths, type FactoryConfig } from "./config.ts";
-import { abortLeftoverRebase, taskBase, taskDiff, taskGit } from "./git.ts";
+import { DEFAULT_PROTECTED, type FactoryConfig } from "./config.ts";
+import { abortLeftoverRebase, snapshotTree, taskBase, taskGit, treeDiff } from "./git.ts";
 import { MERGE_ATTEMPTS, mergeTask, rebaseWorktree, type MergeInput, type MergeOutcome } from "./merge.ts";
 import { joinQueue, leaveQueue, queueAhead } from "./queue.ts";
-import { runRound, type PipelineSteps } from "./pipeline.ts";
 import { caseSerial, caseTests } from "./test-case.ts";
 import { CommandRunner, type Exec } from "./run.ts";
-import type { MergeData, Settings, Snapshot, Task } from "./state.ts";
+import type { MergeData, Settings, Task } from "./state.ts";
 
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
@@ -109,8 +108,7 @@ describe("CommandRunner", () => {
   });
 });
 
-describe("taskGit and taskDiff", () => {
-
+describe("taskGit and the task's diff", () => {
   test("refuses the main checkout and a directory that is not the root of a checkout", async () => {
     await expect(taskGit(runner.run, repo(), "main")).rejects.toThrow("is the repository's main checkout");
     mkdirSync(join(repo(), "sub"));
@@ -123,7 +121,7 @@ describe("taskGit and taskDiff", () => {
     const task = await taskIn(worktree);
     writeFileSync(join(worktree, "README.md"), "readme changed\n");
     writeFileSync(join(worktree, "new.txt"), "brand new\n");
-    const diff = await taskDiff(runner.run, worktree, await taskBase(runner.run, worktree, task));
+    const diff = await treeDiff(runner.run, worktree, await taskBase(runner.run, worktree, task), await snapshotTree(runner.run, worktree));
     expect(diff.base).toBe(task.baseSha);
     expect(diff.paths.sort()).toEqual(["README.md", "new.txt"]);
     expect(diff.patch).toContain("+readme changed");
@@ -282,7 +280,7 @@ describe("mergeTask", () => {
       const worktree = recorded("task-rr", "f\nboth\n", "h\nboth\n");
       const task = await taskIn(worktree);
 
-      expect(await rebaseWorktree(runner.run, runner.cleanup, worktree, task, [], task.title, true)).toBeNull();
+      expect(await rebaseWorktree(runner.run, runner.cleanup, worktree, task.mainBranch)).toBeNull();
 
       expect(gitIn(worktree, "log", "--format=%s")).toBe("task h\ntask f\nmain f and h\nf and h\nbase");
       expect(readFileSync(join(worktree, "f.txt"), "utf8")).toBe("f\nboth\n");
@@ -301,7 +299,7 @@ describe("mergeTask", () => {
       const task = await taskIn(worktree);
       const head = gitIn(worktree, "rev-parse", "HEAD");
 
-      await expect(rebaseWorktree(runner.run, runner.cleanup, worktree, task, [], task.title, true)).rejects.toThrow("rebase onto main failed");
+      await expect(rebaseWorktree(runner.run, runner.cleanup, worktree, task.mainBranch)).rejects.toThrow("rebase onto main failed");
 
       expect(gitIn(worktree, "rev-parse", "HEAD")).toBe(head);
       expect(gitIn(worktree, "status", "--porcelain")).toBe("");
@@ -466,40 +464,6 @@ describe("mergeTask: what a merge must not get wrong", () => {
     expect(gitIn(worktree, "status", "--porcelain")).toBe("?? feature.txt");
     expect(gitIn(repo(), "log", "--format=%s")).toBe("base");
   });
-});
-
-test("a round whose diff touches a protected path is refused before any merge", async () => {
-  const worktree = addWorktree("task-j");
-  const task = await taskIn(worktree);
-  writeFileSync(join(worktree, "feature.txt"), "feature\n");
-  writeFileSync(join(worktree, "factory.yaml"), "gates: [[true]]\n");
-  const snapshot: Snapshot = { task, state: "running", round: 1, runFirstRound: 1, reason: "start", mergeIntent: null, mergeError: null, mergedCommit: null, commitMessage: null };
-  let merges = 0;
-  const steps: PipelineSteps = {
-    status: () => undefined,
-    cancelled: () => false,
-    pendingMessages: () => false,
-    config: () => noGates,
-    runCommand: (argv) => runner.run(argv, { cwd: worktree }),
-    diff: async () => taskDiff(runner.run, worktree, await taskBase(runner.run, worktree, task)),
-    review: async () => {
-      throw new Error("review is off");
-    },
-    merge: (config) => {
-      merges += 1;
-      return mergeTask(input(worktree, task, config));
-    },
-    openRebase: async () => null,
-  };
-
-  const result = await runRound(snapshot, steps);
-
-  expect(result.continue).toBe(true);
-  expect(result.entries[0]).toMatchObject({ customType: "factory-round", data: { round: 2, trigger: "protected" } });
-  expect((result.entries[1] as { content: string }).content).toContain("- factory.yaml");
-  expect(merges).toBe(0);
-  expect(gitIn(repo(), "log", "--format=%s")).toBe("base");
-  expect(protectedPaths(["factory.yaml"], noGates.protected)).toEqual(["factory.yaml"]);
 });
 
 describe("merge queue", () => {

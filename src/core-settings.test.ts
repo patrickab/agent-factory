@@ -34,7 +34,7 @@ describe("models", () => {
     expect(await callAction("models.set", { models: ["x/y", "a/b", "x/y"] })).toEqual({ models: ["x/y", "a/b"] });
     await expectError(callAction("models.set", { models: "a/b" }), "invalid", "models.set: models must be an array");
     await expectError(callAction("models.set", { models: ["sonnet"] }), "invalid", '"sonnet" is not a provider/model id');
-    await expectError(callAction("models.set", { models: [4] }), "invalid", "4 is not a provider/model id");
+    await expectError(callAction("models.set", { models: [4] }), "invalid", "models.set: models must hold strings");
     expect(await callAction("models.get", {})).toEqual({ models: ["x/y", "a/b"] });
   });
 

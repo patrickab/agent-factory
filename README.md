@@ -38,8 +38,7 @@ pi mcp add factory -- factory-mcp  # only for a harness that wants the MCP tool 
 - The Pi extension is required: a task's runner starts `pi` in the task's worktree, and the extension there runs the
   task (`/factory start`, the gates, the review, the merge). Pi loads it as an installed package
   (`package.json` `pi.extensions`: `src/pi/index.ts`); the runner passes no `-e`
-- On PATH: `pi`, `git`, `bun` (the detached task runner), `pgrep` (finds a task's runner; without it task actions
-  fail), `sh`, `awk`, `flock` and `sleep` (the merge lock and queue)
+- On PATH: `pi`, `git`, `bun` (the detached task runner), `sh`, `awk`, `flock` and `sleep` (the merge lock and queue)
 - Optional terminal view: `factory-tui` (`tui/`, read-only, the full view over `factory ... --json`), install with
   `uv tool install ./tui`
 - Linux is the supported platform (`flock`, `/proc` for process liveness); macOS is untested
@@ -183,7 +182,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   session model). It never makes a model mandatory: with nothing stored and no override a task runs with Pi's session
   model, and nothing is refused for a default that is not on the list
 - Commands the factory runs for a task or a wave (hooks, gates, merge gates, git, the reviewer) never inherit the
-  runners' `FACTORY_TASK_SESSION`, `FACTORY_TASK_LOCK`, `FACTORY_TASK_WAVE` and `FACTORY_WAVE_LOCK`
+  runners' `FACTORY_TASK_SESSION`, `FACTORY_TASK_LOCK` and `FACTORY_TASK_WAVE`
 
 ### Waves (`src/waves.ts`, actions in `src/core.ts`)
 
@@ -195,10 +194,10 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `after` are all `done`. `origin` is the declaring Pi session. Answers `{wave}`
 - `waves.start` with `after: [<tag or wave id>, ...]` (waves of the same repository and target, whoever declared them; a
   tag carried by several: the newest not cancelled; an unknown name or the wave itself: `invalid`): the wave is
-  declared `queued`, stored with `after` as ids, without `branch` and `base` (null; its branch name is reserved, taken
-  already: refused). It starts (a `start` event sets both, the branch is cut off the target's tip, its tasks start) when
-  every wave it names is `merged`: their runner pokes it, nothing polls. Its branch taken by then: `blocked`
-  (`waves.retry` queues it again); a branch of its name taken after the start event, before its first task launched, blocks it too (`infra`). A named wave `rejected` or `blocked` keeps it queued; `waves.cancel` of one makes it a wave that can never start (a `stage`
+  declared `queued`, stored with `after` as ids, its branch cut at the target's tip. It starts (its branch moved to the
+  target's tip, a `start` event records that tip as `base`, its tasks start) when every wave it names is `merged`: their
+  runner pokes it, nothing polls. Its branch holding commits the target lacks by then: `blocked` (`waves.retry` queues
+  it again). A named wave `rejected` or `blocked` keeps it queued; `waves.cancel` of one makes it a wave that can never start (a `stage`
   event, still `queued`, its `detail` says why; reported once, attention in `tasks.wait`). `waves.remove` of a wave that any wave not yet started names is refused. `waves.add` cannot change `after`; it adds tasks to a queued wave, which stays queued
 - Every wave reviews each task (the `review` setting keeps its meaning for tasks outside a wave): a task whose round passed its `gates` rests `reviewing` (the factory's turn, not an attention state) and the wave's
   runner has the wave's reviewer judge that task's diff, one task at a time. Blocker and major findings start the task's

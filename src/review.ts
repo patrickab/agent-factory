@@ -1,19 +1,23 @@
 /**
- * The review step: a fresh, read-only reviewer child that can only answer through `submit_verdict`.
+ * The reviewer child: a read-only Pi that sees the diff only through `read_diff` and answers only through `submit_verdict`.
  *
- * - Consumes the task's diff, the reviewer model and role prompt, and the directory for this task's reviews
- * - Provides `runReview` (the `factory-review` data) and the pure parts it is built from: the patch file's text, the
- *   findings check and the reading of the child's `--mode json` stdout
+ * - `runReviewer`: one launch, used by a task's own review (`runReview`) and by a wave's reviewer session
+ *   (`review-each.ts`). The diff goes as JSON into a file named in `REVIEW_DIFF_ENV`; `pi/reviewer-tool.ts` answers
+ *   `read_diff` from it (`readDiffText`)
+ * - The pure parts: the patch text, the findings check and the reading of the child's `--mode json` stdout
  * - The reviewer has no time limit: it runs until it answers or is cancelled (`cancelled`, `tasks.cancel`)
  */
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TaskDiff } from "./git.ts";
 import type { Exec } from "./run.ts";
-import { approvedFrom, type Finding, type ReviewData, type ReviewStatus, type ReviewUsage, type Severity, type Task } from "./state.ts";
-import { jsonLines } from "./util.ts";
+import { approvedFrom, type Finding, type ReviewData, type ReviewStatus, type Severity, type Task } from "./state.ts";
+import { addUsage, jsonLines, NO_USAGE, piUsage, type Usage } from "./util.ts";
 
 export const VERDICT_TOOL = "submit_verdict";
+export const REVIEW_DIFF_ENV = "FACTORY_REVIEW_DIFF";
+/** How an earlier review's tool result reaches the reviewer's model (`pi/reviewer-tool.ts`). */
+export const STUB_PREFIX = "[reviewed]";
 const REVIEWER_TOOL_EXTENSION = join(import.meta.dirname, "pi", "reviewer-tool.ts");
 const SEVERITIES: readonly Severity[] = ["blocker", "major", "minor"];
 const PATCH_MAX_CHARS = 200_000;
@@ -22,7 +26,7 @@ const PATHS_MAX = 500;
 const REVIEWER_STDOUT_MAX_CHARS = 32_000_000;
 
 /**
- * The patch file as the reviewer gets it: every changed path first, then the patch cut at `maxChars` with a line that
+ * The patch as the reviewer gets it: every changed path first, then the patch cut at `maxChars` with a line that
  * says so. The list survives any cut, so the reviewer knows which files it has not seen.
  */
 export function reviewPatch(diff: Pick<TaskDiff, "paths" | "patch">, maxChars: number): string {
@@ -34,6 +38,37 @@ export function reviewPatch(diff: Pick<TaskDiff, "paths" | "patch">, maxChars: n
     `${header}${diff.patch.slice(0, maxChars)}\n\n` +
     `[patch cut here: ${diff.patch.length - maxChars} more characters. Read the files listed at the top that the patch does not show.]\n`
   );
+}
+
+/** The file sections of a `git diff` patch with the path each names (`diff --git a/<path> b/<path>`), in order. */
+function sections(patch: string): { path: string; text: string }[] {
+  const parts = patch.split(/^(?=diff --git )/m).filter((part) => part !== "");
+  return parts.map((text) => {
+    const head = text.slice(0, text.indexOf("\n") === -1 ? text.length : text.indexOf("\n"));
+    const match = / b\/(.*)$/.exec(head);
+    return { path: match?.[1] ?? "", text };
+  });
+}
+
+function wanted(path: string, paths: readonly string[]): boolean {
+  return paths.some((want) => {
+    const clean = want.replace(/^\.\//, "").replace(/\/+$/, "");
+    return path === clean || path.startsWith(`${clean}/`);
+  });
+}
+
+/** `read_diff`'s text of the diff file `json` (`{paths, patch}`): all of it, or only `paths` when given. */
+export function readDiffText(json: string, paths?: readonly string[]): string {
+  const diff = JSON.parse(json) as { paths: string[]; patch: string };
+  if (diff.patch.trim() === "") return "Nothing changed since the tree you judged last.";
+  if (paths === undefined || paths.length === 0) return reviewPatch(diff, PATCH_MAX_CHARS);
+  const chosen = diff.paths.filter((path) => wanted(path, paths));
+  const patch = sections(diff.patch)
+    .filter((section) => wanted(section.path, paths))
+    .map((section) => section.text)
+    .join("");
+  if (chosen.length === 0) return `None of ${paths.join(", ")} changed. Changed: ${diff.paths.join(", ")}`;
+  return reviewPatch({ paths: chosen, patch }, PATCH_MAX_CHARS);
 }
 
 /** The request file as the reviewer gets it: the task's request, then every follow-up message of the user in order. */
@@ -65,28 +100,85 @@ export interface ReviewerOutput {
   /** Findings of the last valid `submit_verdict` call, null without one. */
   findings: Finding[] | null;
   sessionId: string | null;
-  usage: ReviewUsage;
+  usage: Usage;
 }
 
 /** Reads the reviewer's JSONL stdout. Lines that are not JSON are skipped (a killed run ends mid-line). */
 export function readReviewerOutput(stdout: string): ReviewerOutput {
-  const output: ReviewerOutput = { findings: null, sessionId: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } };
+  const output: ReviewerOutput = { findings: null, sessionId: null, usage: NO_USAGE };
   for (const event of jsonLines<any>(stdout)) {
     if (event.type === "session" && typeof event.id === "string") output.sessionId = event.id;
     if (event.type === "tool_execution_end" && event.toolName === VERDICT_TOOL && !event.isError) {
       const findings = parseFindings(event.result?.details?.findings);
       if (typeof findings !== "string") output.findings = findings;
     }
-    if (event.type === "message_end" && event.message?.role === "assistant" && event.message.usage) {
-      const usage = event.message.usage;
-      output.usage.input += usage.input ?? 0;
-      output.usage.output += usage.output ?? 0;
-      output.usage.cacheRead += usage.cacheRead ?? 0;
-      output.usage.cacheWrite += usage.cacheWrite ?? 0;
-      output.usage.cost += usage.cost?.total ?? 0;
-    }
+    if (event.type === "message_end" && event.message?.role === "assistant") output.usage = addUsage(output.usage, piUsage(event.message.usage));
   }
   return output;
+}
+
+/** The reviewer's session file `<time>_<id>.jsonl` in `dir`, null before its first run. */
+export async function reviewerSession(dir: string, id: string): Promise<string | null> {
+  const name = (await readdir(dir).catch(() => [] as string[])).find((entry) => entry.endsWith(`_${id}.jsonl`));
+  return name === undefined ? null : join(dir, name);
+}
+
+export interface ReviewerRun {
+  status: ReviewStatus;
+  /** Empty unless `status` is `ok`. */
+  findings: Finding[];
+  sessionId: string | null;
+  sessionFile: string | null;
+  model: string | null;
+  usage: Usage;
+  wallMs: number;
+}
+
+export interface ReviewerLaunch {
+  cwd: string;
+  /** The session directory; the diff file goes there too. */
+  dir: string;
+  /** Resume (or create) this session; absent: a new one. */
+  sessionId?: string;
+  tools: string;
+  /** `provider/model` for the child, null for its own default. */
+  model: string | null;
+  rolePrompt: string | undefined;
+  prompt: string;
+  diff: Pick<TaskDiff, "paths" | "patch">;
+  /** The diff file's name in `dir`, without `.diff.json`. */
+  diffName: string;
+  env?: Record<string, string>;
+  cancelled: () => boolean;
+}
+
+/** One run of a reviewer child: the diff behind `read_diff`, the verdict read from its stdout. */
+export async function runReviewer(exec: Exec, input: ReviewerLaunch): Promise<ReviewerRun> {
+  await mkdir(input.dir, { recursive: true });
+  const diffFile = join(input.dir, `${input.diffName}.diff.json`);
+  await writeFile(diffFile, JSON.stringify({ paths: input.diff.paths, patch: input.diff.patch }));
+  const argv = ["pi", "--mode", "json", "-p", "--tools", input.tools, "-ne", "-e", REVIEWER_TOOL_EXTENSION, "--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", input.dir];
+  if (input.sessionId) argv.push("--session-id", input.sessionId);
+  if (input.model) argv.push("--model", input.model);
+  if (input.rolePrompt) argv.push("--append-system-prompt", input.rolePrompt);
+  argv.push(input.prompt);
+  // No `timeoutMs`: a review takes as long as the change needs; only a cancel ends it early.
+  const child = await exec(argv, { cwd: input.cwd, env: { ...input.env, [REVIEW_DIFF_ENV]: diffFile }, maxStdoutChars: REVIEWER_STDOUT_MAX_CHARS });
+  const output = readReviewerOutput(child.stdout);
+  // A killed or failed run never yields a verdict, even when a verdict call is already in the stream.
+  let status: ReviewStatus = "ok";
+  if (child.killed || input.cancelled()) status = "aborted";
+  else if (child.exitCode !== 0) status = "failed";
+  else if (output.findings === null) status = "malformed";
+  return {
+    status,
+    findings: status === "ok" ? (output.findings ?? []) : [],
+    sessionId: output.sessionId,
+    sessionFile: output.sessionId === null ? null : await reviewerSession(input.dir, output.sessionId),
+    model: input.model,
+    usage: output.usage,
+    wallMs: child.durationMs,
+  };
 }
 
 export interface ReviewInput {
@@ -97,61 +189,29 @@ export interface ReviewInput {
   /** The user's messages to the task after its request (`followUpMessages`): part of the task. */
   followUps: string[];
   diff: TaskDiff;
-  /** `provider/model` for the child, null for its own default. */
   model: string | null;
   rolePrompt: string | undefined;
-  /** Holds this task's reviewer sessions and patch files. */
+  /** Holds this task's reviewer sessions, request and diff files. */
   reviewsDir: string;
   cancelled: () => boolean;
 }
 
-async function taskPrompt({ reviewsDir, round, task, followUps }: ReviewInput, patchFile: string): Promise<string> {
+/** A task's own review (outside a wave): a fresh reviewer on the task's request and its diff. */
+export async function runReview(input: ReviewInput): Promise<ReviewData> {
+  const { round, model, reviewsDir } = input;
+  if (input.diff.patch.trim() === "") {
+    return { round, status: "no_diff", approved: false, findings: [], model, sessionFile: null, usage: NO_USAGE, wallMs: 0 };
+  }
+  await mkdir(reviewsDir, { recursive: true });
   // The request goes into a file: as an argument a long one would exceed the argv limit.
   const requestFile = join(reviewsDir, `round-${round}.request.md`);
-  await writeFile(requestFile, reviewRequest(task, followUps));
-  return (
-    `Review the change of a task. The task is in ${requestFile}, its diff is the patch file ${patchFile}: read both with the read tool, ` +
-    `look at the surrounding code where the diff alone is not enough, then finish with ${VERDICT_TOOL}. ` +
-    `Follow-up messages from the user in the task file are part of the task: a change one of them asks for is on-request.`
-  );
-}
-
-export async function runReview(input: ReviewInput): Promise<ReviewData> {
-  const { exec, root, round, task, model, reviewsDir } = input;
-  const result = (status: ReviewStatus, output: ReviewerOutput | null, sessionFile: string | null, wallMs: number): ReviewData => {
-    const findings = (status === "ok" && output?.findings) || [];
-    return {
-      round,
-      status,
-      approved: approvedFrom(status, findings),
-      findings,
-      model,
-      sessionFile,
-      usage: output?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-      wallMs,
-    };
-  };
-  if (input.diff.patch.trim() === "") return result("no_diff", null, null, 0);
-
-  await mkdir(reviewsDir, { recursive: true });
-  const patchFile = join(reviewsDir, `round-${round}.patch`);
-  await writeFile(patchFile, reviewPatch(input.diff, PATCH_MAX_CHARS));
-  const prompt = await taskPrompt(input, patchFile);
-  const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
-  argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", reviewsDir);
-  if (model) argv.push("--model", model);
-  if (input.rolePrompt) argv.push("--append-system-prompt", input.rolePrompt);
-  argv.push(prompt);
-
-  // No `timeoutMs`: a review takes as long as the change needs; only a cancel ends it early.
-  const child = await exec(argv, { cwd: root, maxStdoutChars: REVIEWER_STDOUT_MAX_CHARS });
-  const output = readReviewerOutput(child.stdout);
-  const sessionName = output.sessionId ? (await readdir(reviewsDir)).find((name) => name.endsWith(`${output.sessionId}.jsonl`)) : undefined;
-  const sessionFile = sessionName ? join(reviewsDir, sessionName) : null;
-  // A killed or failed run never yields a verdict, even when a verdict call is already in the stream.
-  let status: ReviewStatus = "ok";
-  if (child.killed || input.cancelled()) status = "aborted";
-  else if (child.exitCode !== 0) status = "failed";
-  else if (output.findings === null) status = "malformed";
-  return result(status, output, sessionFile, child.durationMs);
+  await writeFile(requestFile, reviewRequest(input.task, input.followUps));
+  const prompt =
+    `Review the change of a task. The task is in ${requestFile}: read it with the read tool; read_diff shows its diff. ` +
+    `Look at the surrounding code where the diff alone is not enough, then finish with ${VERDICT_TOOL}. ` +
+    `Follow-up messages from the user in the task file are part of the task: a change one of them asks for is on-request.`;
+  const tools = `read,grep,find,ls,read_diff,${VERDICT_TOOL}`;
+  const run = await runReviewer(input.exec, { cwd: input.root, dir: reviewsDir, tools, model, rolePrompt: input.rolePrompt, prompt, diff: input.diff, diffName: `round-${round}`, cancelled: input.cancelled });
+  const { status, findings, sessionFile, usage, wallMs } = run;
+  return { round, status, approved: approvedFrom(status, findings), findings, model, sessionFile, usage, wallMs };
 }

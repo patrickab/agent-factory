@@ -121,9 +121,4 @@ describe("runReview", () => {
     expect(await review(child(), calls, "\n")).toMatchObject({ status: "no_diff", approved: false, findings: [], sessionFile: null });
     expect(calls).toEqual([]);
   });
-
-  test("a cancelled review still ends aborted", async () => {
-    const data = await runReview({ exec: async () => child({ killed: true, exitCode: null }), root: "/repo", round: 5, task, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => true });
-    expect(data).toMatchObject({ status: "aborted", approved: false });
-  });
 });

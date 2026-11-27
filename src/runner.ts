@@ -4,7 +4,8 @@
  * `bun runner.ts <worktree> <sessionDir> <sessionId> <inboxPath> <message>`
  *
  * - Spawns `pi --mode rpc --session-dir <sessionDir> --session-id <sessionId>` in the worktree (Pi loads the
- *   agent-factory Pi package by itself), with `TASK_SESSION_ENV=1`, and sends `message` as the prompt. For
+ *   agent-factory Pi package by itself; with `CODER_EXTENSIONS_ENV`, the repository's `extensions` setting, it starts
+ *   with `-ne`, the factory's plugin and one `-e` per entry), with `TASK_SESSION_ENV=1`, and sends `message` as the prompt. For
  *   `/factory start` with a coder model, Pi starts on it (`--model`, `piArgs`): a model set later in the session fires
  *   `model_select`, on which a user's extension may persist it into the worktree's `.pi/settings.json`
  * - Closes Pi's stdin once Pi answered the prompt, no agent run is active (`agent_start` .. `agent_settled`), no inbox
@@ -35,11 +36,11 @@
  * - Imports nothing outside node built-ins and the plain plugin modules: the deployed plugin has no `node_modules`
  */
 import { spawn } from "node:child_process";
-import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { contractCheck } from "./contracts.ts";
-import { RESTING_STATES, type StateData } from "./state.ts";
-import { handLockFile } from "./tasks.ts";
+import { rebuild, RESTING_STATES, type StateData } from "./state.ts";
+import { handLockFile, unlockFile } from "./tasks.ts";
 import { errorText, ifMissing, isRecord, readJsonl, writeAtomic } from "./util.ts";
 import { pokeWave, TASK_WAVE_ENV } from "./wave-poke.ts";
 
@@ -50,6 +51,11 @@ const KILL_GRACE_MS = 3000;
 const PROMPT_ID = "1";
 /** Set to `1` in the environment of the Pi a runner starts: that Pi holds a task's session (`tool.ts` reads it). */
 export const TASK_SESSION_ENV = "FACTORY_TASK_SESSION";
+/** The coder model of a `/factory start` (`launchTask`), for Pi's `--model`; Pi never sees it. */
+export const CODER_MODEL_ENV = "FACTORY_CODER_MODEL";
+/** The repository's `extensions` setting as JSON (`sendCommand`), absent when it has none; Pi never sees it. */
+export const CODER_EXTENSIONS_ENV = "FACTORY_CODER_EXTENSIONS";
+const PLUGIN_PATH = join(import.meta.dirname, "pi", "index.ts");
 
 /** The session file Pi writes for `sessionId` in `sessionDir` (`<timestamp>_<sessionId>.jsonl`), if it exists yet. */
 export async function sessionFilePath(sessionDir: string, sessionId: string): Promise<string | undefined> {
@@ -57,33 +63,21 @@ export async function sessionFilePath(sessionDir: string, sessionId: string): Pr
   return name === undefined ? undefined : join(sessionDir, name);
 }
 
-function isStateData(value: unknown): value is StateData {
-  return isRecord(value) && typeof value.state === "string" && typeof value.round === "number" && typeof value.reason === "string";
-}
-
-/** The `factory-state` entries of a session file so far: how many, and the data of the last one. */
-export interface FactoryStates {
-  count: number;
-  last: StateData | undefined;
-}
-
-/** The data of the session file's `custom` entries of `customType`, in order, none before the file exists. A torn line is skipped. */
-async function customEntryData(sessionDir: string, sessionId: string, customType: string): Promise<unknown[]> {
+/** The session file's entries so far, none before the file exists. A torn line is skipped. */
+export async function sessionEntries(sessionDir: string, sessionId: string): Promise<Record<string, unknown>[]> {
   const path = await sessionFilePath(sessionDir, sessionId);
-  if (path === undefined) return [];
-  return (await readJsonl(path)).filter((entry) => entry.type === "custom" && entry.customType === customType).map((entry) => entry.data);
+  return path === undefined ? [] : readJsonl(path);
 }
 
-/** The `factory-state` entries of the session file, none before the file exists. */
-export async function readFactoryStates(sessionDir: string, sessionId: string): Promise<FactoryStates> {
-  const states = (await customEntryData(sessionDir, sessionId, "factory-state")).filter(isStateData);
-  return { count: states.length, last: states.at(-1) };
+/** The `factory-state` entries of the session file so far: how many, and the data of the last one. */
+export async function readFactoryStates(sessionDir: string, sessionId: string): Promise<{ count: number; last: StateData | undefined }> {
+  const states = (await sessionEntries(sessionDir, sessionId)).filter((entry) => entry.type === "custom" && entry.customType === "factory-state");
+  return { count: states.length, last: states.at(-1)?.data as StateData | undefined };
 }
 
-/** `mainBranch` of the session's `factory-task` entry: the branch the task merges into. `undefined` before it is written. */
+/** The branch the task merges into (`Task.mainBranch`), `undefined` before its `factory-task` entry is written. */
 export async function taskMainBranch(sessionDir: string, sessionId: string): Promise<string | undefined> {
-  const task = (await customEntryData(sessionDir, sessionId, "factory-task")).find((data) => isRecord(data) && typeof data.mainBranch === "string");
-  return isRecord(task) ? (task.mainBranch as string) : undefined;
+  return rebuild(await sessionEntries(sessionDir, sessionId))?.task.mainBranch;
 }
 
 /** The data of the last `factory-state` entry of the session file, `undefined` before the first. */
@@ -140,24 +134,18 @@ function inboxLineText(line: string): string | undefined {
 const START_PREFIX = "/factory start ";
 
 /**
- * Pi's arguments for `message`. `/factory start` with `settings.models.coder` (`provider/id`): `--model` with it, so
- * the session starts on the coder's model and the plugin need not switch to it (`setModel` fires `model_select`,
- * which an extension such as `@xynogen/pix-models` answers by writing `defaultProvider`/`defaultModel` into
- * `<worktree>/.pi/settings.json`, and the factory's commit of the worktree then took that file).
+ * Pi's arguments for `message`. `/factory start` with a coder model (`CODER_MODEL_ENV`, set by `launchTask`):
+ * `--model` with it, so the session starts on the coder's model and the plugin need not switch to it (`setModel` fires
+ * `model_select`, which an extension such as `@xynogen/pix-models` answers by writing `defaultProvider`/`defaultModel`
+ * into `<worktree>/.pi/settings.json`, and the factory's commit of the worktree then took that file). With
+ * `CODER_EXTENSIONS_ENV`: `-ne`, the factory's plugin and one `-e` per listed source.
  */
 function piArgs(sessionDir: string, sessionId: string, message: string): string[] {
   const args = ["--mode", "rpc", "--session-dir", sessionDir, "--session-id", sessionId];
-  const text = message.trimStart();
-  if (!text.startsWith(START_PREFIX)) return args;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(text.slice(START_PREFIX.length));
-  } catch {
-    return args;
-  }
-  const models = isRecord(payload) && isRecord(payload.settings) ? payload.settings.models : undefined;
-  const coder = isRecord(models) ? models.coder : undefined;
-  return typeof coder === "string" && /^[^/\s]+\/\S+$/.test(coder) ? [...args, "--model", coder] : args;
+  const extensions = process.env[CODER_EXTENSIONS_ENV];
+  if (extensions) args.push("-ne", ...[PLUGIN_PATH, ...(JSON.parse(extensions) as string[])].flatMap((source) => ["-e", source]));
+  const model = process.env[CODER_MODEL_ENV];
+  return model && message.trimStart().startsWith(START_PREFIX) ? [...args, "--model", model] : args;
 }
 
 /** The follow-ups of the task's changed contracts (`contractCheck`), null when none; a failed look is logged and says none. */
@@ -185,7 +173,7 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
   let inboxOffset = await readInboxOffset(inboxPath);
   const pi = Bun.spawn(["pi", ...piArgs(sessionDir, sessionId, message)], {
     cwd: worktree,
-    env: { ...process.env, [TASK_SESSION_ENV]: "1", [TASK_WAVE_ENV]: undefined },
+    env: { ...process.env, [TASK_SESSION_ENV]: "1", [TASK_WAVE_ENV]: undefined, [CODER_MODEL_ENV]: undefined, [CODER_EXTENSIONS_ENV]: undefined },
     stdin: "pipe",
     stdout: "pipe",
     stderr: "inherit",
@@ -433,9 +421,7 @@ async function startSuccessor(args: [worktree: string, sessionDir: string, sessi
     throw error;
   }
   const lock = process.env.FACTORY_TASK_LOCK;
-  if (pid === undefined || lock === undefined || lock === "") return;
-  const text = await readFile(lock, "utf8").catch(() => "");
-  if (text.split(" ")[0] === String(process.pid)) await handLockFile(lock, pid);
+  if (pid !== undefined && lock) await handLockFile(lock, pid);
 }
 
 /** Pokes the task's wave (`FACTORY_TASK_WAVE`) when the task rests. */
@@ -445,14 +431,6 @@ async function pokeTaskWave(sessionDir: string, sessionId: string): Promise<void
   const state = await lastFactoryState(sessionDir, sessionId);
   if (state === undefined || !RESTING_STATES.includes(state.state)) return;
   await pokeWave(wave);
-}
-
-/** Removes the task lock handed to this runner, unless it names another holder by now. */
-async function releaseTaskLock(): Promise<void> {
-  const path = process.env.FACTORY_TASK_LOCK;
-  if (path === undefined || path === "") return;
-  const text = await readFile(path, "utf8").catch(() => "");
-  if (text.split(" ")[0] === String(process.pid)) await rm(path, { force: true });
 }
 
 if (import.meta.main) {
@@ -468,7 +446,9 @@ if (import.meta.main) {
     })
     .then(async (code) => {
       await pokeTaskWave(sessionDir, sessionId).catch((error: unknown) => console.error(`runner: poking the task's wave: ${errorText(error)}`));
-      await releaseTaskLock().catch((error: unknown) => console.error(`runner: releasing the task lock: ${errorText(error)}`));
+      // The task lock handed to this runner, unless it names another holder by now.
+      const lock = process.env.FACTORY_TASK_LOCK;
+      if (lock) await unlockFile(lock).catch((error: unknown) => console.error(`runner: releasing the task lock: ${errorText(error)}`));
       process.exit(code);
     });
 }

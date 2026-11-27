@@ -5,11 +5,9 @@
  * - Provides the task's git identity (`taskGit`), its primary checkout, the snapshot of a working tree as a tree id
  *   (`snapshotTree`), the task's diff base and its diff (changed paths and patch, untracked files included)
  * - Provides the checks a merge needs before it writes: the checkout is on its branch with no git operation in
- *   progress (`assertCheckoutReady`), and whether tracked files differ from HEAD (`trackedChanges`). Tells whether a
- *   worktree holds anything but HEAD's tree (`uncommittedFiles`) and removes its untracked files (`removeUntracked`),
- *   both leaving ignored files alone. Tells a rebase
- *   in progress and its conflicting files (`rebaseInProgress`), and aborts one a killed merge left behind
- *   (`abortLeftoverRebase`)
+ *   progress (`assertCheckoutReady`), whether a worktree differs from HEAD (`worktreeChanges`); removes its untracked
+ *   files (`removeUntracked`), ignored files left alone. Tells a rebase in progress and its conflicting files
+ *   (`rebaseInProgress`), and aborts one a killed merge left behind (`abortLeftoverRebase`)
  * - Provides the added and removed lines per changed path (`diffFileCounts`)
  * - Provides where the task's own change starts (`taskBase`) and whether its target branch moved past it (`targetMoved`)
  * - Nothing here but `removeUntracked` writes the checkout's own index or its files: staging goes through a scratch index
@@ -61,19 +59,6 @@ export async function primaryCheckout(exec: Exec, cwd: string): Promise<{ primar
   return { primary: dirname(gitDir), gitDir };
 }
 
-/** A scratch index for `root` that starts as a copy of its real one. `GIT_INDEX_FILE` in `env` points git at it. */
-export async function withScratchIndex<T>(exec: Exec, root: string, use: (env: { GIT_INDEX_FILE: string }, dir: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "factory-index-"));
-  try {
-    const index = await git(exec, root, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
-    const env = { GIT_INDEX_FILE: join(dir, "index") };
-    if (existsSync(index)) await copyFile(index, env.GIT_INDEX_FILE);
-    return await use(env, dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
 /**
  * `git add -A` arguments that leave out untracked nested repositories: one without a commit makes `add` fail, one
  * with a commit would be staged as a gitlink. Git lists both with a trailing slash.
@@ -83,15 +68,21 @@ export async function addAllArgs(exec: Exec, root: string, env?: Record<string, 
   return ["add", "-A", "--", ".", ...nested.map((path) => `:(exclude,literal)${path.slice(0, -1)}`)];
 }
 
-/** Stages the whole working tree into the scratch index of `env` and returns its tree id. */
-export async function stageTree(exec: Exec, root: string, env: { GIT_INDEX_FILE: string }): Promise<string> {
-  await git(exec, root, await addAllArgs(exec, root, env), env);
-  return git(exec, root, ["write-tree"], env);
-}
-
-/** Tree id of the working tree of `root` as it is now: tracked and untracked files, ignored ones left out. */
-export function snapshotTree(exec: Exec, root: string): Promise<string> {
-  return withScratchIndex(exec, root, (env) => stageTree(exec, root, env));
+/**
+ * Tree id of the working tree of `root` as it is now: tracked and untracked files, ignored ones left out. Staged in a
+ * scratch copy of its index: the checkout's own index stays as it is.
+ */
+export async function snapshotTree(exec: Exec, root: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "factory-index-"));
+  try {
+    const index = await git(exec, root, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
+    const env = { GIT_INDEX_FILE: join(dir, "index") };
+    if (existsSync(index)) await copyFile(index, env.GIT_INDEX_FILE);
+    await git(exec, root, await addAllArgs(exec, root, env), env);
+    return await git(exec, root, ["write-tree"], env);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -156,16 +147,12 @@ export async function rebaseInProgress(exec: Exec, root: string): Promise<string
   return nulList(await git(exec, root, ["diff", "--name-only", "--diff-filter=U", "-z"]));
 }
 
-/** True when tracked files in `root` differ from HEAD, staged or not. Untracked files do not count. */
-export async function trackedChanges(exec: Exec, root: string): Promise<boolean> {
-  return (await git(exec, root, ["status", "--porcelain", "--untracked-files=no"])) !== "";
-}
-
-/** True when `root` holds anything but HEAD's tree: tracked files that differ, or untracked files that are not ignored. */
-export async function uncommittedFiles(exec: Exec, root: string): Promise<boolean> {
-  // Explicit, since porcelain follows `status.showUntrackedFiles` and `git clean` does not: with `no` set, a file would
-  // pass this check and still be deleted.
-  return (await git(exec, root, ["status", "--porcelain", "--untracked-files=normal"])) !== "";
+/**
+ * True when tracked files in `root` differ from HEAD, staged or not; with `untracked`, also untracked files that are not
+ * ignored (explicit: porcelain follows `status.showUntrackedFiles` and `git clean` does not).
+ */
+export async function worktreeChanges(exec: Exec, root: string, untracked: boolean): Promise<boolean> {
+  return (await git(exec, root, ["status", "--porcelain", `--untracked-files=${untracked ? "normal" : "no"}`])) !== "";
 }
 
 /** Deletes the untracked files of `root` that are not ignored. Never `-x`: ignored files (caches, deps) stay. */
@@ -188,12 +175,7 @@ export interface TaskDiff {
   patch: string;
 }
 
-/** The working tree of `root` against `base`, untracked files included. `LOCKFILES` go last in the patch. */
-export async function taskDiff(exec: Exec, root: string, base: string): Promise<TaskDiff> {
-  return treeDiff(exec, root, base, await snapshotTree(exec, root));
-}
-
-/** `taskDiff` against the tree id `tree` (`snapshotTree`). */
+/** The tree `tree` (`snapshotTree`: untracked files included) against `base`. `LOCKFILES` go last in the patch. */
 export async function treeDiff(exec: Exec, root: string, base: string, tree: string): Promise<TaskDiff> {
   const paths = nulList(await git(exec, root, ["diff", "--no-renames", "--name-only", "-z", base, tree]));
   // Fixed prefixes and no external diff tool: the patch must not depend on the user's git config.

@@ -3,7 +3,8 @@ import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FactoryError } from "./core.ts";
-import { allCancelled, appendWaveEvent, createWave, foldWave, readWave, readyForReview, startableKeys, stuckKeys, unreachableKeys, validateTaskSpecs, waveCounts, wavePath, waveTaskState, type WaveDeclaration, type WaveEvent, type WaveFold } from "./waves.ts";
+import { allCancelled, appendWaveEvent, createWave, foldWave, readWave, readyForReview, startableKeys, stuckKeys, unreachableKeys, validateTaskSpecs, waveCounts, waveTaskState, type WaveDeclaration, type WaveEvent, type WaveFold } from "./waves.ts";
+import { wavePath } from "./wave-poke.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-waves-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;

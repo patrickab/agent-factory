@@ -25,7 +25,7 @@ import {
   ScoutOutput,
   type ScoutDeclaration,
 } from "./scouts.ts";
-import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
+import { withLock } from "./tasks.ts";
 import { errorText } from "./util.ts";
 import { memoryStoreRoot } from "./wave-poke.ts";
 
@@ -81,21 +81,13 @@ async function finalState(dir: string): Promise<boolean> {
 async function takeSlot(dir: string, declaration: ScoutDeclaration): Promise<boolean> {
   const lock = join(scoutsDir(), callerKey(declaration.caller), "queue.lock");
   for (;;) {
-    if (await finalState(dir)) return false;
-    let locked = false;
-    try {
-      await lockFile(lock, "the scout queue is busy");
-      locked = true;
-      if ((await runningScouts(declaration.caller)) < SCOUT_LIMIT) {
-        if (await finalState(dir)) return false;
-        await appendScoutEvent(dir, { kind: "state", state: "running" });
-        return true;
-      }
-    } catch (error) {
-      if (!(error instanceof TaskBusyError)) throw error;
-    } finally {
-      if (locked) await unlockFile(lock);
-    }
+    const taken = await withLock(lock, "the scout queue is busy", Infinity, async () => {
+      if (await finalState(dir)) return false;
+      if ((await runningScouts(declaration.caller)) >= SCOUT_LIMIT) return undefined;
+      await appendScoutEvent(dir, { kind: "state", state: "running" });
+      return true;
+    });
+    if (taken !== undefined) return taken;
     await Bun.sleep(POLL_MS);
   }
 }

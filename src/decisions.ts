@@ -16,7 +16,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { FactoryCard } from "./cards.ts";
 import { findTask, pendingWaveTask, taskView, type TaskView } from "./core-tasks.ts";
-import { findWave, waveLook } from "./core-waves.ts";
+import { findWave, lookWave } from "./core-waves.ts";
 import { taskNotice, waveNotice } from "./notify.ts";
 import { factoryHome } from "./settings.ts";
 import type { TaskRecord } from "./tasks.ts";
@@ -33,7 +33,7 @@ const cause = (answers: string | undefined): Cause => (answers === undefined ? {
 
 /** The wave's open notice (a notice that needs a ruling), only in one of `stages` when given. */
 async function waveKey(file: WaveFile, stages?: readonly WaveStage[]): Promise<string | undefined> {
-  const look = await waveLook(file);
+  const look = await lookWave(file);
   if (stages !== undefined && !stages.includes(look.view.stage)) return undefined;
   const notice = waveNotice({ ...look, events: file.events }, "");
   return notice !== null && notice.card.tone === "attention" ? notice.key : undefined;

@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listTasks, lockTask, removeTask, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { listTasks, lockTask, removeTask, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tasks-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -69,7 +69,7 @@ describe("task records", () => {
 describe("task lock", () => {
   test("one holder at a time; this process holds it until it unlocks", async () => {
     await lockTask(ONE);
-    await expect(lockTask(ONE)).rejects.toBeInstanceOf(TaskBusyError);
+    await expect(lockTask(ONE)).rejects.toMatchObject({ code: "busy" });
     await unlockTask(ONE);
     expect(existsSync(taskLockPath(ONE))).toBe(false);
     await lockTask(ONE);

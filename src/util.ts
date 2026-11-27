@@ -1,6 +1,6 @@
 /**
  * Small helpers every factory module shares: the error clients see, error text, record check, the end of a command's
- * output, and reading and writing the factory's own files. Imports only `node:`, so every module may import it.
+ * output, usage sums, and reading and writing the factory's own files. Imports only `node:`, so every module may import it.
  */
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -89,4 +89,24 @@ export async function writeAtomic(path: string, text: string): Promise<void> {
     await rm(temp, { force: true });
     throw error;
   }
+}
+
+/** Tokens and cost (dollars) of model calls; `input` is uncached input tokens. */
+export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+export const NO_USAGE: Usage = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
+
+/** `a` plus `b`, null when both are. */
+export function addUsage(a: Usage, b: Usage | null): Usage;
+export function addUsage(a: Usage | null, b: Usage | null): Usage | null;
+export function addUsage(a: Usage | null, b: Usage | null): Usage | null {
+  if (b === null) return a;
+  if (a === null) return { ...b };
+  return { input: a.input + b.input, output: a.output + b.output, cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite, cost: a.cost + b.cost };
+}
+
+/** Pi's `usage` of one assistant message, a field it left out counted 0; null without one. */
+export function piUsage(raw: unknown): Usage | null {
+  if (!isRecord(raw)) return null;
+  const n = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  return { input: n(raw.input), output: n(raw.output), cacheRead: n(raw.cacheRead), cacheWrite: n(raw.cacheWrite), cost: n(isRecord(raw.cost) ? raw.cost.total : 0) };
 }

@@ -7,16 +7,17 @@
  * - K = `FACTORY_SLOTS`, default max(1, cores / 4 rounded down). The slotted command gets `FACTORY_TEST_JOBS` = cores / K
  *   rounded down (min 1) unless the environment sets it, and `FACTORY_SLOT_HELD=1`. A process with `FACTORY_SLOT_HELD`
  *   set holds a slot already and takes none
- * - Waiting ends when `stop()` says so, as a killed result. A waiting process leaves a marker `waiting/<pid>.<uuid>`:
- *   `slotWaiting(pids)` tells a task's or a wave's view; a marker whose process died, or older than the start of the
- *   process that has its pid now (the pid was reused), is ignored and removed
+ * - Waiting ends when `stop()` says so, as a killed result. A waiting process leaves a marker
+ *   `waiting/<pid>-<start time>-<uuid>`: `slotWaiting(pids)` tells a task's or a wave's view; a marker whose process
+ *   died (`procAlive`, which also catches a reused pid) is ignored and removed
  * - `runInSlot`: `factory slot -- <command...>`, for test runs outside the factory's gates
  */
 import { constants } from "node:os";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CommandResult } from "./run.ts";
 import { factoryHome } from "./settings.ts";
+import { procAlive, procStart } from "./tasks.ts";
 
 export const SLOTS_ENV = "FACTORY_SLOTS";
 export const TEST_JOBS_ENV = "FACTORY_TEST_JOBS";
@@ -91,7 +92,7 @@ export async function takeSlot(pool: SlotPool, stop: () => boolean = () => false
       }
       if (stop()) return null;
       if (marker === null) {
-        marker = join(pool.dir, "waiting", `${process.pid}.${crypto.randomUUID()}`);
+        marker = join(pool.dir, "waiting", `${process.pid}-${(await procStart(process.pid)) ?? "0"}-${crypto.randomUUID()}`);
         await mkdir(join(pool.dir, "waiting"), { recursive: true });
         await writeFile(marker, "", "utf8");
       }
@@ -116,55 +117,16 @@ export async function withSlot(pool: SlotPool, stop: () => boolean, run: (env: R
   }
 }
 
-/** Whether process `pid` lives (one of another user counts as alive). */
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-/** When process `pid` started (ms since the epoch, at most a second early: the boot time is whole seconds), null when unknown. */
-async function startedAt(pid: number): Promise<number | null> {
-  try {
-    const line = await readFile(`/proc/${pid}/stat`, "utf8");
-    // The fields after the command name, which ends with the last `)`: state is field 3, starttime field 22.
-    const ticks = Number(line.slice(line.lastIndexOf(")") + 2).split(" ")[19]);
-    const boot = Number(/^btime (\d+)$/m.exec(await readFile("/proc/stat", "utf8"))?.[1]);
-    if (!Number.isFinite(ticks) || !Number.isFinite(boot)) return null;
-    return boot * 1000 + (ticks * 1000) / CLOCK_TICKS;
-  } catch {
-    return null;
-  }
-}
-
-/** USER_HZ of `/proc/<pid>/stat`: 100 on every Linux architecture the factory runs on. */
-const CLOCK_TICKS = 100;
-
-/** Whether the marker `path` of `pid` is stale: its process is gone, or the pid's process started after the marker. */
-async function staleMarker(path: string, pid: number): Promise<boolean> {
-  if (!alive(pid)) return true;
-  const started = await startedAt(pid);
-  if (started === null) return false;
-  const written = await stat(path).then((info) => info.mtimeMs, () => null);
-  return written !== null && written < started;
-}
-
-/**
- * Whether one of `pids` waits for a slot now. A marker of `pids` that is stale (its process died waiting, or the pid
- * belongs to a process started after the marker) is ignored and removed.
- */
+/** Whether one of `pids` waits for a slot now. A marker of `pids` whose process died waiting (`procAlive`) is ignored and removed. */
 export async function slotWaiting(pids: readonly number[], dir: string = slotsDir()): Promise<boolean> {
   if (pids.length === 0) return false;
   const waiting = join(dir, "waiting");
   const names = await readdir(waiting).catch(() => [] as string[]);
   let found = false;
   for (const name of names) {
-    const pid = Number(name.slice(0, name.indexOf(".")));
-    if (!pids.includes(pid)) continue;
-    if (await staleMarker(join(waiting, name), pid)) await rm(join(waiting, name), { force: true });
+    const [pid = "", start = ""] = name.split("-");
+    if (!pids.includes(Number(pid))) continue;
+    if (!(await procAlive(Number(pid), start))) await rm(join(waiting, name), { force: true });
     else found = true;
   }
   return found;

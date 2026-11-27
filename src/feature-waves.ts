@@ -2,13 +2,12 @@
 import { card, decision, waveCard, waveState } from "./cards.ts";
 import { plural } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
-import { WAVE_FINAL_STAGES } from "./core-tasks.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
 import { waveCause } from "./decisions.ts";
 import { feature, REPO, spec, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
 import { schemaOf } from "./settings.ts";
 import type { Handlers } from "./feature.ts";
-import type { WaveView } from "./waves.ts";
+import { WAVE_FINAL_STAGES, type WaveView } from "./waves.ts";
 import { short } from "./util.ts";
 
 export const WAVES = feature({
@@ -32,7 +31,7 @@ export const WAVES = feature({
           type: "array",
           items: { type: "string" },
           description:
-            "Waves this one waits for, by tag (the newest not cancelled) or id, of the same repository and target: the wave is queued, gets its branch off the target's tip and starts once every one is merged",
+            "Waves this one waits for, by tag (the newest not cancelled) or id, of the same repository and target: the wave is queued and starts once every one is merged, its branch moved to the target's tip then",
         },
         contracts: {
           type: "array",

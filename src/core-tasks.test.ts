@@ -4,17 +4,15 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import type { TaskView, TimelineEntry } from "./core-tasks.ts";
-import { caseDir, exitingRunner, expectError, failure, fakeRecord, git, ID_1, ID_2, makeRepo, prompts, recordOf, restingTask, RUN, runnerEnded, startTask, stateOf, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
-import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
+import { caseDir, expectError, failure, fakeRecord, git, ID_1, ID_2, makeRepo, prompts, recordOf, restingTask, runnerEnded, startTask, stateOf, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { stopRunners, taskInboxPath } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, lockTask, taskLogPath, unlockTask, writeTask } from "./tasks.ts";
-import { appendWaveEvent, createWave } from "./waves.ts";
 
 useCoreFixture();
 
 describe("task reads", () => {
   const sessionEntries = [
-    { type: "session", version: 3, id: "s" },
     { type: "custom", customType: "factory-task", timestamp: "t1", data: { mainBranch: "main", settings: { branch: "main", merge: "auto", maxRounds: 2, review: true, models: {} } } },
     { type: "message", timestamp: "t2", message: { role: "user", content: "add b.txt" } },
     { type: "custom", customType: "factory-round", timestamp: "t3", data: { round: 1, trigger: "start" } },
@@ -197,23 +195,6 @@ describe("tasks.message", () => {
     writeSession(merging, [{ type: "custom", customType: "factory-state", data: { state: "merging", round: 1, reason: "approved" } }]);
     await expectError(callAction("tasks.message", { id: ID_2, text: "hi" }), "refused", "is merging");
   }, 30_000);
-
-  test("a runner that ends as the line is appended: the line is taken back and a new runner delivers it", async () => {
-    const repo = makeRepo();
-    const record = await restingTask(repo, "blocked");
-    writeSession(record, [
-      { type: "custom", customType: "factory-task", data: { mainBranch: "main" } },
-      { type: "custom", customType: "factory-state", data: { state: "running", round: 2, reason: "message" } },
-    ]);
-    const runner = Bun.spawn(["bun", exitingRunner, record.worktree, record.sessionDir, record.sessionId, "x"], {
-      env: { ...process.env, FAKE_INBOX: taskInboxPath(record.id) },
-    });
-    await until(async () => (await liveRunners(record)).length === 1);
-    await callAction("tasks.message", { id: record.id, text: "late note" });
-    await runner.exited;
-    await until(() => prompts().includes("prompt late note"));
-    expect(readFileSync(taskInboxPath(record.id), "utf8")).toBe("");
-  }, 30_000);
 });
 
 describe("runner environment", () => {
@@ -239,7 +220,7 @@ describe("waiting_answer", () => {
     const record = fakeRecord(ID_1, "/r");
     await writeTask(record);
     const asked = [
-      { type: "custom", customType: "factory-round", timestamp: "t1", data: { round: 1, trigger: "start" } },
+      { type: "custom", customType: "factory-task", timestamp: "t0", data: { mainBranch: "main" } },
       { type: "custom", customType: "factory-question", timestamp: "t2", data: { text: "Which table?" } },
       { type: "custom", customType: "factory-state", timestamp: "t3", data: { state: "waiting_answer", round: 1, reason: "question" } },
     ];
@@ -254,21 +235,5 @@ describe("waiting_answer", () => {
     appendFileSync(path, `${JSON.stringify({ type: "custom", customType: "factory-state", timestamp: "t4", data: { state: "blocked", round: 1, reason: "gates" } })}\n`);
     const answered = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
     expect([answered.state, answered.question]).toEqual(["blocked", null]);
-  });
-});
-
-describe("tasks.start and queued waves", () => {
-  test("a queued wave that started owns the branch its start event set (invariant 13)", async () => {
-    const repo = makeRepo();
-    const id = `20000000-${RUN}-4000-8000-000000000007`;
-    const named = `20000000-${RUN}-4000-8000-000000000008`;
-    // Queued: no branch in its declaration.
-    await createWave({ id, repo, tag: "factory/w8", plan: null, title: "w", request: "r", branch: null, target: "main", base: null, after: [named], origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    const main = git(repo, "rev-parse", "main");
-    git(repo, "branch", "main-factory-w8");
-    await appendWaveEvent(id, { kind: "start", branch: "main-factory-w8", base: main });
-    const start = () => callAction("tasks.start", { title: "t", request: "r", overrides: { branch: "main-factory-w8" } }, { cwd: repo });
-    await expectError(start(), "refused", "main-factory-w8 is the branch of wave 20000000, which is building");
-    expect(await listTasks()).toEqual([]);
   });
 });

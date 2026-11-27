@@ -16,18 +16,16 @@ import { join } from "node:path";
 import { callAction, FactoryError, type TaskView } from "./core.ts";
 import { liveRunners, stopRunners } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
-import { listTasks, type TaskRecord } from "./tasks.ts";
-import { liveWaveRunners, runnerSnapshot, stopWaveRunners } from "./wave-poke.ts";
+import { handLockFile, listTasks, lockFile, type TaskRecord } from "./tasks.ts";
+import { stopWaveRunners, waveLockPath } from "./wave-poke.ts";
 import { listWaves } from "./waves.ts";
 
 let savedEnv: NodeJS.ProcessEnv;
 export let scratch: string;
 export let fakeBin: string;
 let piLog: string;
-/** A runner stand-in `pgrep` finds as the task's runner; it exits as soon as the task's inbox file appears. */
-export let exitingRunner: string;
-/** A wave runner stand-in `liveWaveRunners` finds (`wave-runner.ts <id>`); it exits once `$FAKE_RUNNER_END` exists. */
-export let fakeWaveRunner: string;
+/** A wave runner stand-in (`runnerHolding`); it exits once `$FAKE_RUNNER_END` exists. */
+let fakeWaveRunner: string;
 /** A PATH with the fake `pi` and without any directory that holds `agent-worktree`. */
 export let testPath: string;
 export let caseDir: string;
@@ -108,17 +106,7 @@ await forever();
   );
   chmodSync(join(fakeBin, "pi"), 0o755);
 
-  exitingRunner = join(scratch, "fake-runner", "runner.ts");
   mkdirSync(join(scratch, "fake-runner"));
-  writeFileSync(
-    exitingRunner,
-    `import { existsSync } from "node:fs";
-const inbox = process.env.FAKE_INBOX;
-while (!existsSync(inbox)) await Bun.sleep(1);
-process.exit(0);
-`,
-  );
-
   fakeWaveRunner = join(scratch, "fake-runner", "wave-runner.ts");
   writeFileSync(
     fakeWaveRunner,
@@ -155,11 +143,8 @@ process.exit(0);
 
   afterEach(async () => {
     // Wave runners first: they would start tasks while the tasks' runners stop.
-    // Only those with a live runner: a search per wave and task would cost seconds in a case with many.
-    const waveRunners = await runnerSnapshot();
-    for (const wave of await listWaves()) if ((await liveWaveRunners(wave.declaration.id, waveRunners)).length > 0) await stopWaveRunners(wave.declaration.id);
-    const taskRunners = await runnerSnapshot();
-    for (const record of await listTasks()) if ((await liveRunners(record, taskRunners)).length > 0) await stopRunners(record);
+    for (const wave of await listWaves()) await stopWaveRunners(wave.declaration.id);
+    for (const record of await listTasks()) await stopRunners(record);
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
     Object.assign(process.env, savedEnv);
   });
@@ -196,6 +181,14 @@ export async function until(check: () => boolean | Promise<boolean>, timeoutMs =
 }
 
 export const stateOf = async (record: TaskRecord) => (await lastFactoryState(record.sessionDir, record.sessionId))?.state;
+/** Starts a stand-in of wave `id`'s runner and hands it the wave's lock, as a poke does: `liveWaveRunners` finds it. */
+export async function runnerHolding(id: string, env: Record<string, string | undefined>): Promise<Bun.Subprocess> {
+  await lockFile(waveLockPath(id), "a runner holds it");
+  const child = Bun.spawn(["bun", fakeWaveRunner, id], { env });
+  await handLockFile(waveLockPath(id), child.pid);
+  return child;
+}
+
 export const runnerEnded = async (record: TaskRecord) => (await liveRunners(record)).length === 0;
 export const prompts = () => (existsSync(piLog) ? readFileSync(piLog, "utf8").trim().split("\n") : []);
 

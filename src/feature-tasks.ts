@@ -1,7 +1,8 @@
 /** The tasks: start, look at, steer and remove them (`core-tasks.ts`). */
 import { plural } from "./agent-view.ts";
 import { card, decision, taskCard, taskState } from "./cards.ts";
-import { FINAL_STATES, TASK_HANDLERS, type TaskView } from "./core-tasks.ts";
+import { TASK_HANDLERS, type TaskView } from "./core-tasks.ts";
+import { FINAL_STATES } from "./state.ts";
 import { taskCause } from "./decisions.ts";
 import { feature, ID, REPO, spec, TAG, TAG_FILTER } from "./feature.ts";
 import { schemaOf } from "./settings.ts";

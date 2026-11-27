@@ -16,9 +16,10 @@
 import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { factoryHome } from "./settings.ts";
-import { onPath, ownRunner, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
+import { onPath, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
+import { runnerAlive } from "./tasks.ts";
 import { messageText } from "./state.ts";
-import { cents, ifMissing, isRecord, readJsonl } from "./util.ts";
+import { addUsage, cents, ifMissing, isRecord, NO_USAGE, piUsage, readJsonl, type Usage } from "./util.ts";
 
 export const SCOUT_LIMIT = 4;
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory.
@@ -31,7 +32,6 @@ export type ScoutCallerKind = "task" | "wave" | "session";
 /** `id`: the task's, the wave's, or the session's (null for a caller without one: the CLI). */
 export type ScoutCaller = { kind: ScoutCallerKind; id: string | null };
 export type ScoutState = "queued" | "running" | "done" | "failed" | "cancelled";
-export type ScoutUsage = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 
 export const FINAL_SCOUT_STATES: readonly ScoutState[] = ["done", "failed", "cancelled"];
 
@@ -56,7 +56,7 @@ export interface ScoutDeclaration {
 export type ScoutEvent =
   | { at: string; kind: "state"; state: ScoutState; error?: string }
   | { at: string; kind: "runner"; pid: number }
-  | { at: string; kind: "usage"; usage: ScoutUsage };
+  | { at: string; kind: "usage"; usage: Usage };
 
 /** A scout as clients see it. `running`: its runner lives. `interrupted`: not final, its runner gone. */
 export interface ScoutView extends Omit<ScoutDeclaration, "cwd"> {
@@ -64,7 +64,7 @@ export interface ScoutView extends Omit<ScoutDeclaration, "cwd"> {
   error: string | null;
   running: boolean;
   interrupted: boolean;
-  usage: ScoutUsage | null;
+  usage: Usage | null;
   /** The report, null before the scout is done. */
   report: string | null;
   reportPath: string | null;
@@ -111,20 +111,11 @@ export async function appendScoutEvent(dir: string, event: NewScoutEvent): Promi
   await appendFile(join(dir, "events.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
 }
 
-function numberOr0(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function parseUsage(value: unknown): ScoutUsage | null {
-  if (!isRecord(value)) return null;
-  return { input: numberOr0(value.input), output: numberOr0(value.output), cacheRead: numberOr0(value.cacheRead), cacheWrite: numberOr0(value.cacheWrite), cost: numberOr0(value.cost) };
-}
-
 export interface ScoutFold {
   state: ScoutState;
   error: string | null;
   pid: number | null;
-  usage: ScoutUsage | null;
+  usage: Usage | null;
 }
 
 /** The scout's state, its runner's pid and its usage from its events (unknown keys and torn lines dropped). */
@@ -138,7 +129,7 @@ export function foldScout(events: Record<string, unknown>[]): ScoutFold {
       final = FINAL_SCOUT_STATES.includes(fold.state);
     }
     if (event.kind === "runner" && typeof event.pid === "number") fold.pid = event.pid;
-    if (event.kind === "usage") fold.usage = parseUsage(event.usage) ?? fold.usage;
+    if (event.kind === "usage") fold.usage = event.usage as Usage;
   }
   return fold;
 }
@@ -149,31 +140,14 @@ export async function readScout(dir: string): Promise<{ declaration: ScoutDeclar
   return { declaration, fold: foldScout(events) };
 }
 
-/** How often a process that is not (yet) readable as the scout's runner is looked at again, and how long between. */
-const ALIVE_RETRIES = 10;
-const ALIVE_RETRY_MS = 25;
+/** How often the starter looks whether the spawned runner exec'd. */
+const EXEC_POLL_MS = 25;
 
 /** Whether process `pid` exists and is not a zombie. */
 async function processExists(pid: number): Promise<boolean> {
   const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
   // `<pid> (<comm>) <state> …`: the state follows the last `)`.
   return stat !== "" && stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
-}
-
-/**
- * Whether `pid` is the live runner of the scout in `dir` (its command line names the directory, invariant 16's marker).
- * The spawn's pid may name the spawner's fork before its `execve` (its command line the spawner's, or empty mid-exec;
- * longer under load): while the process exists it is looked at again for a moment before it counts as no runner, so a
- * waiter does not take a starting scout for an interrupted one.
- */
-export async function scoutRunnerAlive(pid: number | null, dir: string): Promise<boolean> {
-  if (pid === null) return false;
-  for (let attempt = 0; ; attempt++) {
-    const argv = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
-    if (argv.split("\0").includes(dir)) return ownRunner(pid);
-    if (attempt >= ALIVE_RETRIES || !(await processExists(pid))) return false;
-    await Bun.sleep(ALIVE_RETRY_MS);
-  }
 }
 
 /** The paths `written.jsonl` names, in order, each once. */
@@ -186,7 +160,7 @@ async function writtenPaths(dir: string): Promise<string[]> {
 export async function scoutView(dir: string): Promise<ScoutView> {
   const { declaration, fold } = await readScout(dir);
   const { cwd: _cwd, ...rest } = declaration;
-  const running = await scoutRunnerAlive(fold.pid, dir);
+  const running = await runnerAlive(fold.pid, dir);
   const final = FINAL_SCOUT_STATES.includes(fold.state);
   const reportPath = join(dir, "report.md");
   const report = fold.state === "done" ? await readFile(reportPath, "utf8").catch(() => null) : null;
@@ -205,23 +179,16 @@ export async function scoutView(dir: string): Promise<ScoutView> {
 }
 
 /** The unrounded usage of all of `caller`'s scouts (cancelled and killed ones too), null without one. */
-export async function scoutUsage(caller: ScoutCaller): Promise<ScoutUsage | null> {
-  let sum: ScoutUsage | null = null;
+export async function scoutUsage(caller: ScoutCaller): Promise<Usage | null> {
+  let sum: Usage | null = null;
   for (const dir of await scoutDirs(caller)) {
     const usage = await readScout(dir).then(
       ({ fold }) => fold.usage,
       () => null,
     );
-    sum = addScoutUsage(sum, usage);
+    sum = addUsage(sum, usage);
   }
   return sum;
-}
-
-/** `a` plus `b`, null when both are. */
-export function addScoutUsage(a: ScoutUsage | null, b: ScoutUsage | null): ScoutUsage | null {
-  if (b === null) return a;
-  if (a === null) return { ...b };
-  return { ...a, input: a.input + b.input, output: a.output + b.output, cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite, cost: a.cost + b.cost };
 }
 
 /** How many of `caller`'s scouts run now: state `running` with a live runner. */
@@ -229,7 +196,7 @@ export async function runningScouts(caller: ScoutCaller): Promise<number> {
   let count = 0;
   for (const dir of await scoutDirs(caller)) {
     const scout = await readScout(dir).catch(() => undefined);
-    if (scout?.fold.state === "running" && (scout.fold.pid === null || (await scoutRunnerAlive(scout.fold.pid, dir)))) count += 1;
+    if (scout?.fold.state === "running" && (scout.fold.pid === null || (await runnerAlive(scout.fold.pid, dir)))) count += 1;
   }
   return count;
 }
@@ -238,10 +205,10 @@ const STOP_WAIT_MS = 5_000;
 
 async function stopScoutRunner(dir: string, pid: number | null): Promise<void> {
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
-    if (!(await scoutRunnerAlive(pid, dir))) return;
+    if (!(await runnerAlive(pid, dir))) return;
     signalRunner(pid as number, signal);
     const deadline = Date.now() + STOP_WAIT_MS;
-    while (Date.now() < deadline && (await scoutRunnerAlive(pid, dir))) await Bun.sleep(50);
+    while (Date.now() < deadline && (await runnerAlive(pid, dir))) await Bun.sleep(50);
   }
 }
 
@@ -268,12 +235,11 @@ const EXEC_WAIT_MS = 30_000;
  */
 async function execed(pid: number, dir: string): Promise<boolean> {
   const deadline = Date.now() + EXEC_WAIT_MS;
-  for (;;) {
-    const argv = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
-    if (argv.split("\0").includes(dir)) return true;
+  while (!(await runnerAlive(pid, dir))) {
     if (!(await processExists(pid)) || Date.now() >= deadline) return false;
-    await Bun.sleep(ALIVE_RETRY_MS);
+    await Bun.sleep(EXEC_POLL_MS);
   }
+  return true;
 }
 
 /**
@@ -287,7 +253,7 @@ export async function startScout(declaration: ScoutDeclaration, env: RunnerEnv =
   await writeScoutDeclaration(dir, declaration);
   await appendScoutEvent(dir, { kind: "state", state: "queued" });
   const runnerEnv: RunnerEnv = { ...env, [SCOUT_ID_ENV]: declaration.id };
-  for (const key of ["FACTORY_TASK_SESSION", "FACTORY_TASK_LOCK", "FACTORY_TASK_WAVE", "FACTORY_WAVE_LOCK"]) delete runnerEnv[key];
+  for (const key of ["FACTORY_TASK_SESSION", "FACTORY_TASK_LOCK", "FACTORY_TASK_WAVE"]) delete runnerEnv[key];
   const pid = await spawnDetached([bun, SCOUT_RUNNER_PATH, dir], runnerEnv, join(dir, "runner.log"), import.meta.dirname);
   if (pid === undefined) {
     await appendScoutEvent(dir, { kind: "state", state: "failed", error: "its runner did not start" });
@@ -301,7 +267,7 @@ export async function startScout(declaration: ScoutDeclaration, env: RunnerEnv =
 
 /** The report of the child's `--mode json` stdout lines: the running usage totals and the last assistant text. */
 export class ScoutOutput {
-  usage: ScoutUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+  usage = NO_USAGE;
   lastText = "";
 
   /** Reads one stdout line; true when it changed the usage. */
@@ -315,13 +281,8 @@ export class ScoutOutput {
     if (!isRecord(event) || event.type !== "message_end" || !isRecord(event.message) || event.message.role !== "assistant") return false;
     const text = messageText(event.message).trim();
     if (text !== "") this.lastText = text;
-    const usage = event.message.usage;
-    if (!isRecord(usage)) return false;
-    this.usage.input += numberOr0(usage.input);
-    this.usage.output += numberOr0(usage.output);
-    this.usage.cacheRead += numberOr0(usage.cacheRead);
-    this.usage.cacheWrite += numberOr0(usage.cacheWrite);
-    this.usage.cost += isRecord(usage.cost) ? numberOr0(usage.cost.total) : 0;
-    return true;
+    const usage = piUsage(event.message.usage);
+    this.usage = addUsage(this.usage, usage);
+    return usage !== null;
   }
 }

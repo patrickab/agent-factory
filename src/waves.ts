@@ -19,19 +19,16 @@ import { mkdir, open, readdir, readFile, rm, symlink, writeFile } from "node:fs/
 import { join } from "node:path";
 import { MODEL_SIZES, type ModelSize, type StoredSettings } from "./settings.ts";
 import { FACTORY_TURN_STATES, RESTING_STATES, type MinorFinding, type State } from "./state.ts";
-import { lockFile, unlockFile, withLock } from "./tasks.ts";
-import { FactoryError, ifMissing, isRecord, jsonLines } from "./util.ts";
-import { isWaveId, waveDir, waveHome, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
+import { withLock } from "./tasks.ts";
+import { FactoryError, ifMissing, isRecord, jsonLines, type Usage } from "./util.ts";
+import { isWaveId, waveDir, waveHome, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, wavesDir } from "./wave-poke.ts";
 import type { FeedbackEntry } from "./feedback.ts";
-
-export { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir };
 
 /** How long an append waits for the log lock before the wave counts as busy. */
 const LOG_LOCK_WAIT_MS = 10_000;
 
 export type WaveStage = "queued" | "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled";
 export type WaveReason = "conflict" | "gates" | "dirty" | "infra" | "review_failed";
-export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 
 /**
  * `key` unique in the wave, `[A-Za-z0-9._-]+`; `after` = keys of the same wave; `model`: which of the wave's two models
@@ -48,6 +45,9 @@ export type WaveTaskEntry = { key: string; title: string; request: string; after
 /** `queued` too: no runner drives a wave that waits for others, a merge of one of them pokes it (`queuedWaves`). */
 export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["queued", "rejected", "waiting_approve", "merged", "blocked", "cancelled"];
 
+/** Stages nothing leaves. */
+export const WAVE_FINAL_STAGES: readonly WaveStage[] = ["merged", "cancelled"];
+
 /** The stages a wave waits for the supervisor in (`interrupted` and stuck too: `WaveView.attention`). */
 export const WAVE_ATTENTION_STAGES: readonly WaveStage[] = ["rejected", "blocked", "waiting_approve"];
 
@@ -60,8 +60,8 @@ export type WaveOverrides = Pick<StoredSettings, "models" | "maxRounds" | "merge
 
 /**
  * Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. `after`:
- * the ids of the waves it waits for (absent: none); such a wave is declared `queued`, without `branch` and `base`
- * (null): its `start` event sets both.
+ * the ids of the waves it waits for (absent: none); such a wave is declared `queued`, its branch cut at the target's
+ * tip: its `start` event moves it to the target's tip then, its new `base`.
  */
 export interface WaveDeclaration {
   id: string;
@@ -71,9 +71,9 @@ export interface WaveDeclaration {
   title: string;
   /** The reviewer's instructions. */
   request: string;
-  branch: string | null;
+  branch: string;
   target: string;
-  base: string | null;
+  base: string;
   after?: string[];
   /** The contracts (memory-store, the store is `plan`) its tasks work by (absent: none). */
   contracts?: string[];
@@ -92,7 +92,7 @@ export type WaveReview = {
   verdict: "approved" | "rejected" | "failed";
   status: string;
   findings: WaveFinding[];
-  usage: Usage | null;
+  usage: Usage;
   wallMs: number;
 };
 /**
@@ -121,8 +121,8 @@ export type WaveEvent =
   | { at: string; kind: "tasks"; tasks: WaveTaskEntry[]; dropped?: string[]; by?: "reviewer" }
   | { at: string; kind: "task"; key: string; taskId: string; sessionId: string }
   | { at: string; kind: "stage"; stage: WaveStage; reason: WaveReason | null; detail?: string }
-  /** A queued wave starts: its branch is cut at `base` (after this event), it builds. */
-  | { at: string; kind: "start"; branch: string; base: string }
+  /** A queued wave starts: its branch is on the target's tip `base`, it builds. */
+  | { at: string; kind: "start"; base: string }
   | ({ kind: "gate"; commit?: string } & WaveGate)
   | ({ kind: "review" } & WaveReview)
   | ({ kind: "task_review" } & WaveTaskReview)
@@ -176,6 +176,8 @@ export type FoldedTask = {
 export interface WaveFold extends WaveDeclaration {
   /** The waves it waits for, `[]` when none. */
   after: string[];
+  /** Declared without `after`, or its `start` event came. */
+  started: boolean;
   stage: WaveStage;
   /** Only when `stage` is `blocked`. */
   reason: WaveReason | null;
@@ -185,22 +187,25 @@ export interface WaveFold extends WaveDeclaration {
   reviews: WaveReview[];
   gates: WaveGate[];
   merge: WaveMerge | null;
-  /** The `update` events, oldest first; absent when none. */
-  updates?: WaveUpdate[];
-  /** The `conflict` events, oldest first; absent when none. */
-  conflicts?: WaveConflict[];
-  /** The `task_review` events, oldest first; absent when none. */
-  taskReviews?: WaveTaskReview[];
-  /** How many tasks the wave's reviewer added (`start_fix`); absent when none. */
-  fixes?: number;
-}
-
-/** A wave that has its branch: declared without `after`, or started (`start` event). */
-export type StartedWaveFold = WaveFold & { branch: string; base: string };
-
-/** Whether the wave has its branch (a queued wave gets it when it starts). */
-export function waveStarted(fold: WaveFold): fold is StartedWaveFold {
-  return fold.branch !== null && fold.base !== null;
+  /** The `update` events, oldest first. */
+  updates: WaveUpdate[];
+  /** The `conflict` events, oldest first. */
+  conflicts: WaveConflict[];
+  /** The `task_review` events, oldest first. */
+  taskReviews: WaveTaskReview[];
+  /** How many tasks the wave's reviewer added (`start_fix`). */
+  fixes: number;
+  /**
+   * Whether the wave's review began since it last built (invariant 2): from then on nothing may reach its branch until
+   * `waves.add` makes it build again. A wave blocked or cancelled while it built (a launch failed) has not begun one,
+   * so the merges of its tasks still running land.
+   */
+  reviewBegan: boolean;
+  /**
+   * The commit the wave's `merge_gates` last passed on before its review (the last passed `review` gate), null when
+   * none: its merge runs them again only on another commit (the target moved since).
+   */
+  gatedCommit: string | null;
 }
 
 /** A wave as every client sees it (the contract's shape); the core builds it from the fold and the tasks. */
@@ -228,13 +233,13 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after" | 
   reviews: WaveReview[];
   /**
    * The minor findings of its tasks' reviews (`task`: the task's key), then of its own reviews, oldest first: stored,
-   * they never reject. Always set by the core.
+   * they never reject.
    */
-  minors?: MinorFinding[];
+  minors: MinorFinding[];
   gates: WaveGate[];
   merge: WaveMerge | null;
-  /** What `tasks.update` and `waves.update` changed, oldest first; absent when nothing did. */
-  updates?: WaveUpdate[];
+  /** What `tasks.update` and `waves.update` changed, oldest first. */
+  updates: WaveUpdate[];
   usage: Usage | null;
   actions: string[];
   /** What the agents reported (`feedback.ts`), oldest first; only `waves.get` reads the store. */
@@ -242,16 +247,6 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after" | 
 }
 
 const TASK_KEY = /^[A-Za-z0-9._-]+$/;
-
-/** Takes the wave runner's lock for this process: a `TaskBusyError` while a live runner holds it. */
-export async function lockWave(id: string): Promise<void> {
-  await lockFile(waveLockPath(id), `wave ${id.slice(0, 8)} has a runner`);
-}
-
-/** Removes the wave runner's lock if this process holds it. */
-export async function unlockWave(id: string): Promise<void> {
-  await unlockFile(waveLockPath(id));
-}
 
 // ---- the file ----
 
@@ -335,25 +330,16 @@ export async function removeWave(id: string): Promise<void> {
   for (const path of [waveDir(id), waveLogPath(id), waveLockPath(id), waveLogLockPath(id), wavePokePath(id)]) await rm(path, { recursive: true, force: true });
 }
 
-/**
- * The commit the wave's `merge_gates` last passed on before its review (the `commit` of the last passed `review` gate
- * event), null when none: its merge runs them again only on another commit (the target moved since).
- */
-export function gatedCommit(events: readonly WaveEvent[]): string | null {
-  for (let index = events.length - 1; index >= 0; index--) {
-    const event = events[index];
-    if (event.kind === "gate" && event.phase === "review" && event.passed && event.commit !== undefined) return event.commit;
-  }
-  return null;
-}
-
 // ---- the fold ----
+
+/** Stages that keep what came before them: a wave blocked or cancelled is as far as it was when that happened. */
+const KEEPS_REVIEW: readonly WaveStage[] = ["queued", "building", "blocked", "cancelled"];
 
 /** The wave's state from its declaration and events: a declared wave is `building`, `queued` with `after`. */
 export function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): WaveFold {
   const after = declaration.after ?? [];
   const stage: WaveStage = after.length > 0 ? "queued" : "building";
-  const fold: WaveFold = { ...declaration, after: [...after], stage, reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null };
+  const fold: WaveFold = { ...declaration, after: [...after], started: after.length === 0, stage, reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, updates: [], conflicts: [], taskReviews: [], fixes: 0, reviewBegan: false, gatedCommit: null };
   for (const event of events) {
     switch (event.kind) {
       case "tasks":
@@ -366,7 +352,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
           if (fold.tasks.some((task) => task.key === spec.key)) continue;
           fold.tasks.push({ key: spec.key, title: spec.title, request: spec.request, after: [...spec.after], model: spec.model ?? "big", taskId: null, sessionId: null, id: spec.id });
         }
-        if (event.by === "reviewer") fold.fixes = (fold.fixes ?? 0) + event.tasks.length;
+        if (event.by === "reviewer") fold.fixes += event.tasks.length;
         break;
       case "task": {
         const task = fold.tasks.find((candidate) => candidate.key === event.key);
@@ -389,19 +375,22 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         fold.stage = event.stage;
         fold.reason = event.stage === "blocked" ? event.reason : null;
         fold.detail = event.detail ?? null;
+        if (event.stage === "building") fold.reviewBegan = false;
+        else if (!KEEPS_REVIEW.includes(event.stage)) fold.reviewBegan = true;
         // A launch the runner did not record ended with it (failed, stopped): the task is plainly pending again.
         for (const task of fold.tasks) delete task.launching;
         break;
       case "start":
-        fold.branch = event.branch;
+        fold.started = true;
         fold.base = event.base;
         fold.stage = "building";
         fold.reason = null;
         fold.detail = null;
         break;
       case "gate": {
-        const { kind: _kind, commit: _commit, ...gate } = event;
+        const { kind: _kind, commit, ...gate } = event;
         fold.gates.push(gate);
+        if (gate.phase === "review" && gate.passed && commit !== undefined) fold.gatedCommit = commit;
         break;
       }
       case "review": {
@@ -419,12 +408,12 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         break;
       case "conflict": {
         const { kind: _kind, ...conflict } = event;
-        (fold.conflicts ??= []).push({ ...conflict, files: [...conflict.files] });
+        fold.conflicts.push({ ...conflict, files: [...conflict.files] });
         break;
       }
       case "task_review": {
         const { kind: _kind, ...review } = event;
-        (fold.taskReviews ??= []).push({ ...review, findings: review.findings.map((finding) => ({ ...finding })) });
+        fold.taskReviews.push({ ...review, findings: review.findings.map((finding) => ({ ...finding })) });
         break;
       }
       default:
@@ -464,25 +453,7 @@ function foldUpdate(fold: WaveFold, event: Extract<WaveEvent, { kind: "update" }
       fields.push("model");
     }
   }
-  (fold.updates ??= []).push({ at: event.at, key: event.key ?? null, fields });
-}
-
-/** Stages that keep what came before them: a wave blocked or cancelled is as far as it was when that happened. */
-const KEEPS_REVIEW: readonly WaveStage[] = ["queued", "building", "blocked", "cancelled"];
-
-/**
- * Whether the wave's review began since it last built (invariant 2): from then on nothing may reach its branch until
- * `waves.add` makes it build again. A wave blocked or cancelled while it built (a launch failed) has not begun one, so
- * the merges of its tasks still running land.
- */
-export function reviewBegan(events: readonly WaveEvent[]): boolean {
-  let began = false;
-  for (const event of events) {
-    if (event.kind !== "stage") continue;
-    if (event.stage === "building") began = false;
-    else if (!KEEPS_REVIEW.includes(event.stage)) began = true;
-  }
-  return began;
+  fold.updates.push({ at: event.at, key: event.key ?? null, fields });
 }
 
 // ---- scheduling ----
@@ -566,7 +537,7 @@ export function waveCounts(fold: WaveFold, states: TaskStates): { total: number;
  * title and request, `after` naming keys of the wave (existing or added), no cycle, `model` `"small"` or `"big"` when
  * given (never a concrete model: the wave's settings name those). Gives each a new task id. Throws a `FactoryError` `invalid`.
  */
-export function validateTaskSpecs(raw: unknown, existing: readonly { key: string }[] = []): WaveTaskEntry[] {
+export function validateTaskSpecs(raw: unknown, existing: readonly { key: string; after?: readonly string[] }[] = []): WaveTaskEntry[] {
   const invalid = (message: string) => new FactoryError("invalid", message);
   if (!Array.isArray(raw) || raw.length === 0) throw invalid("tasks must be a non-empty array of {key, title, request, after?, model?}");
   const keys = new Set(existing.map((task) => task.key));
@@ -585,26 +556,27 @@ export function validateTaskSpecs(raw: unknown, existing: readonly { key: string
     keys.add(key);
     specs.push({ key, title, request, after: [...new Set(after as string[])], ...(model === null ? {} : { model: model as ModelSize }), id: crypto.randomUUID() });
   }
-  for (const spec of specs) {
-    for (const name of spec.after) {
-      if (name === spec.key) throw invalid(`task ${spec.key} waits for itself`);
-      if (!keys.has(name)) throw invalid(`task ${spec.key} waits for ${name}, no task of the wave`);
-    }
-  }
-  // Existing tasks wait only for existing ones, so a cycle runs through the added specs alone.
-  const byKey = new Map(specs.map((spec) => [spec.key, spec]));
-  const visiting = new Set<string>();
+  checkTaskGraph([...specs, ...existing]);
+  return specs;
+}
+
+/**
+ * Checks that the wave's tasks wait only for other tasks of the wave and not in a cycle; a cycle is named from the
+ * first of `tasks` in it. Throws a `FactoryError` `invalid`.
+ */
+export function checkTaskGraph(tasks: readonly { key: string; after?: readonly string[] }[]): void {
+  const invalid = (message: string) => new FactoryError("invalid", message);
+  const graph = new Map(tasks.map((task) => [task.key, task.after ?? []]));
   const finished = new Set<string>();
   const visit = (key: string, path: string[]): void => {
     if (finished.has(key)) return;
-    if (visiting.has(key)) throw invalid(`tasks wait for each other in a cycle: ${[...path.slice(path.indexOf(key)), key].join(" -> ")}`);
-    const spec = byKey.get(key);
-    if (spec === undefined) return;
-    visiting.add(key);
-    for (const name of spec.after) visit(name, [...path, key]);
-    visiting.delete(key);
+    if (path.includes(key)) throw invalid(`tasks wait for each other in a cycle: ${[...path.slice(path.indexOf(key)), key].join(" -> ")}`);
+    for (const name of graph.get(key) ?? []) {
+      if (name === key) throw invalid(`task ${key} waits for itself`);
+      if (!graph.has(name)) throw invalid(`task ${key} waits for ${name}, no task of the wave`);
+      visit(name, [...path, key]);
+    }
     finished.add(key);
   };
-  for (const spec of specs) visit(spec.key, []);
-  return specs;
+  for (const key of graph.keys()) visit(key, []);
 }

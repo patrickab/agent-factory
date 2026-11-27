@@ -20,13 +20,14 @@
 import { mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { noticeInputs } from "../core.ts";
-import { FINAL_STATES, WAVE_FINAL_STAGES } from "../core-tasks.ts";
+import { FINAL_STATES } from "../state.ts";
 import { claimNotices, readDelivered } from "../notified.ts";
 import { pendingNotices, scoutNoticeKey, type Notice } from "../notify.ts";
 import { callerKey, scoutDirs, scoutsDir, scoutView, type ScoutView } from "../scouts.ts";
 import { proofsDir, proofsOf } from "../gates-prove.ts";
 import { tasksDir } from "../tasks.ts";
-import { wavePath, wavesDir, type WaveView } from "../waves.ts";
+import { WAVE_FINAL_STAGES, type WaveView } from "../waves.ts";
+import { wavePath, wavesDir } from "../wave-poke.ts";
 
 export interface NotifierOptions {
   /** This Pi session's id: notices of this origin only. */
