@@ -1,11 +1,7 @@
 /**
- * The reviewer child: a read-only Pi that sees the diff only through `read_diff` and answers only through `submit_verdict`.
- *
- * - `runReviewer`: one launch, used by a task's own review (`runReview`) and by a wave's reviewer session
- *   (`review-each.ts`). The diff goes as JSON into a file named in `REVIEW_DIFF_ENV`; `pi/reviewer-tool.ts` answers
- *   `read_diff` from it (`readDiffText`)
- * - The pure parts: the patch text, the findings check and the reading of the child's `--mode json` stdout
- * - The reviewer has no time limit: it runs until it answers or is cancelled (`cancelled`, `tasks.cancel`)
+ * The reviewer child: a read-only Pi that sees the diff only through `read_diff` and answers only through
+ * `submit_verdict`. One launch per review (`runReviewer`), for a task's own review and a wave's reviewer session.
+ * - The reviewer has no time limit: it runs until it answers or is cancelled
  */
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";

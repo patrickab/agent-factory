@@ -1,15 +1,10 @@
 /**
- * The core's task actions (`tasks.*` but `tasks.wait`, `core.ts` maps them) and the task as clients see it
- * (`TaskView`).
- *
- * - Reads a task's session file for its state, settings, usage (assistant messages plus recorded reviews), outcome
- *   and timeline (by byte offset, so a client polls with `next`)
+ * The core's task actions (`tasks.*` but `tasks.wait`) and the task as clients see it (`TaskView`), read from the
+ * task's session file.
  * - One check per task action (`refusal`): the handlers throw it, `TaskView.actions` lists the actions without one
- * - A task that checks its state and then acts on it holds the task lock (`tasks.ts`) from the check on; a runner it
- *   spawns takes the lock over until it exits. `cancel` stops a live runner first: two Pi processes never share a session
- * - A task of a wave is continued only while its wave builds (invariant 2), a done one its wave counts on is not
- *   removed, and a task outside a wave never targets an open wave's branch (invariant 13); after an action that runs a
- *   wave's task again its wave's runner is poked
+ * - `cancel` stops a live runner first: two Pi processes never share a session
+ * - A task of a wave is continued only while its wave builds (invariant 2); a task outside a wave never targets an
+ *   open wave's branch (invariant 13)
  */
 import { existsSync } from "node:fs";
 import { readFile, stat, truncate } from "node:fs/promises";
@@ -29,13 +24,13 @@ import {
   type RunnerEnv,
   type UnmergedWork,
 } from "./launch.ts";
-import { inboxReadPath, readFactoryStates, sessionFilePath, taskMainBranch } from "./runner.ts";
+import { inboxReadPath, readFactoryStates, sessionEntries, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { runCommand } from "./run.ts";
 import { requireModels } from "./models.ts";
 import { checkSettings, factoryHome, loadSettings, resolveSettings } from "./settings.ts";
 import { COMMIT_ASK_TYPE, FACTORY_TURN_STATES, FINAL_STATES, isFactoryPrompt, messageText, minorFindings, rebuild, RESTING_STATES, type EntryData, type EntryType, type Finding, type GateData, type MergeData, type MinorFinding, type ReviewData, type Settings, type State, type StateData } from "./state.ts";
 import { listTasks, lockTask, tagInGroup, taskLogPath, unlockTask, type TaskRecord } from "./tasks.ts";
-import { addUsage, cents, FactoryError, isRecord, jsonLines, piUsage, readJsonl, short, writeAtomic, type Usage } from "./util.ts";
+import { addUsage, cents, FactoryError, isRecord, jsonLines, piUsage, short, writeAtomic, type Usage } from "./util.ts";
 import { foldWave, listWaves, readWave, WAVE_FINAL_STAGES, type WaveStage } from "./waves.ts";
 import { pokeWave } from "./wave-poke.ts";
 import { cancelScouts, scoutUsage } from "./scouts.ts";
@@ -238,8 +233,12 @@ function summaryCachePath(sessionPath: string): string {
   return join(factoryHome(), "cache", "sessions", `${basename(sessionPath)}.json`);
 }
 
-/** Summaries read in this process, by session path, with the file's size and mtime: a poll parses only what changed. */
+/**
+ * Summaries read in this process, by session path, with the file's size and mtime: a poll parses only what changed. At
+ * most `MAX_SUMMARIES`, the least recently stored go first: a long-lived host lists tasks for months.
+ */
 const summaries = new Map<string, { size: number; mtimeMs: number; summary: SessionSummary }>();
+const MAX_SUMMARIES = 500;
 
 /**
  * The summary of the session file `sessionPath` (none: empty), parsed again only when its size or mtime changed. A
@@ -256,8 +255,10 @@ async function sessionSummary(sessionPath: string | null): Promise<SessionSummar
     const cached: unknown = await readFile(cachePath, "utf8").then(JSON.parse, () => null).catch(() => null);
     if (isRecord(cached) && cached.size === file.size && cached.mtimeMs === file.mtimeMs && isRecord(cached.summary)) return cached.summary as unknown as SessionSummary;
   }
-  const summary = summarize(await readJsonl(sessionPath));
+  const summary = summarize(await sessionEntries(sessionPath));
   if (file === null) return summary;
+  summaries.delete(sessionPath);
+  if (summaries.size >= MAX_SUMMARIES) summaries.delete(summaries.keys().next().value as string);
   summaries.set(sessionPath, { size: file.size, mtimeMs: file.mtimeMs, summary });
   if (summary.last !== null && FINAL_STATES.includes(summary.last.state)) {
     // Only a cache: on a failure the next listing reads the session again.
@@ -509,10 +510,14 @@ export async function cancelTask(record: TaskRecord, env: RunnerEnv | undefined)
   if (sent?.interrupted) await requireRunnerStarted(record, sent.statesBefore);
 }
 
-/** What removing the task would drop; refused (detail `force`) without `force` when that is anything. */
-export async function droppedWork(record: TaskRecord, force: boolean): Promise<string | null> {
+/**
+ * What removing the task would drop; refused (detail `force`) without `force` when that is anything. `landed`: its
+ * commits are merged whatever its branch holds (a done task of a merged wave: squashed or rebased, they are copies there).
+ */
+export async function droppedWork(record: TaskRecord, force: boolean, landed = false): Promise<string | null> {
   const target = await taskMainBranch(record.sessionDir, record.sessionId);
   const work = await unmergedWork(record, target);
+  if (landed) work.commits = 0;
   const dropsWork = work.commits > 0 || work.dirty;
   if (dropsWork && !force) {
     const changes = work.dirty ? " and uncommitted changes in its worktree" : "";
@@ -643,10 +648,9 @@ export const TASK_HANDLERS = {
     if (text === undefined) throw new FactoryError("invalid", "tasks.message needs a text that is not empty");
     await requireAction(record, await taskView(record), "tasks.message");
     // `messageTask` takes the task lock itself (resting) or appends to the live runner's inbox (running).
-    const deliver = () => messageTask(record, text, env);
-    await deliver();
+    await messageTask(record, text, env);
     // A runner that ended as the line was appended never sends it: take it back and start a runner with it.
-    if ((await liveRunners(record)).length === 0 && (await withdrawUnsentLine(record, text))) await deliver();
+    if ((await liveRunners(record)).length === 0 && (await withdrawUnsentLine(record, text))) await messageTask(record, text, env);
     await pokeWaveOf(record, env);
     return taskView(record);
   },

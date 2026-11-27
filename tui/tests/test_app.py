@@ -40,7 +40,6 @@ def wave(id, tag, done, total, stage="building", cost=1.0, **extra):
         "reviews": [],
         "gates": [],
         "merge": None,
-        "remote": None,
         "usage": usage(cost),
         "actions": [],
         **extra,

@@ -1,38 +1,10 @@
 /**
- * The detached process that holds a factory task's Pi session for one message, then lets Pi end.
- *
- * `bun runner.ts <worktree> <sessionDir> <sessionId> <inboxPath> <message>`
- *
- * - Spawns `pi --mode rpc --session-dir <sessionDir> --session-id <sessionId>` in the worktree (Pi loads the
- *   agent-factory Pi package by itself; with `CODER_EXTENSIONS_ENV`, the repository's `extensions` setting, it starts
- *   with `-ne`, the factory's plugin and one `-e` per entry), with `TASK_SESSION_ENV=1`, and sends `message` as the prompt. For
- *   `/factory start` with a coder model, Pi starts on it (`--model`, `piArgs`): a model set later in the session fires
- *   `model_select`, on which a user's extension may persist it into the worktree's `.pi/settings.json`
- * - Closes Pi's stdin once Pi answered the prompt, no agent run is active (`agent_start` .. `agent_settled`), no inbox
- *   line is unsent or unanswered and the task rests (`RESTING_STATES`). `/factory approve`, `/factory retry`,
- *   `/factory reviewed` and a plain
- *   message start at rest, so for them the task must first have left that rest: a `factory-state` entry written after
- *   the runner started. A `factory: ...` error notify before the answer means the command refused and changed nothing:
- *   stdin closes once no run is active. The merge runs after the settle, so the check repeats on every event and every
- *   `CHECK_INTERVAL_MS`
- * - A `/` command Pi did not handle (disposition other than `handled`: the factory plugin is not loaded, so the text
- *   went to the model) is refused: the runner sends `abort`, closes stdin and exits 1. A plain message (sent with
- *   `streamingBehavior: "followUp"`) may be `started` or `queued`, but once its run settled without a new
- *   `factory-state` entry the plugin is not loaded: refused the same way
- * - Inbox (`inboxPath`, one JSON `{"text"}` per line, appended by `messageTask`): polled every `INBOX_POLL_MS`; each
- *   new complete line goes to Pi as a prompt with `streamingBehavior: "followUp"` while the task's run is active and
- *   running, or while no run is active and the task rests after the command left its rest; never while it merges.
- *   How far it was sent is stored in `<inboxPath>.read` before the send: no line goes out twice. Lines that came
- *   after stdin closed: once Pi has exited with the task at rest, the runner starts its successor with the first of
- *   them as the message (the rest follow from the inbox) and hands it the task lock
- * - A dialog an extension opens (`select`, `confirm`, `input`, `editor`) is answered as cancelled: nobody is there
- * - `FACTORY_TASK_LOCK`: the task lock (`tasks.ts`) handed to this runner, removed when it exits if it still names it
- * - `FACTORY_TASK_WAVE` (a wave's task): when the runner ends with the task at rest it pokes that wave (`pokeWave`),
- *   whose runner then looks at its tasks again. Pi does not get the variable
- * - Contracts (`contracts.ts`): before a coder turn it starts (a plain message, an inbox line) and when a coder run
- *   begins, `contractCheck`: the follow-ups of changed contracts go with that message, or to the run as a follow-up
- * - SIGTERM/SIGINT: closes Pi's stdin and kills Pi after `KILL_GRACE_MS`. Exit code = Pi's; 1 when Pi exited before it
- *   answered the prompt or refused it
+ * The detached process that holds a task's Pi session (`pi --mode rpc`) for one message, then lets Pi end:
+ * `bun runner.ts <worktree> <sessionDir> <sessionId> <inboxPath> <message>`.
+ * - Closes Pi's stdin once Pi answered, no run is active, no inbox line is unsent and the task rests after it left its
+ *   rest (a command or message starts at rest). A `/` command or message the factory plugin did not handle is refused
+ * - Inbox lines go to Pi as follow-ups; how far it was sent is stored before the send, so no line goes out twice. Lines
+ *   that came after stdin closed start a successor runner, which gets the task lock
  * - Imports nothing outside node built-ins and the plain plugin modules: the deployed plugin has no `node_modules`
  */
 import { spawn } from "node:child_process";
@@ -41,7 +13,7 @@ import { join } from "node:path";
 import { contractCheck } from "./contracts.ts";
 import { rebuild, RESTING_STATES, type StateData } from "./state.ts";
 import { handLockFile, unlockFile } from "./tasks.ts";
-import { errorText, ifMissing, isRecord, readJsonl, writeAtomic } from "./util.ts";
+import { errorText, ifMissing, isRecord, jsonLines, writeAtomic } from "./util.ts";
 import { pokeWave, TASK_WAVE_ENV } from "./wave-poke.ts";
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
@@ -63,21 +35,27 @@ export async function sessionFilePath(sessionDir: string, sessionId: string): Pr
   return name === undefined ? undefined : join(sessionDir, name);
 }
 
-/** The session file's entries so far, none before the file exists. A torn line is skipped. */
-export async function sessionEntries(sessionDir: string, sessionId: string): Promise<Record<string, unknown>[]> {
-  const path = await sessionFilePath(sessionDir, sessionId);
-  return path === undefined ? [] : readJsonl(path);
+/**
+ * The entries of the session file at `path` (none: none), only the `custom` ones of `customType` when given. A torn line
+ * is skipped. With `customType` a line is parsed only if it holds the type's name: most of a session is tool output, and
+ * every state read would parse all of it.
+ */
+export async function sessionEntries(path: string | undefined, customType?: string): Promise<Record<string, unknown>[]> {
+  const text = path === undefined ? "" : await ifMissing(readFile(path, "utf8"), "");
+  if (customType === undefined) return jsonLines(text);
+  const lines = text.split("\n").filter((line) => line.includes(`"${customType}"`));
+  return jsonLines(lines.join("\n")).filter((entry) => entry.type === "custom" && entry.customType === customType);
 }
 
 /** The `factory-state` entries of the session file so far: how many, and the data of the last one. */
 export async function readFactoryStates(sessionDir: string, sessionId: string): Promise<{ count: number; last: StateData | undefined }> {
-  const states = (await sessionEntries(sessionDir, sessionId)).filter((entry) => entry.type === "custom" && entry.customType === "factory-state");
+  const states = await sessionEntries(await sessionFilePath(sessionDir, sessionId), "factory-state");
   return { count: states.length, last: states.at(-1)?.data as StateData | undefined };
 }
 
 /** The branch the task merges into (`Task.mainBranch`), `undefined` before its `factory-task` entry is written. */
 export async function taskMainBranch(sessionDir: string, sessionId: string): Promise<string | undefined> {
-  return rebuild(await sessionEntries(sessionDir, sessionId))?.task.mainBranch;
+  return rebuild(await sessionEntries(await sessionFilePath(sessionDir, sessionId), "factory-task"))?.task.mainBranch;
 }
 
 /** The data of the last `factory-state` entry of the session file, `undefined` before the first. */

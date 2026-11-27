@@ -42,6 +42,21 @@ describe("task reads", () => {
     });
   });
 
+  test("tasks.timeline reads from since on; a torn last line is read once it is whole", async () => {
+    const record = fakeRecord(ID_1, "/r");
+    await writeTask(record);
+    const path = writeSession(record, sessionEntries);
+    const timeline = (since: number) => callAction("tasks.timeline", { id: ID_1, since }) as Promise<{ entries: TimelineEntry[]; next: number }>;
+    const first = await timeline(0);
+    expect([first.entries.at(-1)?.kind, first.next]).toEqual(["state", readFileSync(path).length]);
+    const merge = { type: "custom", customType: "factory-merge", timestamp: "t11", data: { ok: true, commit: "c", error: null, depsSynced: false } };
+    const torn = JSON.stringify({ ...merge, timestamp: "t12" });
+    appendFileSync(path, `${JSON.stringify(merge)}\n${torn.slice(0, 10)}`);
+    const second = await timeline(first.next);
+    expect(second.entries).toEqual([{ at: "t11", kind: "merge", data: merge.data }]);
+    appendFileSync(path, `${torn.slice(10)}\n`);
+    expect(await timeline(second.next)).toEqual({ entries: [{ at: "t12", kind: "merge", data: merge.data }], next: readFileSync(path).length });
+  });
 });
 
 describe("task actions", () => {

@@ -1,14 +1,9 @@
 /**
  * Commands of the pipeline (hooks, gates, git, the reviewer child), each in its own process group.
- *
- * - Consumes an argv and a cwd
- * - Provides `CommandRunner`: `run` starts commands that `cancel()` kills as whole groups, `cleanup` starts the ones a
- *   cancel must not stop; `runCommand` runs one outside any `CommandRunner`
  * - Memory per command is bounded: the end of the output, and stdout only as far as the caller asks for it
  * - `pi.exec` is not used: it reports a killed command as exit 0 and kills only the direct child
- * - A command never inherits the runners' `FACTORY_TASK_SESSION`, `FACTORY_TASK_LOCK` and `FACTORY_TASK_WAVE`
- *   (`commandEnv`): a gate that runs the factory's own tests must not see itself as a task session,
- *   a lock holder or a wave's task
+ * - A command never inherits the runners' private env (`commandEnv`): a gate that runs the factory's own tests must
+ *   not see itself as a task session, a lock holder or a wave's task
  */
 import { spawn } from "node:child_process";
 

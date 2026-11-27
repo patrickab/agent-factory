@@ -25,6 +25,11 @@ export class FactoryError extends Error {
   }
 }
 
+/** Whether `error` is the `busy` FactoryError: another holds the lock. */
+export function isBusy(error: unknown): boolean {
+  return error instanceof FactoryError && error.code === "busy";
+}
+
 export function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

@@ -1,12 +1,8 @@
 /**
  * `bun scout-runner.ts <scout dir>`: one scout's detached runner (`scouts.ts` spawns it).
- *
- * - Queues while `SCOUT_LIMIT` scouts of its caller run (the caller's `queue.lock` around the count and the `running`
- *   event), then runs `pi -p` in the caller's working directory on the scout's model with the tools `read`, `grep`,
- *   `find`, `ls` and `map_write` (the extension `pi/scout-map-write.ts`), no other extension, skill or template
+ * - Queues while `SCOUT_LIMIT` scouts of its caller run, then runs `pi -p` with read-only tools and `map_write`, no
+ *   other extension, skill or template
  * - Every assistant message appends the running usage totals: a killed scout's cost stays in its record
- * - The last assistant text is the report (`report.md`), the scout `done`; a failed child `failed`. A cancel (the
- *   `cancelled` event, then SIGTERM to the runner's group, the child in it) ends it without a report
  * - Imports only Bun, `node:` and plain plugin modules
  */
 import { writeFile } from "node:fs/promises";

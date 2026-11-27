@@ -1,12 +1,8 @@
 /**
  * The merge queue of a repository: who may run the merge gates and move the target next. Shared by every task of the
- * repository, each in its own Pi process, through files in its git directory (`<git common dir>/factory-merge-queue`).
- *
- * - `joinQueue` writes a ticket named `<time>-<pid>-<start time>-<random>`: first come, first served
- * - `queueAhead` is how many live tickets are older than one's own. 0 means it is the ticket's turn. A ticket whose
- *   owner process no longer runs (a crashed session) is removed on the way: the pid and its start time must match,
- *   which also catches a reused pid (`procAlive`)
- * - `leaveQueue` removes a ticket. A merge leaves when it merged, failed, conflicted or was cancelled
+ * repository, each in its own process, through ticket files in its git directory: first come, first served.
+ * - A ticket whose owner no longer runs is removed on the way: pid and start time must match (`procAlive`), which
+ *   also catches a reused pid
  */
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";

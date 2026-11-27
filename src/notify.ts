@@ -1,35 +1,9 @@
 /**
- * Notifications (invariant 9): what the factory tells the Pi session that started a task or declared a wave, without
- * being asked, when it needs the supervisor or a wave merged. Pure: no I/O. Delivery is `notified.ts` and the Pi
- * extension (`pi/notifier.ts`).
- *
- * - `pendingNotices(tasks, waves, delivered, looked)`: one `Notice` per event not in `delivered`, only for an `origin` (a task or
- *   wave declared without a Pi session gets none: `tasks.wait` is the way there)
- * - Task events: `waiting_answer`, `blocked`, `interrupted`, `waiting_approve`; only for a task outside a wave, or a
- *   wave's task while its wave builds (past `building` the wave's own notice covers it). A task interrupted while its
- *   wave is interrupted gets none: the wave's notice names it and says `waves.retry` retries it
- * - Wave events: `rejected`, `blocked`, `waiting_approve`, `interrupted`, `unreachable` (building with tasks that can
- *   never start, nothing else moving it), `never` (queued after a wave that was cancelled), `merged`. A queued wave
- *   that can still start says nothing
- * - A feature's notices (`feature.ts`) come from its module, from the items `looked` holds under its name
- * - Gate proof events (`feature-gates.ts`): `passed`, `flaky`, `failing`, `interrupted`; key `proof:<id>:<event>`
- * - `contract` events (`contracts.apply` changed a contract the wave's done tasks worked by): one notice each, key
- *   `wave:<id>:contract:<index of the event>`
- * - The wave's reviewer (`pi/reviewer-tool.ts`): one notice per `note` event (`notify_supervisor`), key
- *   `wave:<id>:note:<index>`, and per `tasks` event `by: "reviewer"` (`start_fix`), key `wave:<id>:fix:<index>`; both
- *   information (a `quiet` card), not a question
- * - `key` = `<task|wave>:<id>:<event>:<n>`. A task's n is its round, with the state entry's time after `@`: a coder may
- *   ask twice in one round. A wave's n is the index of its last `stage` event in the log for a stage; for
- *   `interrupted`, which no stage event marks, the count of its events up to the last one a runner wrote (the log's
- *   length but for the supervisor's `update` and `contract` events after it: they change nothing about the interruption); for `unreachable` the keys of the tasks that can
- *   never start (`unreachableTasks`), not the log's length: the runner's `building` event naming them lands after the
- *   task state that made them so, and must not make the same event a second one (invariant 12); for `never` the waves
- *   it waits for: it can never start only once
- * - `card` (`cards.ts`): title `<what happened>`; tone `attention` for every task and wave event but `merged`, `quiet`
- *   for that and a contract change. `text`: `factory: ` and the card's text (`notice`)
- * - Scouts a session started (`feature-scouts.ts`, caller `session`): one notice when the scout ended (`done`, `failed`, `cancelled`,
- *   interrupted), key `scout:<id>:report` (`scoutNoticeKey`), its report and the report's path. A call that waited for
- *   the report claims the same key
+ * Notifications: what the factory tells the Pi session that started a task or declared a wave, without being asked.
+ * Pure: no I/O. Delivery is `notified.ts` and `pi/notifier.ts`.
+ * - A key names one event: the same event never gets a second key, a new one always does (a coder may ask twice)
+ * - A wave's task notifies only while its wave builds; past `building`, and while the wave is interrupted, the wave's
+ *   notice covers it
  */
 import { card, contractCard, present, taskCard, unreachableTasks, waveCard, type FactoryCard } from "./cards.ts";
 import type { TaskView } from "./core.ts";
@@ -85,6 +59,7 @@ export function waveNotice({ view, events }: NoticeWave, origin: string, interru
   if (view.interrupted) {
     [event, n, what] = ["interrupted", events.findLastIndex((entry) => !SUPERVISOR_EVENTS.includes(entry.kind)) + 1, "was interrupted"];
   } else if (view.stage === "building" && view.stuck) {
+    // The keys, not a log index: the runner's `stage` event naming them lands after the task state that made them so.
     [event, n, what] = ["unreachable", unreachableTasks(view.tasks).join(","), "has tasks that can never start"];
   } else if (view.stage === "queued" && view.stuck) {
     // Not the stage event's index: the core may judge it stuck before its `queued` event saying why lands.

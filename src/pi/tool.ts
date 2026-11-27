@@ -1,16 +1,10 @@
 /**
- * The `factory` tool in Pi: every core action (`core.ts`) for an agent, one tool call per action. Its name, description
- * and schema come from `factory-tool.ts`, which the MCP server (`mcp.ts`) shares.
- *
- * - Provides `registerFactoryTool` (sequential: one call at a time): the answer is the agent view (`agent-view.ts`) as
- *   text, `details` `{result: the full view, card}` (contract `cards`); every failure is an `isError` result, the
- *   agent view's one line (`agentError`), without details
- * - In a task session (`isTaskSession`: Pi started by the runner, or a session holding a `factory-task` entry) only the
- *   actions with `mutates: false` are offered; a mutating one answers as unknown. A task's coder starts a task only
- *   through `factory_new_task` (`followup.ts`)
- * - `scouts.start` takes the `scout` tool's path (`scout-tool.ts`): its report reaches the session once
+ * The `factory` tool in Pi: every core action for an agent, one tool call per action. Its name, description, schema
+ * and answer come from `factory-tool.ts`, which the MCP server shares.
+ * - Sequential: one call at a time. Every failure is an `isError` result without details
+ * - In a task session only the actions with `mutates: false` are offered: a coder starts a task only through
+ *   `factory_new_task` (`followup.ts`)
  * - A call passes the session's id as `origin`: `tasks.start` and `waves.start` record it, notifications go there
- * - Drawn in the TUI as its card (`cards-tui.ts`), the agent's text with the session's switch
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { actionView, callFactoryTool, FACTORY_TOOL_DESCRIPTION, FACTORY_TOOL_NAME, factoryToolError, factoryToolParameters } from "../factory-tool.ts";

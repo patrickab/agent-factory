@@ -1,16 +1,9 @@
 /**
  * Contracts: memory-store facts a wave's tasks work by (`<store>/run/contract/<name>/<fact>`, or one document
- * `<store>/run/contract/<name>.md`), the store being the wave's `plan`.
- *
- * - Reads them through the `memory-store` CLI (`ls`, `read --no-ids`): `contractKind`, `readContract` (fact path ->
- *   text, subdirectories included), `stampOf` (sha256 of the whole and of each fact)
- * - `contractsForLaunch`: what a task's launch needs, the prefix of the coder's first message (each contract's name and
- *   the command that reads it) and the stamps the task record keeps
- * - `contractNote`: the follow-up of a changed contract (contract, fact, old text, new text, "your contract changed")
- * - `contractCheck`: the task runner's look before a coder turn: the notes `contracts.apply` left on the record, plus a
- *   note for every fact whose hash differs from the stored stamp (a direct edit of the store); stores the new stamps
- * - `withContractsLock`: one lock (`<factory home>/contracts.lock`) around an apply and every check, so a change is
- *   announced once
+ * `<store>/run/contract/<name>.md`), the store being the wave's `plan`, read through the `memory-store` CLI.
+ * - A task's record keeps a stamp (sha256) per fact; `contractCheck` before a coder turn notes every fact whose hash
+ *   differs (a direct edit of the store) besides the notes `contracts.apply` left
+ * - `withContractsLock` around an apply and every check, so a change is announced once
  * - Imports only Bun, `node:` and plain plugin modules: the task runner loads it
  */
 import { createHash } from "node:crypto";
@@ -141,7 +134,6 @@ export async function contractsForLaunch(store: string, names: readonly string[]
 /** One fact's change: its old text (undefined: not known, null: none) and its new one (null: gone). */
 export type FactChange = { path: string; old: string | null | undefined; new: string | null };
 
-/** The follow-up of a changed contract. */
 export function contractNote(name: string, changes: readonly FactChange[]): string {
   const facts = changes.map((change) => {
     const old = change.old === undefined ? "(not known: the store was edited directly)" : (change.old ?? "(none)");

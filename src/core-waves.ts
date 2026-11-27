@@ -1,13 +1,9 @@
 /**
- * The core's wave actions (`waves.*`, `core.ts` maps them), the wave as clients see it, and what the wave's runner
- * (`wave-runner.ts`), the plugin and the notifier ask of the core about waves.
- *
- * - Build on `waves.ts` (the log and its fold) and `wave-poke.ts` (the runner): a stage change is a compare-and-append
- *   on the log, then a poke; `WaveView.actions` holds the same predicates
+ * The core's wave actions (`waves.*`), the wave as clients see it, and what the wave's runner, the plugin and the
+ * notifier ask of the core about waves.
+ * - A stage change is a compare-and-append on the log (`waves.ts`), then a poke; `WaveView.actions` holds the same
+ *   predicates
  * - `waves.start` declares a wave in full or not at all: a step that fails leaves no branch, no record, no task
- * - `startWaveTasks` is the scheduler the wave's runner calls; `sessionWave` keeps a task's commits off a wave's
- *   branch once its review began (invariant 2)
- * - `noticeInputs`: the tasks and waves a Pi session started, for its notifications (`notify.ts`)
  */
 import { existsSync } from "node:fs";
 import { realpath, rm } from "node:fs/promises";
@@ -24,7 +20,7 @@ import { requireModels } from "./models.ts";
 import { checkSettings, loadSettings, registeredRepos, resolveSettings, type ModelSize, type StoredSettings } from "./settings.ts";
 import { FINAL_STATES, minorFindings, type MinorFinding } from "./state.ts";
 import { listTasks, sessionTask, tagInGroup, type TaskRecord } from "./tasks.ts";
-import { addUsage, cents, errorText, FactoryError, short, type Usage } from "./util.ts";
+import { addUsage, cents, errorText, FactoryError, isBusy, short, type Usage } from "./util.ts";
 import {
   appendWaveEvent,
   appendWaveEvents,
@@ -240,14 +236,14 @@ export async function pokeQueuedAfter(id: string, env?: RunnerEnv): Promise<stri
 }
 
 /**
- * The wave as clients see it: its fold, its tasks' states and usage, whether its runner lives. `all`: every wave, read
- * already (else they are read); `read`: a listing's shared reads.
+ * The wave `id` as clients see it: its fold, its tasks' states and usage, whether its runner lives. `all`: every wave,
+ * read already (else they are read); `read`: a listing's shared reads.
  */
-export async function lookWave(given: WaveFile, all?: readonly WaveFile[], read: ListingReads = {}): Promise<WaveLook> {
+export async function lookWave(id: string, all?: readonly WaveFile[], read: ListingReads = {}): Promise<WaveLook> {
   // Liveness before the log: a runner writes its last stage before it exits, so the log read after a dead runner is its
-  // last one. The caller's copy was read before, and a runner that wrote `merged` and exited since would look interrupted.
-  const runners = await liveWaveRunners(given.declaration.id);
-  const file = await readWave(given.declaration.id);
+  // last one. A copy read before, by a runner that wrote `merged` and exited since, would look interrupted.
+  const runners = await liveWaveRunners(id);
+  const file = await readWave(id);
   const full = foldWave(file.declaration, file.events);
   const { overrides: _overrides, base: _base, contracts: _contracts, conflicts: _conflicts, taskReviews: _taskReviews, fixes: _fixes, reviewBegan: _began, gatedCommit: _gated, started: _started, ...fold } = full;
   const { states, views } = await waveTaskViews(full, read);
@@ -301,7 +297,7 @@ export async function noticeInputs(
   const all = await listWaves();
   const files = all.filter((file) => file.declaration.origin === origin && !skip.waves?.has(file.declaration.id));
   const tasks = await Promise.all(records.map((record) => taskView(record)));
-  const waves = await Promise.all(files.map((file) => lookWave(file, all)));
+  const waves = await Promise.all(files.map((file) => lookWave(file.declaration.id, all)));
   return { tasks, waves };
 }
 
@@ -537,7 +533,7 @@ export const WAVE_HANDLERS = {
       await undoWaveStart(declaration).catch(() => undefined);
       throw error;
     }
-    return { wave: (await lookWave(await readWave(declaration.id))).view };
+    return { wave: (await lookWave(declaration.id)).view };
   },
 
   "waves.add": async (params, { env }) => {
@@ -564,12 +560,12 @@ export const WAVE_HANDLERS = {
       return events;
     });
     await pokeWaveRunner(id, env);
-    return { wave: (await lookWave(await readWave(id))).view };
+    return { wave: (await lookWave(id)).view };
   },
 
   "waves.get": async (params) => {
     const file = await findWave(params.id);
-    const { view } = await lookWave(file);
+    const { view } = await lookWave(file.declaration.id);
     return { wave: { ...view, feedback: await waveFeedback(file.declaration.plan, view.id) } };
   },
 
@@ -589,12 +585,14 @@ export const WAVE_HANDLERS = {
     if (files.length === 0) return { waves: [] };
     // One read of the task records for every wave, not one per wave and task.
     const read: ListingReads = { records: new Map((await listTasks()).map((record) => [record.id, record])) };
-    return { waves: await Promise.all(files.map(async (file) => (await lookWave(file, all, read)).view)) };
+    // A wave removed since the listing is left out.
+    const looks = await Promise.all(files.map((file) => lookWave(file.declaration.id, all, read).catch((error: unknown) => (error instanceof FactoryError && error.code === "not_found" ? null : Promise.reject(error)))));
+    return { waves: looks.flatMap((look) => (look === null ? [] : [look.view])) };
   },
 
   "waves.retry": async (params, { env }) => {
     const file = await findWave(params.id);
-    const { view } = await lookWave(file);
+    const { view } = await lookWave(file.declaration.id);
     const { id } = view;
     if (!view.actions.includes("waves.retry")) throw new FactoryError("refused", `wave ${short(id)} is ${waveStageText(view)}, retry needs blocked or interrupted`);
     // Blocked with tasks not started or not finished (a launch failed): build again, the runner starts them. Blocked
@@ -625,14 +623,14 @@ export const WAVE_HANDLERS = {
     const retried = outcomes.filter((outcome) => outcome.why === null).map((outcome) => outcome.id);
     const refused = outcomes.flatMap((outcome) => (outcome.why === null ? [] : [{ id: outcome.id, why: outcome.why }]));
     await pokeWaveRunner(id, env);
-    return { wave: (await lookWave(await readWave(id))).view, retried, refused };
+    return { wave: (await lookWave(id)).view, retried, refused };
   },
 
   "waves.approve": async (params, { env }) => {
     const { id } = (await findWave(params.id)).declaration;
     await moveWave(id, "waiting_approve", "merging", "approve needs waiting_approve");
     await pokeWaveRunner(id, env);
-    return { wave: (await lookWave(await readWave(id))).view };
+    return { wave: (await lookWave(id)).view };
   },
 
   "waves.cancel": async (params, { env }) => {
@@ -666,7 +664,7 @@ export const WAVE_HANDLERS = {
       failures.push(`its branch ${fold.branch}: ${oneLine(errorText(error))}`);
     }
     if (failures.length > 0) throw new FactoryError("failed", `wave ${short(id)} is cancelled, but cleaning up after it failed (${failures.join("; ")}); cancel its tasks with tasks.cancel, put its branch back by hand`);
-    return { wave: (await lookWave(await readWave(id))).view };
+    return { wave: (await lookWave(id)).view };
   },
 
   "waves.remove": async (params) => {
@@ -677,7 +675,7 @@ export const WAVE_HANDLERS = {
     try {
       await lockWave(id);
     } catch (error) {
-      if (error instanceof FactoryError && error.code === "busy") throw new FactoryError("refused", `wave ${shown} has a runner, cancel it first`);
+      if (isBusy(error)) throw new FactoryError("refused", `wave ${shown} has a runner, cancel it first`);
       throw error;
     }
     try {
@@ -694,8 +692,9 @@ export const WAVE_HANDLERS = {
       // Every refusal before anything is deleted.
       for (const record of records) {
         try {
-          requireRemovable(await taskView(record));
-          await droppedWork(record, params.force === true);
+          const view = await taskView(record);
+          requireRemovable(view);
+          await droppedWork(record, params.force === true, stage === "merged" && view.state === "done");
         } catch (error) {
           if (error instanceof FactoryError) throw new FactoryError(error.code, `wave ${shown}: ${error.message}`, error.detail);
           throw error;
@@ -713,8 +712,8 @@ export const WAVE_HANDLERS = {
         await withTaskLock(
           record,
           async (view) => requireRemovable(view),
-          async () => {
-            await droppedWork(record, params.force === true);
+          async (view) => {
+            await droppedWork(record, params.force === true, stage === "merged" && view.state === "done");
             await deleteTask(record);
           },
         );

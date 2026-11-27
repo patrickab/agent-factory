@@ -1,17 +1,10 @@
 /**
- * The `scout` tool for supervisor sessions and coders: `scouts.start` (`core-scouts.ts`) with the caller's choice to
- * wait. Never registered in a scout's own child (`FACTORY_SCOUT_ID`): a scout starts no scout.
- *
- * - `wait: true`: the call returns the report, after 15 minutes at the latest (`FACTORY_SCOUT_WAIT_MS`) with what the
- *   scout wrote so far; the report then follows as for `wait: false`
- * - `wait: false`: the call returns the scout's id at once. A coder's report is owed to it: `held` (its
- *   `agent_before_settle`) waits until every owed scout ended and answers their reports as follow-up messages, so the
- *   coder's turn does not end before its scouts reported. A supervisor's report is a factory report (`notify.ts`,
- *   `pi/notifier.ts`): its text and the report's path
- * - One report per scout: a coder's owed scouts live in this session's memory and leave it with their report; a
- *   supervisor's waited call and the notifier claim the same key (`scoutNoticeKey`, `notified.ts`), and the notifier
- *   skips the scouts a call waits for (`waiting`)
- * - The `factory` tool's `scouts.start` takes the same path (`call`)
+ * The `scout` tool for supervisor sessions and coders: `scouts.start` with the caller's choice to wait. Never
+ * registered in a scout's own child (`FACTORY_SCOUT_ID`): a scout starts no scout.
+ * - A coder's report is owed to it: `held` (its `agent_before_settle`) waits until every owed scout ended, so the
+ *   coder's turn does not end before its scouts reported. A supervisor's report is a factory notice
+ * - One report per scout: a waited call and the notifier claim the same key (`scoutNoticeKey`), and the notifier skips
+ *   the scouts a call waits for
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -148,18 +141,28 @@ export function registerScoutTool(pi: ExtensionAPI, tracker: ScoutTracker, revie
   if (process.env[SCOUT_ID_ENV] !== undefined) return;
   const { properties, required } = ACTIONS["scouts.start"].params as { properties: Record<string, unknown>; required: string[] };
   const { wait: _wait, repo: _repo, ...reviewProperties } = properties;
+  const variant =
+    review === undefined
+      ? { description: SCOUT_TOOL_DESCRIPTION, promptSnippet: "Ask a read-only scout about the code; wait for its report or let it follow", properties, params: async (params: unknown) => params, late: undefined }
+      : {
+          description:
+            "Send a read-only scout into the work under review: it answers a concern (and questions) from the map of the memory store, explores where the map is not current, writes what it learns there and reports MISSING / DECISIONS / KEY FACTS / MEMORY. The call waits for the report, 15 minutes at the latest.",
+          promptSnippet: "Ask a read-only scout about the code and wait for its report",
+          properties: reviewProperties,
+          params: async (params: unknown) => ({ ...(isRecord(params) ? params : {}), repo: await review.repo(), wait: true }),
+          // Instead of where its report would arrive: a reviewer cannot read it later.
+          late: "its report did not arrive in time: go on without it",
+        };
   pi.registerTool({
     name: SCOUT_TOOL_NAME,
     label: "Scout",
-    description: review
-      ? "Send a read-only scout into the work under review: it answers a concern (and questions) from the map of the memory store, explores where the map is not current, writes what it learns there and reports MISSING / DECISIONS / KEY FACTS / MEMORY. The call waits for the report, 15 minutes at the latest."
-      : SCOUT_TOOL_DESCRIPTION,
-    promptSnippet: review ? "Ask a read-only scout about the code and wait for its report" : "Ask a read-only scout about the code; wait for its report or let it follow",
-    parameters: { type: "object", required, properties: review ? reviewProperties : properties } as never,
+    description: variant.description,
+    promptSnippet: variant.promptSnippet,
+    parameters: { type: "object", required, properties: variant.properties } as never,
     async execute(_toolCallId, params: unknown, signal, _onUpdate, ctx) {
       try {
-        const { text, result } = await tracker.call(review ? { ...(isRecord(params) ? params : {}), repo: await review.repo(), wait: true } : params, signal, ctx);
-        if (review && result.timedOut) return toolText(`${answerText(result.scout, true)}\nits report did not arrive in time: go on without it`, result);
+        const { text, result } = await tracker.call(await variant.params(params), signal, ctx);
+        if (result.timedOut && variant.late !== undefined) return toolText(`${answerText(result.scout, true)}\n${variant.late}`, result);
         return toolText(text, result);
       } catch (error) {
         return toolError(factoryToolError(error));

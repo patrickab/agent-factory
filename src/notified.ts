@@ -1,11 +1,8 @@
 /**
- * The notices delivered so far (invariant 12: once per event, across restarts of the session or of Pi).
- *
- * - `notified.jsonl` under the factory home: one JSON line `{key, at}` per delivered notice, append-only
- * - `claimNotices(notices)`: under the lock `notified.lock`, reads the file again, appends the notices nobody delivered
- *   yet and answers them: the caller sends exactly those. Appended before the send, so a crash loses at most one
- *   notice, never doubles one; two sessions racing for a notice deliver it once
- * - A line cut short by a crash is skipped when read
+ * The notices delivered so far (invariant 12: once per event, across restarts of the session or of Pi):
+ * `notified.jsonl`, one `{key, at}` line per notice, append-only.
+ * - `claimNotices` appends under the lock before the send, so a crash loses at most one notice, never doubles one;
+ *   two sessions racing for a notice deliver it once
  */
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -25,7 +22,6 @@ function notifiedLockPath(): string {
   return join(factoryHome(), "notified.lock");
 }
 
-/** The keys of every delivered notice. */
 export async function readDelivered(): Promise<Set<string>> {
   return new Set((await readJsonl(notifiedPath())).flatMap((entry) => (typeof entry.key === "string" ? [entry.key] : [])));
 }

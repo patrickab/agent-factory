@@ -1,13 +1,9 @@
 /**
- * The core's scout actions (`scouts.*`, `core.ts` maps them) over `scouts.ts`.
- *
- * - `scouts.start`: the caller is the task whose worktree holds `cwd` (a coder), else the wave whose review worktree
- *   holds it (its reviewer), else the calling session (`origin`). The store is the task's or wave's `plan`, else the
- *   `store` param; none, or one memory-store does not know: `refused`. A scout starts no scout
- * - The scout runs on the project's small model: the wave's, else the repository's stored one, else `defaults.yaml`'s
- *   when it is on the factory models list, else Pi's default
- * - `wait: true` answers once the scout ended, after 15 minutes at the latest with what it wrote so
- *   far (`timedOut`); an abort ends the wait early. `wait: false` answers at once
+ * The core's scout actions (`scouts.*`) over `scouts.ts`.
+ * - `scouts.start`: the caller is the task whose worktree holds `cwd`, else the wave whose review worktree holds it,
+ *   else the calling session. The store is the caller's `plan`, else the `store` param
+ * - The scout runs on the project's small model: the wave's, else the repository's, else `defaults.yaml`'s when it is
+ *   on the factory models list, else Pi's default
  */
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";

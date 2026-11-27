@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { changedTests, reachedTests, runFiles } from "./changed-tests.ts";
+import { allTests, changedTests, reachedTests, runFiles } from "./changed-tests.ts";
 
 /** A fixture tree: a chain a <- b <- c (c imports b imports a), each with its test, and an unrelated d. */
 const TREE: Record<string, string> = {
@@ -71,6 +71,25 @@ describe("changedTests", () => {
     commit();
     expect(changedTests(root, base)).toEqual(["src/uses-no-test.test.ts"]);
   });
+});
+
+test("allTests: every test file of the checkout, tracked or new; not an ignored or a deleted one", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "factory-all-tests-")));
+  try {
+    const gitIn = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } });
+    gitIn("init", "--quiet");
+    for (const path of [".gitignore", "a.test.ts", "src/b.test.ts", "src/b.ts", "gone.test.ts"]) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), path === ".gitignore" ? "ignored.test.ts\n" : "");
+    }
+    gitIn("add", "-A");
+    gitIn("-c", "user.name=Factory Test", "-c", "user.email=factory@test.invalid", "commit", "--quiet", "-m", "x");
+    rmSync(join(root, "gone.test.ts"));
+    for (const path of ["new.test.ts", "ignored.test.ts"]) writeFileSync(join(root, path), "");
+    expect(allTests(root)).toEqual(["a.test.ts", "new.test.ts", "src/b.test.ts"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 describe("running the reached files", () => {

@@ -62,7 +62,7 @@ describe("tasks.wait", () => {
     await expectError(callAction("tasks.wait", { ids: [ID_1] }, { signal: controller.signal }), "failed", "tasks.wait was aborted");
   });
 
-  test("an interrupted task (a running state, no runner) rests and needs attention ", async () => {
+  test("an interrupted task (a running state, no runner) rests and needs attention", async () => {
     await waitTask(ID_1, "w", "running");
     const result = await wait({ ids: [ID_1], timeoutMs: 5_000 });
     expect([result.attention, result.timedOut, result.tasks[0].interrupted]).toEqual([[ID_1], false, true]);

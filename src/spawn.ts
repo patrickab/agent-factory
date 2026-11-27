@@ -1,11 +1,8 @@
 /**
- * The detached spawn of a factory runner, shared by a task's runner (`launch.ts`) and a wave's (`wave-poke.ts`).
- *
- * - `runnerSpawn`: the argv and environment, in a systemd user scope of its own when `systemd-run` is on PATH: the one
- *   place that decides it, for every runner
- * - `spawnDetached`: its own process group, detached, stdout and stderr appended to a log file; resolves with the pid.
- *   A scope whose `systemd-run` fails at once (the user manager unreachable) is not a runner: the plain detached spawn
- *   takes its place, so the lock is never handed to a dead pid
+ * The detached spawn of a factory runner, in its own process group, its output appended to a log file.
+ * - `runnerSpawn` is the one place that decides a systemd user scope (when `systemd-run` is on PATH)
+ * - A scope whose `systemd-run` fails at once is not a runner: the plain detached spawn takes its place, so the lock
+ *   is never handed to a dead pid
  * - Imports nothing outside node built-ins: a task's runner imports it
  */
 import { spawn, type ChildProcess } from "node:child_process";

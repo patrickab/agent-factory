@@ -1,17 +1,10 @@
 /**
- * What a feature registers: its actions (`ActionSpec`, each with its view and cause), their handlers, its notices and
- * its sentence of the `factory` tool's description. One module per feature in `feature-<name>.ts`, listed by
- * `features.ts`; `core.ts`, `notify.ts` and `factory-tool.ts` read the list, so a new feature edits none of them.
- *
+ * What a feature registers: its actions (`ActionSpec`), their handlers, its notices and its sentence of the `factory`
+ * tool's description. One module per feature in `feature-<name>.ts`, listed by `features.ts`; `core.ts`, `notify.ts`
+ * and `factory-tool.ts` read the list, so a new feature edits none of them.
  * - `handlers` is a getter: read on the first call, never on load (a handler module may import a module that imports
  *   the registry)
- * - An action's `view`: `(params, result) => FactoryCard` (`cards.ts`), the agent's text read from it; several cards:
- *   the first and the subjects it names (`tasks.wait`). An action without a view (`tasks.timeline`: a log programs
- *   replay) is never offered to an agent and prints as JSON
- * - An action's `decides`: for the actions that settle something, how the cause is read from state at call time, before
- *   the action runs (`decisions.ts`): a `Cause` makes it a decision, null leaves it an action
- * - `notices`: the feature's notices from the items the notifier looked up under the feature's `name`
- * - Also the schema helpers the features' action specs share
+ * - An action without a view is never offered to an agent and prints as JSON
  */
 import type { FactoryCard } from "./cards.ts";
 import type { CallContext, Handler, Params } from "./core-shared.ts";

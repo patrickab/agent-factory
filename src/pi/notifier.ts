@@ -1,21 +1,8 @@
 /**
- * Delivery of notifications (invariant 9, 12) into the Pi session that started a task or declared a wave.
- *
- * - `startNotifier`: in a session that is not a factory task's own, looks at the factory's records on start and whenever
- *   they change: the task, wave and gate proof dirs and the session files of this origin's tasks are watched (`fs.watch`), changes
- *   debounced. A runner that dies changes no file, so a slow look (`fallbackMs`) catches an interruption
- * - One look: `noticeInputs(origin)` (only this session's tasks and waves) and `proofsOf(origin)` (its gate proofs),
- *   `pendingNotices`, then `claimNotices` marks
- *   them delivered under the lock before `send` hands each to Pi: a notice reaches one session once, also after a
- *   restart and when two sessions race. Looks never overlap: a change during one makes another follow. What is
- *   finished and delivered is not read again: a `done`/`cancelled` task while its session file is unchanged (a
- *   follow-up changes it), a `merged`/`cancelled` wave never (both final; its last view is kept for `onWaves`, until
- *   its file is gone)
- * - `send` is `pi.sendMessage` with `triggerTurn` (public Pi API): the message starts a turn; its `content` is the
- *   notice's text, its `details` `{key, card}` (contract `cards`)
- * - Scouts this session started (caller `session` = origin): their directories are watched while they run; one that
- *   ended reports once (`notify.ts`); a delivered one is not read again. `skipScout`: scouts a tool call waits for
- * - `onWaves`: after every look, the views of every wave this origin declared (the session's widget, `session-widget.ts`)
+ * Delivery of notifications into the Pi session that started a task or declared a wave (`notify.ts` decides what).
+ * - Looks whenever the watched files change; a slow look (`fallbackMs`) catches a runner that died, which changes no file
+ * - A look claims its notices (`claimNotices`) before it sends them: each reaches one session once, also after a
+ *   restart and when two sessions race. Looks never overlap
  */
 import { mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -190,6 +177,8 @@ export function startNotifier(options: NotifierOptions): Notifier {
   }
 
   watchDir(tasksDir(), relevant);
+  // A wave's log lies in its home, out of this watch's reach: its appends are heard through `<id>.log.lock` here,
+  // which each append takes and removes (`appendWaveEvents`).
   watchDir(wavesDir(), relevant);
   watchDir(join(scoutsDir(), callerKey(scoutCaller)), relevant);
   watchDir(proofsDir(), relevant);

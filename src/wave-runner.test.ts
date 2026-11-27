@@ -8,7 +8,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { caseSerial, caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
-import { git, until } from "./scenario-kit.ts";
+import { git, until } from "./core-test-kit.ts";
 import { liveWaveRunners, pokeWave, wavePokePath } from "./wave-poke.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { runWave } from "./wave-runner.ts";

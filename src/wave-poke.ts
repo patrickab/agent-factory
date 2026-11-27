@@ -1,14 +1,8 @@
 /**
  * Where a wave's files lie, and the poke that makes its runner look at it again.
- *
- * - A wave's home holds what stays after a removal: `wave.jsonl` (the log), `reviews/` (the reviewer's sessions and
- *   patch files) and `sessions/` (its tasks' Pi sessions). `waveHome` picks it once, when the wave is declared
- * - `wavesDir()` under the factory home holds what runs: `<id>` (a link to the home), `<id>.log` (the runner's
- *   output), `<id>.lock` (the runner's lock: one runner per wave), `<id>.log.lock` (held around one
- *   read-check-append of the log) and `<id>.poke` (the poke marker)
- * - `pokeWave`: writes the marker, then starts `bun wave-runner.ts <id>` detached and hands it the wave's lock, unless
- *   a live runner holds that lock: that runner sees the marker and looks again before it ends (invariant 6)
- * - `liveWaveRunners`/`stopWaveRunners`: a wave's runner, the holder of its lock (`lockRunner`)
+ * - A wave's home holds what stays after a removal: `wave.jsonl`, `reviews/`, `sessions/`; `wavesDir()` holds what
+ *   runs: the link to the home, the runner's log, lock, log lock and poke marker
+ * - `pokeWave` writes the marker first: a live runner that holds the lock sees it and looks again before it ends
  * - Imports nothing outside node built-ins and the plain plugin modules: a task's runner pokes its wave when it ends
  */
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -18,7 +12,7 @@ import { join } from "node:path";
 import { factoryHome } from "./settings.ts";
 import { onPath, spawnDetached, stopProcesses, type RunnerEnv } from "./spawn.ts";
 import { handLockFile, lockFile, lockRunner, unlockFile } from "./tasks.ts";
-import { FactoryError } from "./util.ts";
+import { isBusy } from "./util.ts";
 
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory.
 export const WAVE_RUNNER_PATH = join(import.meta.dirname, "wave-runner.ts");
@@ -108,7 +102,7 @@ export async function pokeWave(id: string, env: RunnerEnv = process.env): Promis
   try {
     await lockWave(id);
   } catch (error) {
-    if (error instanceof FactoryError && error.code === "busy") return false;
+    if (isBusy(error)) return false;
     throw error;
   }
   let pid: number | undefined;
@@ -134,7 +128,6 @@ export function stopWaveRunners(id: string): Promise<void> {
   return stopProcesses(() => liveWaveRunners(id), `the runner of wave ${id}`);
 }
 
-/** Removes the wave's poke marker. */
 export async function clearPoke(id: string): Promise<void> {
   await rm(wavePokePath(id), { force: true });
 }

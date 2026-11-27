@@ -1,14 +1,8 @@
 /**
- * The core's contract actions (`contracts.apply`, `core.ts` maps it) and the check of `waves.start`'s `contracts`.
- *
- * - `waveContracts`: the contracts a wave declares, `core` first when it exists; refused without `plan`, without
- *   `memory-store` on PATH, or for a contract the store lacks
- * - `contracts.apply {store, name, op}`: one memory-store op on one fact of the contract, under the contracts lock.
- *   Then, for every wave of that store listing it: a task in `running` gets the follow-up through `messageTask`, every
- *   other started task that is not `done` or `cancelled` keeps it on its record for its next coder turn (`waiting_answer`:
- *   with its answer); its stamp is stored either way, so the runner's check (`contractCheck`) says it once. Pending tasks
- *   get nothing: they read the contract at their launch. Done tasks are answered and reported (a `contract` event
- *   on their wave, `notify.ts`)
+ * The core's contract actions (`contracts.apply`) and the check of `waves.start`'s `contracts`.
+ * - `contracts.apply`: one memory-store op on one fact, under the contracts lock. A running task of a wave listing the
+ *   contract gets the follow-up at once, another started one on its record for its next turn; its stamp is stored
+ *   either way, so `contractCheck` says it once. Pending tasks read the contract at their launch
  */
 import { contractKind, contractNote, CONTRACT_DIR, factChanges, isContractName, memoryStore, memoryStoreOnPath, readContract, stampOf, withContractsLock } from "./contracts.ts";
 import { nonEmpty, oneLine, type Handler, type Params } from "./core-shared.ts";

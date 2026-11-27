@@ -33,6 +33,8 @@ scenario(
     // Exactly the two merges: no `interrupted` for a task or wave whose runner ended after its last state.
     expect(events(c.notices).sort()).toEqual([`wave:${a.id}:merged`, `wave:${b.id}:merged`].sort());
     expect(doneA.usage.cost).toBeGreaterThan(0);
+    // A merged wave's task commits landed, squashed and maybe rebased: its removal needs no force.
+    expect(await c.act("waves.remove", { id: a.id })).toEqual({ removed: a.id });
   },
 );
 

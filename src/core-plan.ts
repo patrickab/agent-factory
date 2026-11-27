@@ -1,14 +1,9 @@
 /**
- * An adjustable plan: `tasks.update` and `waves.update` (`core.ts` maps them), and the wave runner's side of a task's
- * start (`launchSpec`, `recordStart`), so an update racing it is never lost.
- *
- * - Every change is an `update` event in the wave's log (`waves.ts` folds it), checked and appended under its log lock
- * - A pending task's spec is replaced (`after` checked as at `waves.add`); one the runner launches (a `launch` event
- *   with a live runner, or a record under its declared id: no `task` event yet) or that started keeps its `after` and
- *   `model`, and its coder is told the old and new text: at once while it runs, else on its record for its next coder
- *   turn (the notes `contractCheck` hands to the runner); one being launched as its start is recorded (`recordStart`
- *   against the `launch` event's text, also when a later runner adopts the record)
- * - `waves.update`: the wave's title and reviewer instructions; a review reads them when it starts
+ * An adjustable plan: `tasks.update` and `waves.update`, and the wave runner's side of a task's start (`launchSpec`,
+ * `recordStart`), so an update racing it is never lost.
+ * - Every change is an `update` event in the wave's log, checked and appended under its log lock
+ * - A pending task's spec is replaced; one being launched or started keeps its `after` and `model`, and its coder is
+ *   told the old and new text: at once while it runs, else on its record for its next turn
  */
 import { withContractsLock } from "./contracts.ts";
 import { nonEmpty, type Handler, type Params } from "./core-shared.ts";
@@ -182,7 +177,7 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   }
   // A pending task's new `after` may let it start now; a failed poke is left to the next one.
   if (appended !== null && delivery === "pending") await pokeWave(waveId, env).catch(() => undefined);
-  return { wave: (await lookWave(await readWave(waveId))).view, key, changed: appended !== null, delivery };
+  return { wave: (await lookWave(waveId)).view, key, changed: appended !== null, delivery };
 }
 
 async function updateWave(params: Params): Promise<unknown> {
@@ -197,7 +192,7 @@ async function updateWave(params: Params): Promise<unknown> {
     if (request !== undefined && request !== fold.request) event.request = request;
     return Object.keys(event).length > 1 ? [event] : null;
   });
-  return { wave: (await lookWave(await readWave(id))).view, changed: appended !== null };
+  return { wave: (await lookWave(id)).view, changed: appended !== null };
 }
 
 export const PLAN_HANDLERS = {

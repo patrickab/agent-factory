@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import { worktreePath } from "./launch.ts";
-import { git } from "./scenario-kit.ts";
+import { git } from "./core-test-kit.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { caseDigits, caseSerial } from "./test-case.ts";
 import { lockWave, stopWaveRunners, unlockWave } from "./wave-poke.ts";

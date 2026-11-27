@@ -1,18 +1,9 @@
 /**
- * The pipeline of one round, as control flow over injected steps. No Pi, no git, no spawn of its own.
- *
- * - Consumes the task `Snapshot` and `PipelineSteps` (the side effects: commands, diff, review, merge)
- * - Provides `runRound`: the entries of the round in order, and whether the coder gets another turn. A passed `auto`
- *   round ends in `merging` and does not merge: the caller merges once it knows the run was not aborted
- * - Provides `runMerge`: the entries of a merge, used after a passed `auto` round and by `/factory approve`. The task
- *   is rebased onto its target branch first. A rebase that conflicts gets a `conflict` round, a merge gate that
- *   fails on the rebased branch a `gates` round: the coder resolves it and the task merges once that round passes
- * - A rebase the coder left open in the worktree goes back to the coder as a `conflict` round before anything runs
- * - A passed round whose task title is not a conventional commit title first asks the coder for the commit message
- *   (`askCommitMessage`, a `factory-commit-ask` message in the same run); `commitAnswerDrafts` turns the answer into
- *   the `factory-commit-message` entry and the state the round passed into
+ * The pipeline of one round, as control flow over injected steps (`PipelineSteps`). No Pi, no git, no spawn of its own.
+ * - A passed `auto` round ends in `merging` and does not merge: the caller merges once it knows the run was not aborted
+ * - A rebase conflict becomes a `conflict` round, a merge gate failing on the rebased branch a `gates` round
  * - A hook or gate that exits `INFRA_EXIT` (75, EX_TEMPFAIL) says the environment is broken, not the change: the task
- *   ends `blocked`, `infra: <last output line>`, without feedback to the coder. A retry starts the next round once it is fixed
+ *   ends `blocked` without feedback to the coder
  */
 import { COMMIT_MESSAGE_PROMPT, commitMessageFallback, parseCommitMessage } from "./commitmsg.ts";
 import { protectedPaths, type FactoryConfig } from "./config.ts";

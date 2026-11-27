@@ -1,21 +1,16 @@
 /**
- * The factory's own list of tasks, kept outside any Pi session.
- *
- * - Provides `TaskRecord`, one JSON file per task in `<factoryHome>/tasks/<id>.json`, written atomically
- *   (`writeTask`), read back (`listTasks`) and removed with its runner log and lock (`removeTask`). Only a file named
- *   after the task id in it, of the shape `crypto.randomUUID` makes, counts as a task
- * - Provides the task lock `<id>.lock` (`lockTask`, `handTaskLock`, `unlockTask`): whoever checks a task's state and
- *   then acts on it (spawns a runner, deletes the task) holds it, and a spawned runner holds it until it exits. The
- *   file holds `<pid> <start time>` of its holder; a holder that no longer runs (`procAlive`) leaves a stale lock
- *   the next `lockTask` takes over; a lock a live process holds is a `busy` FactoryError
- * - Provides `lockRunner`, the one rule of a runner's life (a task's, a wave's, a proof's; a scout's by `runnerAlive`):
- *   the process the lock names runs with the runner's id among its arguments
+ * The factory's own list of tasks, kept outside any Pi session: one JSON file per task, `<factoryHome>/tasks/<id>.json`.
+ * - The task lock `<id>.lock`: whoever checks a task's state and then acts on it holds it, and a spawned runner holds
+ *   it until it exits. It holds `<pid> <start time>`: a holder that no longer runs leaves a stale lock the next
+ *   `lockTask` takes over
+ * - `lockRunner` is the one rule of a runner's life: the process the lock names runs with the runner's id among its
+ *   arguments
  */
 import { link, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { factoryHome } from "./settings.ts";
-import { errorText, FactoryError, ifMissing, writeAtomic } from "./util.ts";
+import { errorText, FactoryError, ifMissing, isBusy, writeAtomic } from "./util.ts";
 
 export interface TaskRecord {
   id: string;
@@ -205,7 +200,7 @@ export async function withLock<T>(path: string, busy: string, waitMs: number, ac
       await lockFile(path, busy);
       break;
     } catch (error) {
-      if (!(error instanceof FactoryError && error.code === "busy") || Date.now() > deadline) throw error;
+      if (!isBusy(error) || Date.now() > deadline) throw error;
       await Bun.sleep(20);
     }
   }

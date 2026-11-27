@@ -1,16 +1,10 @@
 /**
  * Test slots: every gate command of every repository this factory serves runs holding one of K slots, so test runs
  * share the machine instead of each taking all of it.
- *
- * - A slot is a lock file `<agent dir>/factory/slots/<n>.lock`, held by a `flock` child while its stdin is open: a
- *   holder that dies (crash, kill) frees its slot
- * - K = `FACTORY_SLOTS`, default max(1, cores / 4 rounded down). The slotted command gets `FACTORY_TEST_JOBS` = cores / K
- *   rounded down (min 1) unless the environment sets it, and `FACTORY_SLOT_HELD=1`. A process with `FACTORY_SLOT_HELD`
- *   set holds a slot already and takes none
- * - Waiting ends when `stop()` says so, as a killed result. A waiting process leaves a marker
- *   `waiting/<pid>-<start time>-<uuid>`: `slotWaiting(pids)` tells a task's or a wave's view; a marker whose process
- *   died (`procAlive`, which also catches a reused pid) is ignored and removed
- * - `runInSlot`: `factory slot -- <command...>`, for test runs outside the factory's gates
+ * - A slot is a lock file held by a `flock` child while its stdin is open: a holder that dies frees its slot
+ * - K = `FACTORY_SLOTS`, default max(1, cores / 4); the command gets `FACTORY_TEST_JOBS` = cores / K and
+ *   `FACTORY_SLOT_HELD=1`. A process with `FACTORY_SLOT_HELD` set holds a slot already and takes none
+ * - A waiting process leaves a marker for `slotWaiting`; a marker whose process died (`procAlive`) is removed
  */
 import { constants } from "node:os";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";

@@ -1,19 +1,10 @@
 #!/usr/bin/env bun
 /**
  * `factory`: every core action (`core.ts`) on the command line. It only parses arguments, calls `callAction` and
- * prints one of the two views of the answer (`VIEWS.md`).
+ * prints the agent's text or, with `--json`, the full view. Also `factory actions`, `--help`, `--core-path` and
+ * `factory slot -- <command...>` (a command holding a test slot, `test-slots.ts`).
  *
- * - `factory <action> [<json params> | -] [--json]`: `-` reads the params from stdin, none means `{}`. stdout gets the
- *   agent's text (`actionView`), or with `--json` (anywhere after the action) the full view: `callAction`'s result as
- *   JSON. An action without a view (`tasks.timeline`) always prints JSON. Exit 0.
- *   `cwd` is the caller's directory
- * - A `FactoryError` goes to stderr as `factory: <code>: <message>`, exit 1 (`invalid`: exit 2); without `--json` the
- *   agent view's way out follows the message (` · next: ...`)
- * - `factory actions [<name>]`: one line per action, or one action's params in full; with `--json` the `ACTIONS` map
- *   (or the one action's spec) as JSON. `factory --core-path`: the absolute path of `core.ts`.
- *   `factory --help`: one line per action with its summary
- * - `factory slot -- <command...>`: runs the command holding a test slot (`test-slots.ts`), its exit code passed
- *   through; with `FACTORY_SLOT_HELD` set it runs it directly. For test runs outside the factory's gates
+ * - A `FactoryError` goes to stderr as `factory: <code>: <message>`, exit 1 (`invalid`: exit 2)
  */
 import { join } from "node:path";
 import { agentActions, agentError } from "./agent-view.ts";

@@ -1,53 +1,10 @@
 /**
- * Agent factory: the pipeline of a factory task, run inside the task's own coding session.
- *
- *   /factory init                                     write a draft factory.yaml into the main checkout (any session)
- *   /factory start {"request", "title", "settings"}   record the task and start the coder
- *   /factory approve                                  merge a task that waits for approve
- *   /factory retry                                    another coder turn on a blocked or cancelled task
- *   /factory cancel                                   kill the running command group, end `cancelled`
- *   /factory reviewed {"round", "review"}             the wave reviewer's verdict on a task resting `reviewing`
- *   /factory models [add|remove|set ...]              the user's factory model list (`models.ts`, any session)
- *   /factory waves                                    show or hide the finished waves in this session's widget
- *
- * - After every coder turn (`agent_before_settle`) it runs `gates`, the protected-path check and
- *   the review. A problem goes back to the coder as a `factory-feedback` message and starts the next round, up to
- *   `settings.maxRounds`. A passed round waits for approve or merges, a round with an empty diff ends `done`/`no_changes`
- * - The merge of a passed round starts in `agent_settled`, the first place that knows whether the run was aborted: an
- *   abort is invisible inside `agent_before_settle`, so the steps already started there run to their end, but nothing
- *   is merged after it and the task ends `blocked`/`stopped`. The merge is not awaited there: Pi defers every prompt,
- *   `/factory cancel` included, until the `agent_settled` handlers return
- * - `factory.yaml` and the role prompts come from a commit of the target branch (the task's base, `taskBase`, at the
- *   run's start), never from the tree the coder edits
- * - A task runs in a git worktree of its own, on its own branch, made off `settings.branch` by whoever starts it. It
- *   stays up to date with that branch and merges into it: a run that opens commits the worktree and rebases it onto
- *   the branch. A conflicting rebase is aborted and the run opens with a `conflict` round instead, so does a rebase
- *   the coder left open, which is never aborted. A rebase or commit that fails otherwise (a hook, a deleted branch, an
- *   untracked file in the way) opens no run and ends the task `blocked`, `rebase_failed: <git error>`: a later retry
- *   or message tries again
- * - Every step is a `custom` session entry (`state.ts`). The task is rebuilt from them on `session_start`, where a
- *   merge that landed while the session went down is recorded from its `factory-merge-intent`
- * - A plain message to a waiting, blocked, cancelled or done task starts new rounds; to a task in `waiting_answer` (the
- *   coder called `factory_ask_supervisor`) it is the answer, and the coder continues the same round
- * - Loaded into every coding session: without a `factory-task` entry no handler does anything
- * - Registers the `factory` tool (`tool.ts`), which starts and drives tasks like this one from any session
- * - A passed round of a task whose title is not a conventional commit title asks the coder for the commit message
- *   first (`commitmsg.ts`), in the same run
- * - A message to a merged task (`done`/`merged`) opens a follow-up run (`followup.ts`): its change merges as a new
- *   commit, with a commit message the coder is asked for; a part outside the task's scope goes to a new task through
- *   `factory_new_task` (registered in task sessions only, usable in a follow-up run, once per user message), on this
- *   task's target branch and merge mode
- * - Notifications (`notifier.ts`): in a session that is not a task's own, the notices of the tasks it started and the
- *   waves it declared arrive as a message that starts a turn (`factory-notice`)
- * - `scout` (`scout-tool.ts`) in every session: a coder's turn does not end (`agent_before_settle`) before its scouts
- *   reported, their reports arrive as `factory-scout` messages and the coder goes on; a supervisor's arrive as notices
- * - The waves a session declared show above its editor (`session-widget.ts`), refreshed by the notifier's looks and
- *   at every turn's end, with the count of cards to rule on; only in the interactive terminal UI
- *   (`ctx.mode === "tui"`), never in a task's own session
- * - Notices and `factory` tool results are drawn as their cards (`cards-tui.ts`); Alt+V shows the agent's text
- * - A task of a wave merges into the wave's branch only until the wave's review began (`sessionWave`, invariant
- *   2): a merge after that ends the task `blocked`, `merge_failed`, its work stays in its worktree. Its merge gates
- *   are `gates` and `task_gates` (`sessionWave`), not `merge_gates`: the wave runs those
+ * Agent factory's Pi extension: the pipeline of a task, run inside the task's own session, and the tools, notices,
+ * cards and widget of every other session. Without a `factory-task` entry no task handler does anything.
+ * - After every coder turn (`agent_before_settle`): gates, protected paths, review. The merge starts in `agent_settled`,
+ *   the first place that knows whether the run was aborted; it is not awaited there: Pi defers every prompt,
+ *   `/factory cancel` included, until those handlers return
+ * - `factory.yaml` and the role prompts come from the task's base commit, never from the tree the coder edits
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";

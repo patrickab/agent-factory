@@ -1,19 +1,10 @@
 /**
  * Per-repository task settings the plugin owns, so a task can start without a caller supplying them.
- *
- * - Provides `factoryHome` (the plugin's data directory under Pi's agent dir, found without Pi: `PI_CODING_AGENT_DIR`,
- *   else `~/.pi/agent`, as Pi's `getAgentDir` does)
- * - Provides `SETTINGS`, the one table of the settings: per key its schema (which `checkSettings` checks and the action
- *   schemas show, `schemaOf`), its default and the scopes it may be given in: `repo` (stored), `task` and `wave`
- *   (overrides). `preview` the plugin stores for its clients and never acts on; `squash`: a wave lands as one commit
- *   (`merge.ts`; stored in the wave's declaration only when on). Models name sizes: `big`, `small` (a wave's easy
- *   tasks), `reviewer`; a task's record names roles (`taskModels`). `extensions`: the coder's Pi extensions (`runner.ts`)
- * - Provides the settings of a repository, one YAML file per repository named after its URI-encoded path, read and
- *   written (`loadSettings`, `saveSettings`). The file is the repository's registration (`registeredRepos`)
- * - Provides the default models, `defaults.yaml` at the package root (`loadDefaults`, `defaultModels`): a broken or
- *   missing file throws naming its path. Only a wave's task that asks for `small` where nothing names one reads it
- *   (`core.ts`); no setting resolves over it, so nothing stored still means Pi's session model
- * - Provides `resolveSettings`: the table's defaults < each layer, models merged per name
+ * - `SETTINGS` is the one table of the settings: schema, default and the scopes it may be given in (`repo` stored,
+ *   `task` and `wave` overrides). `preview` is stored for clients and never acted on
+ * - One YAML file per repository, named after its URI-encoded path, is also its registration (`registeredRepos`)
+ * - `defaults.yaml` is read only for a wave task's `small` model where nothing names one; no setting resolves over it,
+ *   so nothing stored still means Pi's session model
  */
 import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -23,7 +14,6 @@ import type { Schema } from "./feature.ts";
 import type { Settings } from "./state.ts";
 import { errorText, FactoryError, ifMissing, isRecord, writeAtomic } from "./util.ts";
 
-/** The highest `maxRounds` a task may run with. */
 export const MAX_ROUNDS_LIMIT = 20;
 /** The two models a project names: `big` for coders, `small` for a wave's easy tasks. */
 export const MODEL_SIZES = ["small", "big"] as const;
@@ -108,7 +98,6 @@ export function checkSettings(raw: unknown, scope: Scope, prefix = ""): StoredSe
   return checkValue(schema, raw, prefix === "" ? "settings" : prefix.slice(0, -1)) as StoredSettings;
 }
 
-/** `defaults.yaml` at the root of the package. */
 export const DEFAULTS_PATH = join(import.meta.dirname, "..", "defaults.yaml");
 
 /** The project models every repository's settings resolve over. */
@@ -193,7 +182,7 @@ export async function saveSettings(repo: string, settings: StoredSettings): Prom
 export function resolveSettings(layers: readonly StoredSettings[], branch: string): ResolvedSettings {
   const resolved: Record<string, unknown> = { branch };
   for (const [key, row] of Object.entries(SETTINGS)) {
-    if ("default" in row) resolved[key] = row.default;
+    if ("default" in row) resolved[key] = structuredClone(row.default);
     for (const layer of layers as Record<string, unknown>[]) {
       if (layer[key] !== undefined) resolved[key] = key === "models" ? { ...(resolved.models as object), ...(layer.models as object) } : layer[key];
     }

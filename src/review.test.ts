@@ -84,7 +84,7 @@ describe("runReview", () => {
     output: "",
     ...overrides,
   });
-  const review = (result: CommandResult, calls: { argv: string[]; options: CommandOptions }[] = [], patch = "diff --git a/src/cart.js b/src/cart.js\n", followUps: string[] = []) =>
+  const review = (result: CommandResult, calls: { argv: string[]; options: CommandOptions }[] = [], patch = "diff --git a/src/cart.js b/src/cart.js\n", followUps: string[] = [], cancelled = false) =>
     runReview({
       exec: async (argv, options) => {
         calls.push({ argv, options });
@@ -98,7 +98,7 @@ describe("runReview", () => {
       model: "anthropic/claude-haiku-5-5",
       rolePrompt: "Be strict.",
       reviewsDir,
-      cancelled: () => false,
+      cancelled: () => cancelled,
     });
 
   test("starts a read-only child and maps its verdict", async () => {
@@ -109,11 +109,13 @@ describe("runReview", () => {
   });
 
   test.each([
-    ["aborted", { killed: true, exitCode: null }],
-    ["failed", { exitCode: 1 }],
-    ["malformed", { stdout: line({ type: "session", id: "abc-123" }) }],
-  ] as const)("a child that ends %s yields no findings and no approval", async (status, result) => {
-    expect(await review(child(result))).toMatchObject({ status, approved: false, findings: [] });
+    ["aborted", { killed: true, exitCode: null }, false],
+    // Cancelled: no verdict, even one the child wrote before it was stopped.
+    ["aborted", {}, true],
+    ["failed", { exitCode: 1 }, false],
+    ["malformed", { stdout: line({ type: "session", id: "abc-123" }) }, false],
+  ] as const)("a child that ends %s yields no findings and no approval", async (status, result, cancelled) => {
+    expect(await review(child(result), [], undefined, [], cancelled)).toMatchObject({ status, approved: false, findings: [] });
   });
 
   test("an empty patch is no_diff and starts no child", async () => {

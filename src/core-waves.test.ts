@@ -47,8 +47,6 @@ describe("waves", () => {
     return task;
   };
 
-  /** A wave written directly (no branch, no runner): for the reads. */
-
   test("a task with after starts once its predecessor is done (its runner pokes the wave); a wave without changes ends merged", async () => {
     // The wave runner never polls in this test: only the pokes of the tasks' runners move it on.
     process.env.FACTORY_WAVE_POLL_MS = "600000";
@@ -244,6 +242,10 @@ describe("waves", () => {
       if (stage !== null) await appendWaveEvent(id, { kind: "stage", stage, reason: stage === "blocked" ? "gates" : null });
       await expectError(start(), "refused", `main-factory-w9 is the branch of wave 20000000, which is ${stage ?? "building"}: only the wave's own tasks reach it; give the work to the wave with waves.add`);
     }
+    // A queued wave's branch (it waits for this one) is the wave's too.
+    git(repo, "branch", "main-factory-w10");
+    await createWave({ id: waveId(2, 7), repo, tag: "factory/w10", plan: null, title: "q", request: "r", branch: "main-factory-w10", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:01.000Z", overrides: {}, after: [id] });
+    await expectError(callAction("tasks.start", { title: "t", request: "r", overrides: { branch: "main-factory-w10" } }, { cwd: repo }), "refused", "which is queued");
     expect(await listTasks()).toEqual([]);
     expect(prompts()).toEqual([]);
     // Another target of the same repository is no wave's.

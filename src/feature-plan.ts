@@ -29,9 +29,9 @@ export const PLAN = feature({
           ...(typeof params.title === "string" ? [{ label: "title", text: params.title }] : []),
           ...(Array.isArray(params.after) ? [{ label: "after", text: params.after.join(", ") || "none" }] : []),
           ...(typeof params.model === "string" ? [{ label: "model", text: params.model }] : []),
-          { label: "delivery", text: TOLD[result.delivery] ?? result.delivery },
         ];
-        return decision(waveCard(result.wave, ""), `updated task ${result.key} of wave ${result.wave.tag}`, typeof params.request === "string" ? params.request : undefined, rows);
+        const told = TOLD[result.delivery] ?? result.delivery;
+        return decision(waveCard(result.wave, ""), `updated task ${result.key} of wave ${result.wave.tag}, ${told}`, typeof params.request === "string" ? params.request : undefined, rows);
       },
       (params) => taskCause(params.id),
     ),

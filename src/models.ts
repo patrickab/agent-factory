@@ -1,11 +1,7 @@
 /**
- * The factory's models: one user-level list of `provider/model` ids every task and repository picks from.
- *
- * - Provides `modelsPath` (`<factoryHome>/models.yaml`, a YAML list), `loadModels`, `saveModels` (atomic, deduplicated)
- * - Provides `requireModels`: the check `tasks.start` and `settings.set` make on the models they would use. An empty
- *   list is an error naming `/factory models`
- * - Provides `modelsCommand`, the `/factory models` command: list, `add`, `remove`, `set`; in the TUI `add` without an
- *   id offers Pi's available models
+ * The factory's models: one user-level list of `provider/model` ids every task and repository picks from
+ * (`<factoryHome>/models.yaml`), and the `/factory models` command.
+ * - An empty list is an error naming `/factory models` (`requireModels`)
  * - Imports no npm package (core.ts imports this file; the deployed plugin has no `node_modules`)
  */
 import { readFile } from "node:fs/promises";

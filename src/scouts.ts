@@ -1,16 +1,9 @@
 /**
  * Scouts: read-only explorers of a caller's working directory that write the map (memory-store `map/`) and report.
- *
- * - A scout's record is a directory of its own, `scouts/<caller key>/<id>/` under the factory home: `scout.json` (the
- *   declaration: caller, concern, questions, store, commit, model), `events.jsonl` (append-only: `state`, `runner`
- *   with its pid, `usage` with the running totals), `report.md`, `written.jsonl` (the `map_write` calls,
- *   `scout-map.ts`), `prompt.md`, `runner.log` and `session/` (the child's Pi session)
- * - The caller is a task (a coder in its worktree), a wave (its reviewer in the review worktree) or a session (a
- *   supervisor, `origin`); grouping by caller keeps a task's cost sum to its own scouts' files
- * - A scout's state is the first final `state` event (`done`, `failed`, `cancelled`), else the last one (`queued`,
- *   `running`): a runner's late `done` never undoes a cancel. Its usage is the last `usage` event, killed or not
- * - `startScout` writes the record and spawns `scout-runner.ts` detached (`spawn.ts`); the runner queues while four
- *   scouts of the caller run (`SCOUT_LIMIT`). `cancelScouts` cancels a caller's scouts: event first, then the signal
+ * - A scout is a directory `scouts/<caller key>/<id>/` under the factory home; grouping by caller (a task, a wave or a
+ *   session) keeps a task's cost sum to its own scouts' files
+ * - Its state is the first final `state` event, else the last one: a runner's late `done` never undoes a cancel. Its
+ *   usage is the last `usage` event, killed or not
  * - Imports only Bun, `node:` and plain plugin modules
  */
 import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
@@ -89,7 +82,6 @@ async function listNames(dir: string): Promise<string[]> {
   return (await ifMissing(readdir(dir), [])).sort();
 }
 
-/** The scout directories of `caller`, or of every caller. */
 export async function scoutDirs(caller?: ScoutCaller): Promise<string[]> {
   const keys = caller === undefined ? await listNames(scoutsDir()) : [callerKey(caller)];
   const dirs: string[] = [];

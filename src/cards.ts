@@ -1,15 +1,9 @@
 /**
- * Cards (contract `cards`): the one view model of every factory event. A surface (Pi's TUI, gigachad-bot) renders a
- * card as it is and never computes one; the agent reads the same card as text (`cardText`). Pure: no I/O, no Pi import.
- *
- * - A notice carries `details {key, card}` (`notify.ts`); a `factory` tool result carries `details {result, card}`
- *   (`factory-tool.ts`, `pi/tool.ts`)
- * - `taskCard`, `waveCard`, `scoutCard`, `proofCard`: one view → one card. Its rows hold what an agent acts on; the row
- *   `next` the actions valid now
- * - `present(build, fallback)`: the card and its agent text; a card that cannot be built is a quiet one titled
- *   `fallback`, never a failure: an action that happened must not be reported as failed
- * - Tone `attention` only for what needs a ruling: a question, blocked, waiting for approve, interrupted, rejected,
- *   tasks that can never start, failing gates, a wait that ended on attention. Everything else is `quiet`
+ * Cards: the one view model of every factory event. A surface (Pi's TUI, gigachad-bot) renders a card as it is and
+ * never computes one; the agent reads the same card as text (`cardText`). Pure: no I/O, no Pi import.
+ * - `present`: a card that cannot be built is a quiet one titled `fallback`, never a failure: an action that happened
+ *   must not be reported as failed
+ * - Tone `attention` only for what needs a ruling; everything else is `quiet`
  * - Cost is in cents. A card has no undefined field and no empty list: it survives a JSON round trip unchanged
  */
 import { plural, scrub } from "./agent-view.ts";
@@ -274,12 +268,15 @@ export function cardText(built: FactoryCard): string {
 /**
  * The card `build` makes (the first of several: the others are its subjects, `tasks.wait`'s) and the agent's text of
  * them, scrubbed (`keepPaths`: see `scrub`). A build that throws is a quiet card titled `fallback`, and that its text.
+ * The text leaves out the card's text and rows that are one of `sent` (the request or message the agent sent): the card
+ * shows it to people, the agent holds it already.
  */
-export function present(build: () => FactoryCard | FactoryCard[], fallback: string, keepPaths = false): { card: FactoryCard; text: string } {
+export function present(build: () => FactoryCard | FactoryCard[], fallback: string, keepPaths = false, sent: unknown[] = []): { card: FactoryCard; text: string } {
   try {
     const [first, ...more] = [build()].flat();
+    const receipt = { ...first, text: sent.includes(first.text) ? undefined : first.text, rows: first.rows?.filter((row) => !sent.includes(row.text)) };
     const nested = more.map((subject) => cardText(subject).replace(/^/gm, "  "));
-    return { card: first, text: scrub([cardText(first), ...nested].join("\n"), keepPaths) };
+    return { card: first, text: scrub([cardText(receipt), ...nested].join("\n"), keepPaths) };
   } catch {
     return { card: card("action", "quiet", fallback), text: fallback };
   }

@@ -142,7 +142,6 @@ describe("taskGit and the task's diff", () => {
     expect(gitIn(worktree, "rev-parse", "HEAD")).toBe(tip);
     expect(existsSync(join(gitIn(worktree, "rev-parse", "--absolute-git-dir"), "rebase-merge"))).toBe(false);
   });
-
 });
 
 describe("mergeTask", () => {
@@ -166,6 +165,18 @@ describe("mergeTask", () => {
     expect(readFileSync(join(repo(), "feature.txt"), "utf8")).toBe("feature\n");
     expect(existsSync(join(repo(), ".git", "factory-merge.lock"))).toBe(true);
     expect(existsSync(join(repo(), "synced"))).toBe(false);
+  });
+
+  test("a squash of one commit lands as that commit, its ref on it", async () => {
+    const worktree = addWorktree("wave-s");
+    writeFileSync(join(worktree, "feature.txt"), "feature\n");
+    gitIn(worktree, "add", "-A");
+    gitIn(worktree, "commit", "--quiet", "-m", "feat: add feature");
+    const tip = gitIn(worktree, "rev-parse", "HEAD");
+    const ref = "refs/factory/waves/one";
+    const outcome = await mergeTask({ ...input(worktree, await taskIn(worktree), noGates), asIs: true, squash: { ref, message: () => "squashed" } });
+    expect(mergeData(outcome).ok).toBe(true);
+    expect([gitIn(repo(), "rev-parse", "main"), gitIn(repo(), "rev-parse", ref)]).toEqual([tip, tip]);
   });
 
   test("a merge that changes a lockfile runs after_merge in the primary checkout", async () => {

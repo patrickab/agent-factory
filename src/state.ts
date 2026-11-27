@@ -89,7 +89,6 @@ export interface MinorFinding {
   task?: string;
 }
 
-/** The minor findings of a review's `findings`. */
 export function minorFindings(round: number, findings: readonly Finding[]): MinorFinding[] {
   return findings.filter((finding) => finding.severity === "minor").map(({ file, line, text }) => ({ round, file, line, text }));
 }

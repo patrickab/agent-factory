@@ -1,13 +1,8 @@
 /**
  * A draft `factory.yaml` from what a repo already declares: a pure function of the checkout's files, no model call.
- *
- * - `draftFactoryYaml(files, template)` fills the commented template (`factory.template.yaml`) with `gates` (fast: lint,
- *   types, format) and `merge_gates` (everything, tests included): an argv per gate, judged by exit code (0 pass, 75
- *   infra, else fail). Nothing detected leaves the template as it is
- * - Sources, the highest-level one wins: `factory/gates.sh`, Makefile targets, `.gitlab-ci.yml` scripts, then the single
- *   tool calls (`.pre-commit-config.yaml`, `package.json` scripts, `pyproject.toml`) together
- * - GitLab jobs that deploy, publish, build images or need CI-only variables are skipped, and so are install lines
- * - `repoFiles(root)` reads a checkout from disk, `initDraft(root)` is the whole thing with the shipped template
+ * - Gates are argvs judged by exit code (0 pass, 75 infra, else fail). Nothing detected leaves the template as it is
+ * - Sources, the highest-level one wins: `factory/gates.sh`, Makefile targets, `.gitlab-ci.yml` scripts, then the
+ *   single tool calls together. GitLab jobs that deploy, publish or need CI-only variables are skipped
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,7 +17,6 @@ export interface RepoFiles {
 }
 
 export interface ConfigDraft {
-  /** The YAML text. */
   text: string;
   /** The files the gates come from, comma separated; empty when nothing was detected. */
   source: string;

@@ -1,30 +1,10 @@
 /**
- * The merge step of a passed task.
- *
- * - Consumes the task, the repo's `FactoryConfig` and two `Exec`s: `exec` is killed by a cancel, `cleanup` is not
- * - Commit, rebase onto the target branch, gates again (`merge_gates`, or `MergeInput.gates`; skipped when the rebase
- *   moved nothing, or when the rebased commit is the one they already passed on: `MergeInput.gated`), then
- *   under the merge lock (a cancel ends the wait for it, never the update): a target checked out in a worktree (the
- *   primary or another one) is fast-forwarded there, and `hooks.after_merge` run when that is the primary and the
- *   merge changed a lockfile (`LOCKFILES`); a target checked out nowhere is moved with a compare-and-swap
- *   `update-ref`, no hooks
- * - A conflicting rebase is aborted and reported with its files (`MergeResult` `conflict`), not as a failure. A merge
- *   gate that fails on the rebased branch is reported with its command (`MergeResult` `gate_failed`): the rebase stays,
- *   so the coder fixes the change on top of the target branch
- * - Provides `prepareTaskBranch` and `rebaseWorktree`, which a run that opens uses to bring the task branch up to date
- *   the same way. A task's branch is committed and squashed onto its base (`taskBase`) once, before its first rebase:
- *   the rebase replays one commit, the task's net change. A branch merged as it is (`asIs`, a wave's) is never
- *   committed to nor squashed: the rebase replays its commits and the target gets every one of them and nothing else.
- *   Its worktree must hold nothing but HEAD's tree when the merge starts, and what its merge gates leave untracked is
- *   removed after them
- * - The factory's own commits run no commit hooks and are not signed (`--no-verify --no-gpg-sign`)
+ * The merge step of a passed task or wave: commit, rebase onto the target, merge gates, then under the merge lock the
+ * fast-forward where the target is checked out, else a compare-and-swap `update-ref`.
+ * - A cancel ends the wait for the merge lock, never the update
+ * - `mergeTask` never throws: a failure is a `failed` result; a conflict or a failing gate is a result of its own
  * - Reports the step that cannot be undone (`intent`) right before it, so a resume can tell whether it happened
- * - Provides `mergeTask`: the `MergeResult` and the `factory-gate` data of the commands it ran. It never throws, a
- *   failure is a `failed` result whose `factory-merge` data is `ok: false` with the reason
- * - The merge commit carries `MergeInput.message` (default: the task title)
- * - `squash` (a wave's setting): after the merge gates, the rebased tip of commits is kept under `squash.ref` and the
- *   target moves to one commit of the gated tree on top of it, its message from the commits' subjects (a branch of one
- *   commit lands as that commit, of none as it is, without a ref). The tree that lands is asserted to be the gated one
+ * - The factory's own commits run no commit hooks and are not signed (`--no-verify --no-gpg-sign`)
  */
 import { basename, join } from "node:path";
 import { commitMessageFallback, commitText, type CommitMessage } from "./commitmsg.ts";

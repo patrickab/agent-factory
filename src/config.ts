@@ -1,12 +1,7 @@
 /**
- * The repo's side of a factory task.
- *
- * - Consumes `factory.yaml` (the keys the plugin runs: `hooks.after_create`, `hooks.after_merge`,
- *   `gates`, `merge_gates`, `task_gates`, `protected`)
- *   and the role prompts `.factory/agents/<role>.md`, all as the task's base commit holds them. The working tree is
- *   the coder's to edit, so it is never the source of the rules the coder is held to
- * - Provides `TaskFiles` (`loadTaskFiles`), `FactoryConfig` (`parseFactoryYaml` for a file read elsewhere: `launch.ts`
- *   runs `hooks.after_create` from the new worktree's copy), the protected-path match and the role prompt text
+ * The repo's side of a factory task: `factory.yaml` and the role prompts `.factory/agents/<role>.md`, as the task's
+ * base commit holds them. The working tree is the coder's to edit, so it is never the source of the rules the coder
+ * is held to.
  * - `preview` belongs to the backend and is not read here
  */
 import { git } from "./git.ts";

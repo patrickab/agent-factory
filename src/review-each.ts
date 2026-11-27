@@ -1,20 +1,10 @@
 /**
- * Review per task (every wave): the wave's runner has the wave's reviewer judge each task that rests
- * `reviewing`, one after another, and hands the verdict to the task (`/factory reviewed`).
- *
- * - The queue (`reviewNext`): the first task of the wave (declaration order) in `reviewing` whose runner does not live.
- *   A `task_review` event for its round recorded already (a runner that died before the hand-over) is handed over
- *   again, else the reviewer runs and the event is recorded first. The task applies a verdict only while it rests
- *   `reviewing` in that round: a verdict handed over twice changes nothing. Within one runner process a verdict goes out
- *   at most `DELIVERIES` times
- * - One reviewer session per wave: `--session-id` = the wave's id, `--session-dir` and working directory its reviews
- *   directory, the model, role prompt (from the wave's base) and tools the same at every resume,
- *   `PI_CACHE_RETENTION=long`, one process per review. Its extension (`pi/reviewer-tool.ts`) sends every earlier tool
- *   result as a `[reviewed]` stub: no earlier diff stays in the context
- * - The diff reaches the reviewer only through `read_diff` (`REVIEW_DIFF_ENV`): the task's worktree since the tree the
- *   reviewer last judged for it while the task's base stayed, else since its base. The prompt holds the task's request
- *   and the wave's contracts (read fresh with `readContract`; only when their text changed since the last review)
- * - A review that the runner's stop cut short records nothing: the resume reviews that round again
+ * Review per task: the wave's runner has the wave's reviewer judge each task resting `reviewing`, one after another,
+ * and hands the verdict to the task (`/factory reviewed`).
+ * - The `task_review` event is recorded before the hand-over, so a runner that died after it hands it over again; the
+ *   task applies a verdict only while it rests `reviewing` in that round, so a second hand-over changes nothing
+ * - One reviewer session per wave (`--session-id` = the wave's id): model, prompt and tools stay the same at every
+ *   resume, so the cached prefix holds. A review the runner's stop cut short records nothing
  */
 import { join } from "node:path";
 import { loadTaskFiles } from "./config.ts";

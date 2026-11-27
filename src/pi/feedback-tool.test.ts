@@ -16,7 +16,7 @@ writeFakeMemoryStore(bin);
 process.env.PATH = `${bin}:${process.env.PATH}`;
 process.env.FAKE_STORE_ROOT = root;
 
-type Result = { isError?: boolean; content: { text: string }[]; terminate?: boolean };
+type Result = { isError?: boolean; content: { text: string }[]; terminate?: boolean; details?: unknown };
 function tool(plan: string | null) {
   let execute: ((...args: unknown[]) => Promise<Result>) | undefined;
   const pi = { registerTool: (t: { execute: typeof execute }) => (execute = t.execute) };
@@ -45,9 +45,11 @@ describe("feedback", () => {
   });
 
   test("without a store the result holds it", async () => {
+    const held = { task: "task-1", wave: "wave-1", role: "coder" };
     const call = tool(null);
-    expect((await call({ kind: "runtime", what: "waited" })).isError).toBeUndefined();
-    const missing = tool("no-such-store");
-    expect((await missing({ kind: "tools", what: "guessed" })).isError).toBeUndefined();
+    const result = await call({ kind: "runtime", what: "waited" });
+    expect([result.isError, result.details]).toMatchObject([undefined, { kind: "runtime", what: "waited", ...held }]);
+    const missing = await tool("no-such-store")({ kind: "tools", what: "guessed" });
+    expect([missing.isError, missing.details]).toMatchObject([undefined, { kind: "tools", what: "guessed", ...held }]);
   });
 });

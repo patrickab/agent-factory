@@ -1,38 +1,10 @@
 /**
- * The detached process that drives one wave to rest: `bun wave-runner.ts <wave id>`. No Pi session, no `OpsDeps`: the
- * pure steps (`git.ts`, `rebaseWorktree`, `mergeTask`, the reviewer (`review-each.ts`), the merge queue) with the runner's own `Exec`.
- *
- * - Holds the wave's lock (`waveLockPath`) for its life: one runner per wave. A poke (`pokeWave`) hands it the lock,
- *   else it takes the lock itself; it ends when another live process keeps it for `HAND_WAIT_MS`
- * - Loop: clear the poke marker, read the log, act on the stage, again. `building`: start the tasks whose predecessors
- *   are done (`startWaveTasks`), then `reviewing` once every task is done or cancelled (`cancelled` when all are);
- *   else wait for a poke or `POLL_MS`. A launch that fails blocks the wave (`infra`, the error as the stage's detail);
- *   tasks that can never start while nothing else runs (`stuckKeys`) make the runner rest, the wave `building` with a
- *   `stage` event naming them (once): invariant 8, the wave never waits silently. `reviewing`: the review worktree on
- *   the wave's branch (`after_create` hooks of the target's tip run when it is made), the rebase onto the target
- *   unsquashed, the merge gates (the full suite, once per wave), the reviewer on the whole diff since the target; then `merging` (`waiting_approve` with the wave's `merge: review`), `rejected` or `blocked`.
- *   `merging`: the merge queue, merge gates (only when the target moved since the review's run) and the fast-forward
- *   (`mergeTask` `asIs`), then `merged` or `blocked`
- * - With the wave's `squash` on, the target moves to one commit in place of the fast-forward to the branch's tip: its
- *   task commits are kept under `waveCommitsRef`, the message is `squashMessage`, and the wave's branch is deleted
- *   before the `merge` event. A rerun of the step decides by git state whether it landed (`landedSquash`)
- * - Every step appends its event (`gate`, `review`, `merge`, `stage`). A stage change is a compare-and-append on the
- *   stage it left: a `waves.add` that moved the wave back to `building` meanwhile wins, and the loop goes on from there.
- *   While it reviews, the runner watches the log: once the stage left `reviewing` it kills the gates and the reviewer
- * - A rebase of either step that conflicts sends the wave back to `building` with a conflict task (`conflictTask`, a `conflict` event and its `tasks` event); after
- *   `CONFLICT_TASKS` of them a conflict blocks
- * - A block's `stage` event says why in `detail` (the conflicting paths, the error, the dirty worktree and its paths)
- * - Resumable from the log: a runner started on a wave in `reviewing` or `merging` runs that step again from its start
- * - Invariant 2: the review worktree must hold nothing but HEAD's tree before the rebase, after it, and after the gates
- *   (their untracked output is removed); else `blocked`, `dirty`. Rules, gates and the reviewer prompt are read from
- *   the target's tip
- * - The review worktree is removed (`git worktree remove`, never forced: a dirty one stays, nothing is deleted) when the
- *   wave leaves `reviewing`/`merging` for anything but `merging`
- * - Ends when the wave rests: lets the lock go, then looks for a poke marker once more and runs on when there is one
- *   and it gets the lock back. SIGTERM/SIGINT (`stopping`): cancels the running commands and any launch of a task
- *   (`startWaveTasks` gets the abort signal: no further task starts, the one launching is undone), records no stage
- *   change (a step its stop cut short says nothing about the wave: it stays where it was, `interrupted`, and a
- *   resume runs that step again) and leaves the review worktree for that resume
+ * The detached process that drives one wave to rest: `bun wave-runner.ts <wave id>`. No Pi session: the pure steps
+ * (`git.ts`, `rebaseWorktree`, `mergeTask`, `review-each.ts`, the merge queue) with the runner's own `Exec`.
+ * - Holds the wave's lock for its life (one runner per wave) and loops: clear the poke marker, read the log, act on the
+ *   stage (`step`: `build`, `review`, `merge`)
+ * - A stage change is a compare-and-append on the stage it left: a `waves.add` that came first wins
+ * - Resumable from the log: a stopping runner records no stage change, the next one runs that step again from its start
  */
 import { existsSync, realpathSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
@@ -47,7 +19,7 @@ import { CONFLICT_TASKS, conflictTask, pokeQueuedAfter, REVIEWER_FIX_CAP, review
 import { fitFix, reviewFit, reviewNext, type ReviewEachDeps } from "./review-each.ts";
 import { CommandRunner, type CommandResult } from "./run.ts";
 import { INFRA_EXIT, passed, type GateData, type Task } from "./state.ts";
-import { errorText, FactoryError, outputTail } from "./util.ts";
+import { errorText, FactoryError, isBusy, outputTail } from "./util.ts";
 import { clearPoke, lockWave, unlockWave, waveLockPath, wavePokePath } from "./wave-poke.ts";
 import {
   allCancelled,
@@ -607,7 +579,7 @@ async function takeLock(id: string): Promise<boolean> {
       await lockWave(id);
       return true;
     } catch (error) {
-      if (!(error instanceof FactoryError && error.code === "busy")) throw error;
+      if (!isBusy(error)) throw error;
     }
     if (Date.now() >= deadline) return false;
     await Bun.sleep(20);
@@ -654,7 +626,7 @@ export async function runWave(id: string): Promise<number> {
       try {
         await lockWave(id);
       } catch (error) {
-        if (error instanceof FactoryError && error.code === "busy") return 0;
+        if (isBusy(error)) return 0;
         throw error;
       }
     }

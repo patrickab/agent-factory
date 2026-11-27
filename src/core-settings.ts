@@ -1,14 +1,7 @@
 /**
- * The core's actions on what a repository is set up with (`core.ts` maps them): the factory models (`models.*`), the
- * registered repositories (`repos.*`), their branches, stored settings (`settings.*`) and `factory.yaml` (`config.*`).
- *
- * - The models a task or repository may use are one user-level list (`models.ts`): `models.get`/`models.set`.
- *   `settings.set` refuses a model not on it, and anything while it is empty (`requireModels`, which
- *   `tasks.start` and the wave actions use too); reads never check it
- * - `settingsOf`: the stored settings, them resolved over the defaults, and the defaults, the branch resolved from the
- *   repository's default one
- * - `config.get` reads the working copy's `factory.yaml`, a draft when there is none;
- *   `config.write` checks the text before it writes it (never commits)
+ * The core's actions on what a repository is set up with: models, repositories, branches, settings, `factory.yaml`.
+ * - `settings.set` refuses a model not on the factory models list, and anything while it is empty; reads never check it
+ * - `config.write` checks the text before it writes it, and never commits
  */
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";

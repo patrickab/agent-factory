@@ -1,10 +1,6 @@
 /**
- * What every area of the core (`core.ts`) shares: the error clients see, the context a handler runs in, and the
- * helpers of the params (ids, repositories, tags).
- *
- * - `oneLine` makes git's output one line
+ * What every area of the core shares: the error clients see, a handler's context, and the param helpers.
  * - A `repo` param is a path inside the repository, relative to the caller's `cwd`; `primaryOf` is its primary checkout
- * - A `Handler` is one action's body: the checked params and the caller's context, resolving with plain JSON
  * - Imports no area module (only their types): every area module and `waves.ts` may import it
  */
 import { isAbsolute, resolve } from "node:path";

@@ -1,13 +1,8 @@
 /**
- * The core's `tasks.wait` (`core.ts` maps it): a supervisor's completion signal over the watched tasks and waves.
- *
- * - Polls until they rest (no runner lives and the state is a resting one, or it is interrupted; a wave: `merged`,
- *   `cancelled`) or one needs attention (a task resting and not `done`; a wave `rejected`, `blocked`,
- *   `waiting_approve`, interrupted, building stuck or queued after a cancelled wave), or the timeout passes. A queued
- *   wave that can still start neither rests nor needs attention: it starts once the waves it waits for merge. One
- *   whose waves all merged with no runner of its own or theirs left is interrupted (`queueStalled`)
- * - Every poll builds the answer's views and judges them; a session file is parsed again only when it changed
- *   (`sessionSummary`)
+ * The core's `tasks.wait`: a supervisor's completion signal over the watched tasks and waves.
+ * - Polls until they rest or one needs attention, or the timeout passes. A queued wave that can still start does
+ *   neither: it starts once the waves it waits for merge; one whose waves all merged with no runner left is interrupted
+ * - A session file is parsed again only when it changed (`sessionSummary`)
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { stringsParam, tagParam, WAIT_TIMEOUT_MS, type Handler } from "./core-shared.ts";
@@ -57,7 +52,7 @@ async function waitForTasks(watched: Watched, timeoutMs: number, signal: AbortSi
     // One read of the task records and the waves for every watched wave, as `waves.list` does.
     const all = files.length === 0 ? [] : await listWaves();
     const read = { records: new Map((files.length === 0 ? [] : await listTasks()).map((record) => [record.id, record])) };
-    const [tasks, looks, proofs] = await Promise.all([Promise.all(records.map((record) => taskView(record))), Promise.all(files.map((file) => lookWave(file, all, read))), Promise.all(proofIds.map(proofView))]);
+    const [tasks, looks, proofs] = await Promise.all([Promise.all(records.map((record) => taskView(record))), Promise.all(files.map((file) => lookWave(file.declaration.id, all, read))), Promise.all(proofIds.map(proofView))]);
     const attention = [
       ...tasks.filter((view) => needsAttention(view) && !(view.state === "cancelled" && view.wave !== null && waveIds.has(view.wave))).map((view) => view.id),
       ...looks.filter(waveNeedsAttention).map((look) => look.view.id),

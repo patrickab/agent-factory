@@ -1,15 +1,9 @@
 /**
  * A message to a task that is merged already (`done`, reason `merged`): a follow-up run.
- *
- * - The coder works in the task's worktree (made again from its branch when it is gone, `restoreWorktree` in
- *   `launch.ts`); once the gates pass, the change merges as a normal new commit through the usual merge, with its own
- *   commit message (the coder is asked for it, `commitmsg.ts`). No history is rewritten
- * - `followUpPrompt`: the system prompt section of such a run
- * - `registerNewTaskTool`: the tool `factory_new_task {title, handoff}`, which starts a task for a part of the request
- *   outside the task's scope through `tasks.start`, on the parent's target branch and merge mode, with the parent's
- *   `origin` (the session told when the new task needs attention, invariant 9)
- * - `registerAskSupervisorTool`: the tool `factory_ask_supervisor {question}`, which records the question, rests the
- *   task in `waiting_answer` and ends the coder's turn; the next message to the task is the answer
+ * - The coder works in the task's worktree (made again from its branch when it is gone); the change merges as a new
+ *   commit with its own message. No history is rewritten
+ * - Also the coder's tools `factory_new_task` (a task for the part outside the scope, with the parent's target, merge
+ *   mode and `origin`) and `factory_ask_supervisor` (rests the task in `waiting_answer`, ends the turn)
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { COMMIT_TITLE_RE } from "../commitmsg.ts";

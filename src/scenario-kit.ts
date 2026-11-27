@@ -10,12 +10,12 @@
  *   other asks the script, with the role (`reviewer` when `submit_verdict` is offered), the text of the last message and
  *   the request. A script that returns nothing ends the turn
  */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test } from "bun:test";
 import { callAction } from "./core.ts";
+import { git, until } from "./core-test-kit.ts";
 import { liveRunners, stopRunners } from "./launch.ts";
 import { writeFakeMemoryStore, writeStore, type FakeStore } from "./fake-memory-store.ts";
 import type { Notice } from "./notify.ts";
@@ -50,6 +50,11 @@ export interface Case {
 }
 
 const ROOT = join(import.meta.dirname, "..");
+/**
+ * The directory of the real `pi`, found once on the user's PATH: a version manager's shim (in a `shims` directory)
+ * picks its version from HOME, which a case replaces with its own. First on a case's PATH.
+ */
+const PI_DIR = (process.env.PATH ?? "").split(":").find((dir) => basename(dir) !== "shims" && existsSync(join(dir, "pi")));
 
 export const write = (path: string, content: string): ToolCall => ({ name: "write", args: { path, content } });
 export const bash = (command: string): ToolCall => ({ name: "bash", args: { command } });
@@ -103,18 +108,6 @@ function serveModel(script: Script, calls: ModelCall[], afterTool?: Script) {
 /** The events of `notices`: `<task|wave>:<id>:<event>`, each key without its count. */
 export const events = (notices: Notice[]): string[] => notices.map((notice) => notice.key.split(":").slice(0, 3).join(":"));
 
-export function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-}
-
-export async function until(check: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error("timed out waiting");
-    await Bun.sleep(50);
-  }
-}
-
 /** SIGTERM to the live runners of the task or wave `id`, as a host shutting down sends it. */
 export async function terminate(id: string): Promise<void> {
   const record = (await listTasks()).find((task) => task.id === id);
@@ -166,8 +159,9 @@ export function scenario(name: string, script: Script, body: (c: Case) => Promis
         GIT_AUTHOR_EMAIL: "test@example.com",
         GIT_COMMITTER_EMAIL: "test@example.com",
       });
-      // Never the real `agent-worktree`: the factory makes the worktree with git.
-      process.env.PATH = (process.env.PATH ?? "").split(":").filter((path) => path !== dirname(Bun.which("agent-worktree") ?? "/nonexistent/x")).join(":");
+      // The real `pi` first; never the real `agent-worktree`: the factory makes the worktree with git.
+      const worktreeTool = dirname(Bun.which("agent-worktree") ?? "/nonexistent/x");
+      process.env.PATH = [PI_DIR ?? "", ...(process.env.PATH ?? "").split(":")].filter((path) => path !== "" && path !== worktreeTool).join(":");
       if (setup.store !== undefined) {
         writeFakeMemoryStore(join(dir, "bin"));
         process.env.PATH = `${join(dir, "bin")}:${process.env.PATH}`;

@@ -1,16 +1,8 @@
 /**
- * Factory cards in Pi's TUI (contract `cards`): the readable form of every factory notice and `factory` tool result.
- * The only module that draws a card; the card itself comes from `../cards.ts`, never from the agent's text.
- *
- * - `registerCardRenderers`: the `factory-notice` message renderer and the Alt+V switch. A notice without a card in
- *   its `details` (an old one) gets no renderer component: Pi renders it as before
- * - `factoryToolRenderers`: the `factory` tool's `renderCall` (icon, action) and `renderResult` (its card; an error or a
- *   result without a card shows its text)
- * - A card: the icon and the title (attention: warning colour, bold), a line of tag, id, state, progress, cost, the
- *   rows, the findings, the text (markdown), what a decision answers. Collapsed: at most `ROWS` rows, findings as counts
- *   per severity, at most `TEXT_LINES` lines of text; expanded (Pi's expand key) shows all
- * - The switch (`CardSwitch`, Alt+V): every card of the session shows the agent's text instead, read at render time,
- *   so a toggle redraws the cards already shown
+ * Factory cards in Pi's TUI: the readable form of every factory notice and `factory` tool result. The only module
+ * that draws a card; the card itself comes from `../cards.ts`, never from the agent's text.
+ * - Collapsed: at most `ROWS` rows, findings as counts, `TEXT_LINES` lines of text; Pi's expand key shows all
+ * - The switch (Alt+V) shows every card as the agent's text, read at render time, so a toggle redraws the cards shown
  * - No line is wider than the width it renders at
  */
 import { getMarkdownTheme, type ExtensionAPI, type Theme, type ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
@@ -27,7 +19,6 @@ const ROWS = 4;
 const TEXT_LINES = 8;
 const SEVERITIES: readonly CardFinding["severity"][] = ["blocker", "major", "minor"];
 
-/** What of Pi's theme a card uses. */
 export type CardTheme = Pick<Theme, "fg" | "bold">;
 
 /** The session's switch: `agentText` shows the agent's text in place of every card. */

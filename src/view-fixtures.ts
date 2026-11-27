@@ -102,7 +102,7 @@ export const review = (verdict: "approved" | "rejected" | "failed", findings: Wa
 
 export const FINDINGS: WaveView["reviews"][number]["findings"] = [
   { severity: "major", file: "src/wave-runner.ts", line: 309, text: "A wave whose tasks can never start\nstays building forever." },
-  { severity: "minor", file: "src/tasks.ts", line: null, text: "tasks.import can put a task into a wave." },
+  { severity: "minor", file: "src/tasks.ts", line: null, text: "tasks.start can put a task onto a wave's branch." },
 ];
 
 export const PROOF_ID = "9c1d2e3f-aaaa-4bbb-8ccc-dddddddddddd";
@@ -195,7 +195,7 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "tasks.retry": { params: { id: "4ae7" }, result: task({ round: 3 }) },
   "tasks.cancel": { params: { id: "4ae7" }, result: task({ state: "cancelled", running: false, reason: "cancelled" }) },
   "tasks.remove": { params: { id: "4ae7" }, result: { removed: TASK_ID, dropped: "1 unmerged commit" } },
-  "tasks.message": { params: { id: "4ae7", text: "go on" }, result: task() },
+  "tasks.message": { params: { id: "4ae7", text: "SECRET-REQUEST" }, result: task() },
   "waves.start": { params: { repo: ".", tag: "factory/w1", title: "t", request: "SECRET-REQUEST", tasks: [] }, result: { wave: wave() } },
   "waves.add": { params: { id: "3f2a", tasks: [{ key: "fix", title: "fix", request: "SECRET-REQUEST" }] }, result: { wave: wave({ tasks: [...wave().tasks, waveTask("fix", "running")] }) } },
   "waves.get": { params: { id: "3f2a" }, result: { wave: wave() } },
@@ -218,8 +218,8 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
       done: [{ wave: WAVE_ID, tag: "factory/w1", key: "docs", task: "4ae7325b-2222-4000-8000-000000000000" }],
     },
   },
-  "tasks.update": { params: { id: "4ae7325b", request: "the new request" }, result: { wave: wave(), key: "docs", changed: true, delivery: "pending" } },
-  "waves.update": { params: { id: WAVE_ID, request: "new instructions" }, result: { wave: wave(), changed: true } },
+  "tasks.update": { params: { id: "4ae7325b", request: "SECRET-REQUEST" }, result: { wave: wave(), key: "docs", changed: true, delivery: "pending" } },
+  "waves.update": { params: { id: WAVE_ID, request: "SECRET-REQUEST" }, result: { wave: wave(), changed: true } },
   "decisions.list": {
     params: {},
     result: {

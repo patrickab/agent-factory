@@ -1,21 +1,8 @@
 /**
- * The `factory` tool as every harness offers it (the Pi extension's `pi/tool.ts`, the MCP server `mcp.ts`): its name,
- * description and JSON schema, built from `ACTIONS`, and its answer, the agent view (`agent-view.ts`), so the harnesses
- * cannot drift apart.
- *
- * - The description: an opening sentence, the features' `toolBlurb`s (`features.ts`), how answers work
- * - `agentActions`: every `ACTIONS` name with a view (`tasks.timeline` has none: programs replay it through the core
- *   or the CLI); in a task session only those with `mutates: false`
- * - `factoryToolParameters`: `action` (one of them) plus the union of their params
- * - `callFactoryTool`: one tool call, `{action, ...params}`, refusing an action the agent is not offered. Answers the
- *   full view as `result`, its card and the agent's text of it (`actionView`); a failure throws (`factoryToolError`
- *   renders it)
- * - `actionView(name, params, result, cause?)`: the card of a result from its action's view and its text, never
- *   throwing (`present`): the agent must not retry what already happened
- * - A decision (contract `cards`): before the action runs, its `decides` reads the cause from state
- *   (`decisions.ts`); a cause that cannot be read leaves a decision that answers nothing. After it succeeded the card is a
- *   decision and, with an `origin`, appended to that session's log. A log that fails
- *   never fails the answer: the action happened
+ * The `factory` tool as every harness offers it (`pi/tool.ts`, `mcp.ts`): name, description, schema and answer,
+ * built from `ACTIONS`, so the harnesses cannot drift apart.
+ * - `actionView` never throws: the agent must not retry what already happened
+ * - A decision's cause is read before the action runs; a log that fails never fails the answer
  */
 import { agentError } from "./agent-view.ts";
 import { present, type FactoryCard } from "./cards.ts";
@@ -24,7 +11,7 @@ import type { Params } from "./core-shared.ts";
 import { appendDecision, type Cause } from "./decisions.ts";
 import type { ActionSpec, View } from "./feature.ts";
 import { FEATURES } from "./features.ts";
-import { errorText, isRecord } from "./util.ts";
+import { errorText, isRecord, short } from "./util.ts";
 
 type Schema = Record<string, unknown>;
 
@@ -111,14 +98,18 @@ async function causeOf(name: string, params: Params, options: CallOptions): Prom
  * card is a decision, answering the notice key the cause names. A view that fails is a receipt, never a failure.
  */
 export function actionView(name: string, params: unknown, result: unknown, cause: Cause | null = null): { card: FactoryCard; text: string } {
-  const failed = `${name} done; its answer could not be shown, do not repeat it: look with tasks.get, waves.get or the lists`;
+  // The id of what it made or touched (`{wave}`, `{task}`, a task view, `{removed}`): the agent looks it up instead.
+  const answer = isRecord(result) ? result : {};
+  const made = [answer.wave, answer.task, answer].map((inner) => (isRecord(inner) ? inner.id : undefined)).find((id) => typeof id === "string") ?? answer.removed;
+  const failed = `${name} done${typeof made === "string" ? ` (${short(made)})` : ""}; its answer could not be shown, do not repeat it: look with tasks.get, waves.get or the lists`;
+  const sent = isRecord(params) ? [params.request, params.text].filter((value) => typeof value === "string") : [];
   return present(() => {
     const built = (ACTIONS[name as ActionName].view as View)((params ?? {}) as Params, result as never);
     if (cause === null) return built;
     const [first, ...more] = [built].flat();
     const { answers: _answers, ...rest } = first;
     return [{ ...rest, kind: "decision", ...(cause.answers === undefined ? {} : { answers: cause.answers }) }, ...more];
-  }, failed, name.startsWith("repos."));
+  }, failed, name.startsWith("repos."), sent);
 }
 
 /** A failed tool call as the agent's one line (`agentError`); an error that is not a `FactoryError` is `failed`. */

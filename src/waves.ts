@@ -1,26 +1,18 @@
 /**
  * A wave's record on disk and the fold from its events to its state. Pure: nothing here starts a process.
- *
- * - One file per wave, `<factoryHome>/waves/<id>.jsonl`, append-only: line 1 is the declaration (`createWave`), every
- *   later line one event (`appendWaveEvent`, `appendWaveEvents`). Its other files lie next to it (`wave-poke.ts`)
- * - The wave's state is only ever `foldWave` of its events plus its tasks' states: the scheduling helpers
- *   (`startableKeys`, `readyForReview`, `allCancelled`, `waveCounts`, `stuckKeys`) take the fold and a map key -> task
- *   state
- * - Invariant 8, a wave never waits silently: a `stage` event may carry `detail`, one sentence on why (a block's cause,
- *   the tasks that can never start). A `tasks` event may carry `dropped`: pending keys that could never start when the
- *   supervisor added tasks, which count as cancelled from then on
- * - Every append holds the log lock (`waveLogLockPath`) from the read of the log to its write: appends never interleave,
- *   and `appendWaveEvents` checks the fold under it (a compare-and-append: the runner's stage change loses against a
- *   `waves.add` that came first). A line cut short by a crash is skipped when read, and the next append starts on a
- *   line of its own
- * - `listWaves` skips files that are no valid wave, as `listTasks` does; `validateTaskSpecs` checks specs a wave adds
+ * - One append-only log per wave, `wave.jsonl` in its home (`waveHome`), read through the link `wavesDir()/<id>`
+ *   (`wavePath`): line 1 the declaration, every later line one event. The state is only ever `foldWave` of the events
+ *   plus the tasks' states. (`<id>.log` beside the link is the runner's output, not this log.)
+ * - Invariant 8, a wave never waits silently: a `stage` event may carry `detail`, one sentence on why
+ * - Every append holds `<id>.log.lock` from the read to the write: appends never interleave, and `appendWaveEvents` is a
+ *   compare-and-append. A line cut short by a crash is skipped when read; the next append starts a line of its own
  */
 import { mkdir, open, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MODEL_SIZES, type ModelSize, type StoredSettings } from "./settings.ts";
 import { FACTORY_TURN_STATES, RESTING_STATES, type MinorFinding, type State } from "./state.ts";
 import { withLock } from "./tasks.ts";
-import { FactoryError, ifMissing, isRecord, jsonLines, type Usage } from "./util.ts";
+import { errorText, FactoryError, ifMissing, isRecord, jsonLines, type Usage } from "./util.ts";
 import { isWaveId, waveDir, waveHome, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, wavesDir } from "./wave-poke.ts";
 import type { FeedbackEntry } from "./feedback.ts";
 
@@ -307,10 +299,15 @@ export async function readWave(id: string): Promise<WaveFile> {
   if (!isWaveId(id)) throw new FactoryError("not_found", `${id} is not a wave id`);
   const text = await ifMissing(readFile(path, "utf8"), null);
   if (text === null) throw new FactoryError("not_found", `no wave ${id}`);
-  // Line 1 the declaration, then the events; a torn append is skipped.
-  const [declaration, ...events] = jsonLines(text);
-  if (declaration === undefined) throw new Error(`${path}: the file has no declaration`);
-  return { declaration: declaration as unknown as WaveDeclaration, events: events as unknown as WaveEvent[] };
+  // Line 1 the declaration, then the events; a torn append is skipped, a corrupt declaration is not.
+  const newline = text.indexOf("\n");
+  let declaration: WaveDeclaration;
+  try {
+    declaration = JSON.parse(newline === -1 ? text : text.slice(0, newline));
+  } catch (error) {
+    throw new Error(`${path}: the declaration is no JSON (${errorText(error)})`);
+  }
+  return { declaration, events: jsonLines<WaveEvent>(newline === -1 ? "" : text.slice(newline + 1)) };
 }
 
 /** Every wave, oldest first; only those of `repo` when given. Entries that are no valid wave (a home deleted by hand) are skipped. */

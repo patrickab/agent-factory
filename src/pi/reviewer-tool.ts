@@ -1,24 +1,11 @@
 /**
  * Loaded only by the reviewer child (`pi -ne -e reviewer-tool.ts`), never into a coding session.
- *
- * - Provides `submit_verdict`, the one way the reviewer can answer. Pi checks the arguments against the schema before
- *   `execute()` runs, and `terminate: true` ends the run on the call
- * - The parent reads the findings from `details.findings` of the tool result (`review.ts`). Whether the review
- *   approves is derived there from the severities, so the tool does not ask for it
- * - Provides `read_diff({paths?})` when the factory names a diff file (`REVIEW_DIFF_ENV`, a `TaskDiff` as JSON, written
- *   by `runReviewer` per review): the only way the diff reaches a reviewer. Lockfiles last, cut as the review
- *   patch is (`reviewPatch`); `paths` keeps only those files (or directories)
- * - A wave's reviewer session is resumed for every review: each tool result older than this process (an earlier review,
- *   one cut short included) reaches the model as a `STUB_PREFIX` line through Pi's `context` hook. The session keeps it
- *   unchanged; the same stubs at every request keep the cached prefix
- * - A wave's reviewer (`REVIEW_WAVE_ENV` set, with `REVIEW_TASK_ENV` and `REVIEW_PLAN_ENV`: the factory plugin is not
- *   loaded here) also gets `registerReviewerTools`:
- *   - `scout`: always waits for the report; it explores the worktree of the task under review (else the wave's review
- *     worktree), so its cost and store are the task's (the wave's)
- *   - `feedback`: role `reviewer`, stored under the plan with the task and wave (task null in the fit pass)
- *   - `notify_supervisor {text}`: one quiet notice to the wave's origin (`noteToSupervisor`); the review goes on
- *   - `start_fix {title, request, model?}`: a `fix:` task in the wave (`startReviewerFix`), at most `REVIEWER_FIX_CAP` per wave,
- *     then refused with the hint to notify the supervisor
+ * - `submit_verdict` is the reviewer's one way to answer (`terminate: true` ends the run); `read_diff` the one way the
+ *   diff reaches it (`REVIEW_DIFF_ENV`)
+ * - A wave's reviewer session is resumed for every review: each tool result older than this process reaches the model
+ *   as a `STUB_PREFIX` line through Pi's `context` hook; the same stubs at every request keep the cached prefix
+ * - A wave's reviewer (`REVIEW_WAVE_ENV`) also gets `scout`, `feedback`, `notify_supervisor` and `start_fix`
+ *   (`registerReviewerTools`): the factory plugin is not loaded here
  */
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

@@ -1,18 +1,10 @@
 /**
  * The gate proof: `merge_gates` of a branch's `factory.yaml` run on its tip in a worktree of its own, in the background,
  * so the supervisor learns whether the target holds before it declares a wave on it.
- *
- * - `gates.prove {repo, branch?}` (`PROOF_HANDLERS`): takes the lock `proofs/<id>.lock`, writes the record, spawns
- *   `bun gates-prove.ts <id>` detached (`spawnDetached`) and hands it the lock, like a task's runner. Branch: the given
- *   one, else the repo's stored branch, else its default. Refused without a committed `factory.yaml`. Answers `{proof}`
- * - The record `proofs/<id>.jsonl`: line 1 the declaration; the runner rewrites it whole with one `end` line that holds
- *   the steps (`passed`, `flaky` or `failing`; failing names the step and the path of its output,
- *   `proofs/<id>.failing.log`). Without an `end` it is `running` while its runner holds the lock (`lockRunner`), else `interrupted`.
- *   `<id>.log` is the runner's output. The worktree an interrupted proof left is removed by the next `gates.prove` in its repo
- * - The runner: a detached worktree of the tip, `hooks.after_create` of the tip, then every `merge_gates` step through
- *   `runGateStep` (one rerun: passing then, the proof is `flaky`). `FACTORY_BASE` is the empty tree: the whole tree is
- *   the change. The worktree is removed (forced: gate output is scratch) before the `end` is written
- * - `proofsOf(origin)`: the views a Pi session's notifier judges (`notify.ts`)
+ * - The record `proofs/<id>.jsonl`: line 1 the declaration, then one `end` line with the steps. Without an `end` it is
+ *   `running` while its runner holds the lock, else `interrupted`
+ * - `FACTORY_BASE` is the empty tree: the whole tree is the change. One rerun per step: passing then, the proof is `flaky`
+ * - The worktree is removed (forced: gate output is scratch) before the `end` is written
  */
 import { existsSync } from "node:fs";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -27,7 +19,7 @@ import { CommandRunner, runCommand, type CommandResult, type Exec } from "./run.
 import { factoryHome, loadSettings } from "./settings.ts";
 import { onPath, spawnDetached } from "./spawn.ts";
 import { passed } from "./state.ts";
-import { handLockFile, lockFile, lockRunner } from "./tasks.ts";
+import { handLockFile, lockFile, lockRunner, unlockFile } from "./tasks.ts";
 import { errorText, FactoryError, ifMissing, jsonLines, outputTail, writeAtomic } from "./util.ts";
 
 export type ProofState = "running" | "passed" | "flaky" | "failing";
@@ -54,12 +46,10 @@ export interface ProofStep {
 export interface ProofView extends ProofDeclaration {
   state: ProofState;
   steps: ProofStep[];
-  /** Every step's flaky names. */
   flaky: string[];
   /** The failing step (`hooks.after_create ...` for a hook), its output's tail and the path of its full output. */
   failing: { step: string; tail: string; log: string } | null;
   endedAt: string | null;
-  /** A runner lives. */
   running: boolean;
   /** `running` in its record, no runner lives: it never ends. */
   interrupted: boolean;
@@ -91,13 +81,12 @@ async function writeProof(declaration: ProofDeclaration, end?: End): Promise<voi
   await writeAtomic(proofPath(declaration.id), [declaration, ...(end === undefined ? [] : [end])].map((line) => `${JSON.stringify(line)}\n`).join(""));
 }
 
-/** The ids of every recorded proof. */
 async function proofIds(): Promise<string[]> {
   const names = await ifMissing(readdir(proofsDir()), []);
   return names.filter((name) => name.endsWith(".jsonl")).map((name) => name.slice(0, -".jsonl".length));
 }
 
-/** Proof `id` as the full view shows it. Whether its runner lives is asked first: a runner writes its end before it exits. */
+/** Whether its runner lives is asked first: a runner writes its end before it exits. */
 export async function proofView(id: string): Promise<ProofView> {
   const lives = (await lockRunner(proofLockPath(id), id)) !== null;
   const { declaration, end } = await readProof(id);
@@ -257,9 +246,13 @@ export async function runProof(id: string): Promise<void> {
 
 if (import.meta.main) {
   const id = process.argv[2] ?? "";
-  await runProof(id).catch((error: unknown) => {
-    log(id, errorText(error));
-    process.exit(1);
-  });
-  process.exit(0);
+  const failed = await runProof(id).then(
+    () => false,
+    (error: unknown) => {
+      log(id, errorText(error));
+      return true;
+    },
+  );
+  await unlockFile(proofLockPath(id));
+  process.exit(failed ? 1 : 0);
 }

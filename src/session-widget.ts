@@ -1,18 +1,11 @@
 /**
  * The waves a Pi session declared, as the lines of the widget above its editor (`pi/index.ts`). Pure: no I/O.
- *
- * - Header: `Factory · <n> active[ · <m> needs you][ · <k> cards to rule on]` and the active waves' cost; with no
- *   active wave `Factory · <n> finished`. No waves and no card to rule on: no lines (the widget goes)
- * - Cards to rule on (`cardsToRule`): the session's attention notices that no later notice of the same task, wave,
- *   scout or proof replaced and no later decision answered
- * - Active (not `merged`, not `cancelled`): those that need the supervisor first (`WaveView.attention`), then newest
- *   first. A queued wave that can still start shows `queued`
- * - Finished: one line `<n> finished` while closed; open (`showFinished`), that line carries their cost and every
- *   finished wave follows, newest first
- * - A row: mark, tag, title, done/total, state, cost. Only the title gives way to the width. Tag and title go through
- *   the agent view's `scrub` (no paths, no long ids)
+ * - No waves and no card to rule on: no lines (the widget goes)
+ * - Active waves that need the supervisor first, then newest first; finished ones fold into one line until opened
+ * - Only the title gives way to the width. Tag and title go through the agent view's `scrub` (no paths, no long ids)
  */
 import { scrub } from "./agent-view.ts";
+import { unreachableTasks } from "./cards.ts";
 import { dollars } from "./util.ts";
 import { WAVE_FINAL_STAGES, type WaveView } from "./waves.ts";
 
@@ -64,16 +57,25 @@ export function cardsToRule(branch: Iterable<unknown>): number {
 
 const ELLIPSIS = "…";
 
+/** `WaveView.stuck`, or building with tasks that can never start even while another task still runs: the user sees it early. */
+function stuck(view: WaveView): boolean {
+  return view.stuck || (view.stage === "building" && unreachableTasks(view.tasks).length > 0);
+}
+
+function needsYou(view: WaveView): boolean {
+  return view.attention || stuck(view);
+}
+
 function state(view: WaveView): string {
   if (view.interrupted) return "interrupted";
-  if (view.stuck) return "stuck";
+  if (stuck(view)) return "stuck";
   return view.stage;
 }
 
 function mark(view: WaveView): string {
   if (view.stage === "merged") return "✓";
   if (view.stage === "cancelled") return "✗";
-  return view.attention ? "!" : "◐";
+  return needsYou(view) ? "!" : "◐";
 }
 
 function money(cost: number | null): string {
@@ -143,12 +145,12 @@ export function sessionWidget(waves: readonly WaveView[], { showFinished, width,
   if (waves.length === 0) return toRule === "" ? [] : [truncate(`Factory${toRule}`, width)];
   const active = waves.filter((view) => !WAVE_FINAL_STAGES.includes(view.stage));
   const finished = waves.filter((view) => WAVE_FINAL_STAGES.includes(view.stage)).sort(newestFirst);
-  active.sort((a, b) => Number(b.attention) - Number(a.attention) || newestFirst(a, b));
+  active.sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)) || newestFirst(a, b));
   const finishedCost = showFinished ? money(totalCost(finished)) : "";
   if (active.length === 0) {
     return [spread(`Factory · ${finished.length} finished${toRule}`, finishedCost, width), ...(showFinished ? rows(finished, width) : [])];
   }
-  const waiting = active.filter((view) => view.attention).length;
+  const waiting = active.filter(needsYou).length;
   const header = `Factory · ${active.length} active${waiting > 0 ? ` · ${waiting} needs you` : ""}${toRule}`;
   const lines = [spread(header, money(totalCost(active)), width), ...rows(active, width)];
   if (finished.length === 0) return lines;

@@ -1,12 +1,8 @@
 /**
- * Feedback the agents give about the factory's work (`feedback {kind, what, cost?, suggestion?}`, `pi/feedback-tool.ts`).
- *
- * - An entry is one fact under `<store>/run/feedback`, a JSON line with the task, wave and role added; the store is the
- *   task's `plan`. The wave reviewer's pass on how the tasks fit together has no task: `task` null, the wave's `plan`.
- *   One `memory-store apply` (with the memory's description, which its first entry needs); a store without the
- *   directory `run` gets it declared (`create`) and the apply once more. `memory-store` missing, no plan or no such
- *   store: nothing is stored, the entry stays in the task's session (the tool appends it there)
- * - `waveFeedback` lists a wave's entries, oldest first, for `waves.get`
+ * Feedback the agents give about the factory's work (`pi/feedback-tool.ts`): one fact under `<store>/run/feedback`,
+ * the store being the task's (for the wave reviewer's fit pass the wave's) `plan`.
+ * - A store without the directory `run` gets it declared and the apply once more
+ * - `memory-store` missing, no plan or no such store: nothing is stored, the entry stays in the task's session
  */
 import { memoryStore } from "./contracts.ts";
 

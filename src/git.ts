@@ -1,16 +1,7 @@
 /**
- * Git facts a factory task needs, as thin calls over the command runner.
- *
- * - Consumes an `Exec` and a checkout path
- * - Provides the task's git identity (`taskGit`), its primary checkout, the snapshot of a working tree as a tree id
- *   (`snapshotTree`), the task's diff base and its diff (changed paths and patch, untracked files included)
- * - Provides the checks a merge needs before it writes: the checkout is on its branch with no git operation in
- *   progress (`assertCheckoutReady`), whether a worktree differs from HEAD (`worktreeChanges`); removes its untracked
- *   files (`removeUntracked`), ignored files left alone. Tells a rebase in progress and its conflicting files
- *   (`rebaseInProgress`), and aborts one a killed merge left behind (`abortLeftoverRebase`)
- * - Provides the added and removed lines per changed path (`diffFileCounts`)
- * - Provides where the task's own change starts (`taskBase`) and whether its target branch moved past it (`targetMoved`)
- * - Nothing here but `removeUntracked` writes the checkout's own index or its files: staging goes through a scratch index
+ * Git facts a factory task needs, as thin calls over the command runner (`Exec`).
+ * - Nothing here but `removeUntracked` writes the checkout's own index or its files: staging goes through a scratch
+ *   index. `removeUntracked` leaves ignored files alone
  */
 import { existsSync, realpathSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
@@ -38,7 +29,6 @@ export async function git(exec: Exec, cwd: string, args: string[], env?: Record<
   return result.stdout.trim();
 }
 
-/** The paths of a `-z` listing. */
 export function nulList(text: string): string[] {
   return text.split("\0").filter((path) => path !== "");
 }

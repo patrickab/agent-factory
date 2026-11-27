@@ -12,6 +12,7 @@ import factory from "./index.ts";
 import { coderRequest } from "../ops.ts";
 import { modelsCommand } from "../models.ts";
 import type { Draft, Settings } from "../state.ts";
+import type { ScoutView } from "../scouts.ts";
 
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
@@ -58,7 +59,7 @@ interface Entry {
 }
 
 /** One extension instance in `cwd`, with what Pi would hold: the session's entries, sent messages, notifications and statuses. */
-function session(cwd: string, branch: Entry[] = []) {
+function session(cwd: string, branch: Entry[] = [], testing: Parameters<typeof factory>[1] = {}) {
   const handlers = new Map<string, (event: any, ctx: any) => unknown>();
   let commandHandler: (args: string, ctx: any) => Promise<void> = async () => undefined;
   const entries: Entry[] = [...branch];
@@ -68,13 +69,14 @@ function session(cwd: string, branch: Entry[] = []) {
   const notes: string[] = [];
   const statuses: [string, string | undefined][] = [];
   const flags = { idle: true, pending: false, aborts: 0 };
+  const toolDefs = new Map<string, { execute: (...args: unknown[]) => Promise<any> }>();
   const pi = {
     registerMessageRenderer: () => undefined,
     registerShortcut: () => undefined,
     registerCommand: (_name: string, options: { handler: typeof commandHandler }) => {
       commandHandler = options.handler;
     },
-    registerTool: () => undefined,
+    registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<any> }) => toolDefs.set(tool.name, tool),
     on: (name: string, handler: (event: any, ctx: any) => unknown) => handlers.set(name, handler),
     appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
     sendUserMessage: (text: string) => messages.push(text),
@@ -99,7 +101,7 @@ function session(cwd: string, branch: Entry[] = []) {
       getBranch: () => branch.map((entry) => ({ type: "custom", ...entry })),
     },
   };
-  factory(pi as unknown as ExtensionAPI);
+  factory(pi as unknown as ExtensionAPI, testing);
   const emit = (name: string, event: unknown = {}) => handlers.get(name)?.(event, ctx);
   const states = () => entries.filter((entry) => entry.customType === "factory-state").map((entry) => `${entry.data.state}/${entry.data.reason}`);
   return {
@@ -113,6 +115,8 @@ function session(cwd: string, branch: Entry[] = []) {
     emit,
     states,
     command: (args: string) => commandHandler(args, ctx),
+    /** A coder's tool call, as Pi runs it in this session. */
+    tool: (name: string, params: unknown) => toolDefs.get(name)!.execute("call", params, undefined, undefined, ctx),
     of: (customType: string) => entries.filter((entry) => entry.customType === customType).map((entry) => entry.data),
     start: (settings: Partial<Settings> = {}) =>
       commandHandler(`start ${JSON.stringify({ request: "Add task.txt", title: "feat: add task file", settings: { branch: "main", merge: "auto", maxRounds: 3, review: false, models: {}, ...settings } })}`, ctx),
@@ -128,6 +132,23 @@ function session(cwd: string, branch: Entry[] = []) {
     },
   };
 }
+
+test("a coder's turn does not end before its scouts reported: their reports carry the run on, the round runs at the next end", async () => {
+  let reads = 0;
+  const scout = (state: ScoutView["state"]) => ({ id: "5c0a7000-scout", caller: { kind: "task", id: "t" }, concern: "how a works", state, report: state === "done" ? "MISSING\n1. x" : null }) as unknown as ScoutView;
+  // The core's scout runs a model child: the boundary this test does not own. It reports on its third read.
+  const scoutCore = { start: async () => scout("queued"), get: async () => scout((reads += 1) >= 3 ? "done" : "running") };
+  const worktree = addTaskWorktree();
+  const pi = session(worktree, [], { scoutCore, scoutPollMs: 5 });
+  await pi.start();
+  await pi.tool("scout", { concern: "how a works" });
+  writeFileSync(join(worktree, "task.txt"), "done\n");
+  expect(await pi.boundary()).toBe(true);
+  expect([reads, pi.of("factory-scout").length, pi.of("factory-gate").length]).toEqual([3, 1, 0]);
+  await pi.boundary();
+  expect(pi.of("factory-scout")).toHaveLength(1);
+  expect(pi.of("factory-gate").length).toBeGreaterThan(0);
+});
 
 test("the answer to the commit message ask is the commit message", async () => {
   const branch: Entry[] = [];

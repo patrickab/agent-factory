@@ -470,12 +470,6 @@ class FactoryView(App[None]):
             merge = wave["merge"]
             text.append("\nmerge\n", style="bold")
             text.append(f"  {merge['from'][:10]}..{merge['to'][:10]}  {merge['at']}\n")
-        remote = wave.get("remote")
-        if remote and (remote.get("url") or remote.get("error")):
-            text.append("\nremote\n", style="bold")
-            text.append(f"  {remote.get('url') or ''}\n")
-            if remote.get("error"):
-                text.append(f"  {remote['error']}\n", style="red")
         return text
 
     @staticmethod

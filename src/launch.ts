@@ -1,20 +1,10 @@
 /**
- * Starts a factory task without an interactive session.
- *
- * - Consumes the primary checkout of a repo, a title, a request and settings overrides
- * - Provides `launchTask`: resolves the settings and the target branch (it must hold a committed `factory.yaml`),
- *   creates the task's worktree on a new branch
- *   (`agent-worktree` when it is on PATH, else `git worktree add`), runs the repo's `hooks.after_create` in it, writes
- *   the `TaskRecord` and starts the detached runner with `/factory start <json>`. A failing or aborted step undoes the
- *   earlier ones, through git only. A missing target branch or `factory.yaml` is the refusal `refused`
- * - Provides `sendCommand`: one more message to a task's session, through a new detached runner (the caller's `env`;
- *   `runnerSpawn` puts it in a systemd user scope when `systemd-run` is on PATH) that takes over the task lock its caller holds;
- *   `messageTask`: a message to the coder in any state but merging (`taskInboxPath` of a live runner, else a new
- *   runner); a state refusal is `refused`
- * - Provides `defaultBranch` and `localBranchExists`
- * - Provides `liveRunners`/`stopRunners` (a task's runner: the holder of its lock, `lockRunner`), `unmergedWork` and
- *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another)
- * - The detached spawn itself (`runnerSpawn`, `spawnDetached`) lives in `spawn.ts`, shared with the wave runner's poke
+ * Starts a factory task without an interactive session, and sends its session more messages.
+ * - `launchTask`: worktree on a new branch, `hooks.after_create`, the `TaskRecord`, the detached runner with
+ *   `/factory start`. A failing or aborted step undoes the earlier ones, through git only
+ * - `sendCommand` and `messageTask` reach the session through a new runner that takes over the task lock, or through
+ *   the inbox of a live one
+ * - `deleteTask` removes through git only the task's own branch, never another
  */
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, rm } from "node:fs/promises";
@@ -136,7 +126,6 @@ export interface LaunchInput {
   plan?: string | null;
   /** Aborting it before the runner is started kills the running hook and undoes the launch. */
   signal?: AbortSignal;
-  /** The runner's environment. */
   env?: RunnerEnv;
   /** Which of the resolved models the coder runs with; default `big`. */
   size?: ModelSize;
@@ -269,22 +258,18 @@ export function taskInboxPath(id: string): string {
  * `busy` FactoryError while another holds its lock.
  */
 export async function messageTask(record: TaskRecord, text: string, env?: RunnerEnv): Promise<void> {
-  const refuseState = async () => {
+  if ((await liveRunners(record)).length > 0) {
+    await mkdir(tasksDir(), { recursive: true });
+    return appendFile(taskInboxPath(record.id), `${JSON.stringify({ text })}\n`, "utf8");
+  }
+  await lockTask(record.id);
+  try {
+    // The caller checked `refusal(view, "tasks.message")` before the lock; the state may have moved since.
     const state = await lastFactoryState(record.sessionDir, record.sessionId);
     if (state === undefined) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} has not started yet, send the message once it runs`);
     if (state.state === "merging") throw new FactoryError("refused", `task ${record.id.slice(0, 8)} is merging, send the message when the merge has ended`);
-  };
-  const toInbox = async () => {
-    await mkdir(tasksDir(), { recursive: true });
-    await appendFile(taskInboxPath(record.id), `${JSON.stringify({ text })}\n`, "utf8");
-  };
-  await refuseState();
-  if ((await liveRunners(record)).length > 0) return toInbox();
-  await lockTask(record.id);
-  try {
-    await refuseState();
     if ((await liveRunners(record)).length > 0) throw new FactoryError("busy", `task ${record.id.slice(0, 8)} is busy: its last runner is still ending, try again in a few seconds`);
-    if ((await lastFactoryState(record.sessionDir, record.sessionId))?.state === "done") await restoreWorktree(record);
+    if (state.state === "done") await restoreWorktree(record);
     await sendCommand(record, text, env);
   } finally {
     await unlockTask(record.id);

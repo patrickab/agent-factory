@@ -1,31 +1,8 @@
 /**
- * The factory core: every factory feature as one action over plain JSON. Clients (the `factory` tool, pi-host, a UI)
- * import only this module and render what it returns.
- *
- * - Provides `ACTIONS` (name -> summary, JSON schema of the params, whether it changes anything) and `callAction`
- * - Every failure is a `FactoryError` of one sentence with a code: `invalid` (the params), `not_found` (repo, branch,
- *   task), `busy` (another action or a runner holds the task), `refused` (the task's state or work forbids it),
- *   `failed` (anything else)
- * - A `repo` param is a path inside the repository, relative to the caller's `cwd` (absolute without one); an action
- *   that needs one and gets none uses `cwd`. The repository is its primary checkout. A task `id` may be a unique prefix
- * - The models a task or repository may use are one user-level list (`models.ts`): `models.get`/`models.set`.
- *   `tasks.start` and `settings.set` refuse a model not on it, and anything while it is empty; reads never check it
- * - `tasks.wait` polls the watched tasks and waves until they rest (no runner lives and the state is a resting one, or
- *   it is interrupted; a wave: `merged`, `cancelled`) or one needs attention (a task resting and not `done`; a wave
- *   `rejected`, `blocked`, `waiting_approve` or interrupted): a supervisor's completion signal
- * - The wave actions (`waves.*`) build on `waves.ts` (the log and its fold) and `wave-poke.ts` (the runner): a stage
- *   change is a compare-and-append on the log, then a poke; `WaveView.actions` holds the same predicates
+ * The factory core, the one module clients import: `ACTIONS` and `callAction`, plain JSON in and out. The actions
+ * come from the features (`features.ts`); this module checks the params and runs the handler.
  * - Runners an action starts get the caller's `env` (default `process.env`): the host passes one without its secrets
- * - A task that checks its state and then acts on it holds the task lock (`tasks.ts`) from the check on; a runner it
- *   spawns takes the lock over until it exits. `cancel` stops a live runner first: two Pi processes never share a session
- * - Reads a task's session file for its state, settings, usage (assistant messages plus recorded reviews) and
- *   timeline (by byte offset, so a client polls with `next`)
  * - Imports only Bun, `node:` modules and plugin modules that do the same: the deployed plugin has no `node_modules`
- * - The actions come from the features (`features.ts`): each registers its specs, handlers and views (`feature.ts`)
- * - Cut by area, this module keeps `ACTIONS`, the params check and `callAction`, and re-exports what clients import:
- *   `core-shared.ts` (the params' helpers), `core-settings.ts` (models, repos, branches, settings,
- *   config), `core-tasks.ts` (`tasks.*`, `TaskView`), `core-wait.ts` (`tasks.wait`), `core-waves.ts` (`waves.*`,
- *   `WaveView`, what the wave's runner asks)
  */
 import { oneLine, type Handler, type Params } from "./core-shared.ts";
 import type { ActionSpec, Feature } from "./feature.ts";

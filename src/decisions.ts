@@ -1,16 +1,10 @@
 /**
- * Decisions (contract `cards`): a supervisor's action that settles something, the notice key it answers read from state
- * at call time, and the log of a session's decisions.
- *
+ * Decisions: a supervisor's action that settles something, the notice key it answers read from state at call time,
+ * and the log of a session's decisions (`decisions/<origin>.jsonl`, append-only).
  * - A feature registers per action how its cause is read (`feature.ts` `decides`): a `Cause` makes the action a
- *   decision (`answers`: the key of the notice it settles, absent when nothing is open), null leaves it an action
- * - `taskCause(id)`: the task's open notice (a question, a block, an interrupted runner, waiting for approve); a task of
- *   a wave that does not build answers its wave's notice (the wave's speaks for it then, `notify.ts`)
- * - `waveCause(id)`: the wave's open notice (rejected, blocked, waiting for approve, interrupted, can never start)
- * - `contractCause(store, name)`: the latest rejection or block of the waves of `store` listing the contract
+ *   decision, null leaves it an action
  * - The keys are those of `notify.ts`, computed by its own functions: an answer names exactly the notice it settles
- * - The log: `decisions/<origin>.jsonl` under the factory home, one JSON line `{at, card}` per decision (what it answers: `card.answers`),
- *   append-only; a line cut short or not a decision is skipped when read
+ * - A task of a wave that does not build answers its wave's notice (the wave's speaks for it then)
  */
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -33,7 +27,7 @@ const cause = (answers: string | undefined): Cause => (answers === undefined ? {
 
 /** The wave's open notice (a notice that needs a ruling), only in one of `stages` when given. */
 async function waveKey(file: WaveFile, stages?: readonly WaveStage[]): Promise<string | undefined> {
-  const look = await lookWave(file);
+  const look = await lookWave(file.declaration.id);
   if (stages !== undefined && !stages.includes(look.view.stage)) return undefined;
   const notice = waveNotice({ ...look, events: file.events }, "");
   return notice !== null && notice.card.tone === "attention" ? notice.key : undefined;
@@ -95,7 +89,6 @@ export function decisionsPath(origin: string): string {
   return join(factoryHome(), "decisions", `${encodeURIComponent(origin)}.jsonl`);
 }
 
-/** Appends one decision to the log of `origin`. */
 export async function appendDecision(origin: string, entry: DecisionEntry): Promise<void> {
   const path = decisionsPath(origin);
   await mkdir(join(factoryHome(), "decisions"), { recursive: true });

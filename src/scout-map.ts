@@ -1,11 +1,7 @@
 /**
  * A scout's writes to the map: `map_write {path, description, text}` (`pi/scout-map-write.ts`) runs `mapWrite`.
- *
- * - A fact lives under `map/` of the store; the store and the commit the scout explores at come from the scout's
- *   environment (`FACTORY_SCOUT_STORE`, `FACTORY_SCOUT_COMMIT`), never from the model
- * - One `memory-store apply`: `add` for a new path; for an existing one `update` of its newest fact and `describe`
- * - Every text ends with the commit stamp `explored at <commit>`; every write is appended to the scout's
- *   `written.jsonl` (`FACTORY_SCOUT_DIR`), which the scout's record reads
+ * - The store and the commit come from the scout's environment, never from the model
+ * - Every text ends with `explored at <commit>`; every write is appended to the scout's `written.jsonl`
  * - Imports only Bun, `node:` and plain plugin modules: the scout's Pi child loads it through its extension
  */
 import { appendFile } from "node:fs/promises";
