@@ -139,7 +139,6 @@ export function waveCard(view: WaveView, title: string, tone: CardTone = "quiet"
       ...row("can never start", unreachable.join(", ")),
       ...row("merged", view.merge === null ? null : `${view.merge.from.slice(0, 7)}..${view.merge.to.slice(0, 7)} into ${view.target}`),
       ...row("history", view.merge?.ref === undefined ? null : historyText(view.merge)),
-      ...row("pull request", view.remote?.url),
       ...row("tasks", view.tasks.map((task) => `${task.key} ${task.state}`).join(", ")),
     ],
     findings: last !== undefined && last.verdict !== "approved" ? findingsOf(last.findings) : [],
@@ -197,11 +196,6 @@ export function contractCard(view: WaveView, name: string, paths: readonly strin
 export function decision(subject: FactoryCard, title: string, text?: string, rows?: CardRow[]): FactoryCard {
   const { findings: _findings, text: _text, ...rest } = subject;
   return card("decision", "quiet", title, { ...rest, text, ...(rows === undefined ? {} : { rows }) });
-}
-
-/** One row per timeline entry: its kind and time. */
-export function timelineCard(title: string, entries: readonly { kind: string; at?: unknown }[], next: number): FactoryCard {
-  return card("action", "quiet", title, { rows: [...entries.map((entry) => ({ label: entry.kind, text: typeof entry.at === "string" ? entry.at : "" })), { label: "next", text: String(next) }] });
 }
 
 /** `build()`, or a quiet card titled `title` when it throws: a card never stops a notice or an answer. */

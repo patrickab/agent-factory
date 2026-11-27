@@ -74,7 +74,7 @@ describe("waves.start contracts", () => {
     const repo = await registeredRepo();
     process.env.FAKE_PI_HOLD = "1";
     const { wave } = (await start(repo, { plan: STORE, contracts: ["api"] })) as { wave: WaveView };
-    expect(wave.contracts).toEqual(["core", "api"]);
+    expect((await readWave(wave.id)).declaration.contracts).toEqual(["core", "api"]);
     await until(() => sentMessages().length === 1, 20_000);
     const payload = JSON.parse(sentMessages()[0].slice("/factory start ".length)) as { request: string; prefix: string };
     expect(payload.request).toBe("do a");
@@ -127,7 +127,7 @@ describe("contracts.apply", () => {
     const declaration = { repo, tag: "team/w1", plan: STORE, title: "w", request: "r", branch: "main-team-w1", target: "main", base: "abc", origin: "session-0", createdAt: "2026-01-01T00:00:00.000Z", overrides: {} };
     await createWave({ ...declaration, id: WAVE_ID, contracts: ["core", "api"] });
     await createWave({ ...declaration, id: OTHER_WAVE, tag: "team/w2", branch: "main-team-w2", contracts: ["core"] });
-    const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [] });
+    const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [], id: crypto.randomUUID() });
     await appendWaveEvent(WAVE_ID, { kind: "tasks", tasks: ["run", "ask", "fin", "later"].map(spec) });
     for (const key of ["run", "ask", "fin"]) await appendWaveEvent(WAVE_ID, { kind: "task", key, taskId: records[key].id, sessionId: records[key].sessionId });
     await appendWaveEvent(WAVE_ID, { kind: "stage", stage: "building", reason: null });

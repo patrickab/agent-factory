@@ -21,15 +21,15 @@ Rules of the agent view:
 Decisions (user):
 
 - A tool call has two purposes for an agent: trigger an event in the protocol, or answer a question about what is going
-  on. `tasks.timeline` and `waves.timeline` do neither: they dump the log. They are **not in the agent's tool** (not in
-  the Pi tool, not in the MCP tool). They stay in the core and the CLI (always JSON) for programs to render and replay
+  on. `tasks.timeline` does neither: it dumps the log. It is **not in the agent's tool** (not in
+  the Pi tool, not in the MCP tool). It stays in the core and the CLI (always JSON) for programs to render and replay
 - What an agent would have looked up in a timeline is part of `tasks.get` / `waves.get`, chosen by the state:
   blocked -> the failure (the failed gate and its output tail, the merge's error, the stage event's detail) · rejected ->
   the review's findings · done -> the merged commit and the coder's last message · waiting_answer -> the question
 - A review's result goes through the protocol: a rejection is pushed to the origin session with the findings in the
   message itself (severity, file:line, text). The supervisor decides and creates the fix tasks with `waves.add`; the
-  factory then reviews again by itself. The reviewer never starts tasks, except with `reviewEach`: there it adds `fix:` tasks itself (at most three per wave) and may send the supervisor one quiet note (`notify_supervisor`)
-- With `reviewEach` a task's review is not pushed: the verdict goes back to the task (a next round or on to the merge); only a rejection of the wave's last pass, a note or a reviewer's `fix:` task reaches the supervisor
+  factory then reviews again by itself. The reviewer adds `fix:` tasks itself (at most three per wave) and may send the supervisor one quiet note (`notify_supervisor`)
+- A task's review is not pushed: the verdict goes back to the task (a next round or on to the merge); only a rejection of the wave's last pass, a note or a reviewer's `fix:` task reaches the supervisor
 - A merged wave is pushed too and starts a supervisor turn: it is the signal to declare the next wave
 - `tasks.list` / `waves.list` in the agent view show what is not finished, and a count of the rest. No `all` parameter
 - `tasks.diff` in the agent view: the file list with counts
@@ -57,7 +57,6 @@ type TaskView = {
   settings: { branch: string; merge: "auto" | "review"; maxRounds: number; review: boolean
               models: { coder: string; reviewer: string } }
   usage: Usage | null                 // coder, reviews and scouts
-  scoutingCost?: number               // the scouts alone
   // added in factory/w2, for the agent view's state lines
   lastMessage: string | null          // the coder's last message (not its answer to the commit message ask)
   failure: string | null              // only in blocked: "<gate argv> (exit N)" + output tail, or the merge's error
@@ -70,7 +69,7 @@ type TaskView = {
 
 type WaveView = {                     // as in the contract
   id: string; repo: string; tag: string; plan: string | null; title: string; request: string
-  branch: string | null; target: string; base: string | null   // null while queued: set when it starts
+  branch: string | null; target: string   // null while queued: set when it starts
   after: string[]                     // ids of the waves it waits for, [] when none
   origin: string | null; createdAt: string
   stage: "queued" | "building" | "reviewing" | "rejected" | "merging" | "waiting_approve" | "merged" | "blocked" | "cancelled"
@@ -87,19 +86,16 @@ type WaveView = {                     // as in the contract
              usage: Usage | null; wallMs: number }[]
   minors: { round: number; task?: string; file: string; line: number | null; text: string }[]   // its tasks' (task: key), then its own
   gates: { at: string; phase: "review" | "merge"; passed: boolean; wallMs: number; log: string | null; flaky?: string[] }[]
-  merge: { at: string; from: string; to: string; queueMs: number; ref?: string; commits?: number } | null   // ref, commits: a squash wave's task commits
-  remote: { number: number | null; url: string | null; pushed: string | null; error: string | null; merged?: string | null } | null   // merged: the forge's squash commit
+  merge: { at: string; from: string; to: string; ref?: string; commits?: number } | null   // ref, commits: a squash wave's task commits
   usage: Usage | null                 // tasks, reviews and scouts
-  scoutingCost?: number               // the scouts alone
   actions: string[]
-  contracts?: string[]                // names, as declared (absent: none)
   updates?: { at: string; key: string | null; fields: string[] }[]   // tasks.update (key) and waves.update (null) events, oldest first
   feedback?: { kind: string; what: string; cost: string | null; suggestion: string | null; task: string | null; wave: string | null; role: string }[]   // waves.get only, oldest first; task null: the wave reviewer's fit pass
 }
 
 type TimelineEntry = { at: string; kind: string; data: object }   // kinds: task, round, coder, user, gate, review, question, merge, state
-type WaveEvent = { at: string; kind: "tasks" | "task" | "stage" | "gate" | "review" | "merge" | "remote" | "update" | "launch" | "contract" | "task_review" | "resolved" | "conflict" | "note"; [field: string]: unknown }
-// task_review: a task's review inside the wave · resolved: additions-only conflict resolved by the factory · conflict: a rebase conflict left to a task · note: {text, taskId} a supervisor note
+type WaveEvent = { at: string; kind: "tasks" | "task" | "stage" | "gate" | "review" | "merge" | "update" | "launch" | "contract" | "task_review" | "conflict" | "note"; [field: string]: unknown }
+// task_review: a task's review inside the wave · conflict: a rebase conflict left to a task · note: {text, taskId} a supervisor note
 // update: tasks.update {key, title?, request?, after?, model?} or waves.update {title?, request?} · launch: the runner
 // launches the pending task {key, title?, request?: the text it launched with} · contract: contracts.apply {name, paths, done}
 ```
@@ -133,7 +129,7 @@ failed gate and the last lines of its output, or the merge's error) and, blocked
 `interrupted:` · `waits for tasks.approve` (waiting_approve) · `done: merged · merged <commit>` and `last message:`
 (done). Of a wave: `blocked: <reason>` with `why: <detail>`, the failed gate's last lines or the failed review ·
 the findings (rejected, waiting_approve) · `cannot start: <keys>` (unreachable tasks) · `merged <from>..<to>` · `history: <ref> (<n> commits)` (squash) ·
-`remote: <url>` · `waits for: <ids>` (queued), with `queued: can never start` in the header and `why: <detail>` when a
+`waits for: <ids>` (queued), with `queued: can never start` in the header and `why: <detail>` when a
 wave it waits for was cancelled. Of both: `flaky: <names>` when a gate step passed only on its rerun; `minor findings: N` with one line each (a review's
 lines list only blocker and major findings: only they reject).
 
@@ -141,15 +137,15 @@ lines list only blocker and major findings: only they reject).
 
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
-| `tasks.start` | `{repo, title, request, tag?, plan?, overrides?}` | `TaskView` | `started task 4ae7325b  running  factory/w1` |
+| `tasks.start` | `{repo, title, request, tag?, overrides?}` | `TaskView` | `started task 4ae7325b  running  factory/w1` |
 | `tasks.get` | `{id}` | `TaskView` | the task block above |
 | `tasks.list` | `{repo?, tag?}` | `{tasks: TaskView[]}` | one line per unfinished task, then a count (below) |
 | `tasks.timeline` | `{id, since?}` | `{entries: TimelineEntry[], next: number}` | none: not offered to agents; the CLI prints JSON |
-| `tasks.diff` | `{id}` | `{base, diff, files: {path, added, removed}[]}` | file list with counts; the patch only in the full view |
+| `tasks.diff` | `{id}` | `{diff, files: {path, added, removed}[]}` | file list with counts; the patch only in the full view |
 | `tasks.message` | `{id, text}` | `TaskView` | `sent to task 4ae7325b  running  round 1` |
 | `tasks.approve` · `tasks.retry` · `tasks.cancel` | `{id}` | `TaskView` | `task 4ae7325b  merging` · `... running  round 3` · `... cancelled` |
 | `tasks.remove` | `{id, force?}` | `{removed: string, dropped: string \| null, archive?: string}` | `removed task 4ae7325b` (+ ` · dropped: 1 unmerged commit ...`; + `archive: failed: <why>` when `force` removed it though its archive failed) |
-| `tasks.wait` | `{ids? \| tag? \| wave?, ignore?, timeoutMs?}` | `{tasks: TaskView[], waves: WaveView[], attention: string[], timedOut: boolean}` | only what needs attention (below) |
+| `tasks.wait` | `{ids? \| tag? \| wave?, timeoutMs?}` | `{tasks: TaskView[], waves: WaveView[], attention: string[], timedOut: boolean}` | only what needs attention (below) |
 
 ```
 tasks.list {repo}
@@ -185,8 +181,7 @@ tasks.wait ...                       (limit reached)
 | `waves.start` | `{repo, tag, title, request, tasks: {key, title, request, after?}[], after?, plan?, contracts?, overrides?}` | `{wave: WaveView}` | `started wave 3f2a91c0  building  0/5 done  factory/w1 · started: record · waits: actions (record), runner (actions)`; with `after`: `declared wave 9c4d1e2f  queued  0/2 done  factory/w3 · waits for: 3f2a91c0` |
 | `waves.add` | `{id, tasks}` | `{wave: WaveView}` | `wave 3f2a91c0  building  4/6 done  factory/w1 · added: fix running` |
 | `waves.get` | `{id}` | `{wave: WaveView}` | the wave block above |
-| `waves.list` | `{repo?, tag?, origin?, open?, archived?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count; `archived: true` appends the removed waves (`archived: true` in the view, `actions: []`) |
-| `waves.timeline` | `{id, since?}` | `{events: WaveEvent[], next: number}` | none: not offered to agents; the CLI prints JSON |
+| `waves.list` | `{repo?, tag?, origin?, open?}` | `{waves: WaveView[]}` | one line per unfinished wave (queued: `after <tags>`, a tag when listed, else the short id), then a count |
 | `waves.retry` | `{id}` | `{wave: WaveView, retried: string[], refused: {id, why}[]}` | the wave line, `retried tasks: 3f2a, 9c4d` · `refused task 3f2a: <why>`; the card lists them |
 | `waves.approve` · `waves.cancel` | `{id}` | `{wave: WaveView}` | `wave 3f2a91c0  merging  5/5 done  factory/w1` · `... cancelled ...` |
 | `waves.update` | `{id, title?, request?}` | `{wave: WaveView, changed: boolean}` | the wave line, `updated, the next review reads it` · `nothing changed` |
@@ -208,7 +203,6 @@ waves.list {repo}
 |---|---|---|---|
 | `scouts.start` | `{concern, questions?, wait?, store?, repo?}` | `{scout: ScoutView, timedOut: boolean}` | the scout block; the Pi tools add where the report arrives |
 | `scouts.get` | `{id}` | `{scout: ScoutView}` | the scout block |
-| `scouts.list` | `{repo?, caller?}` | `{scouts: ScoutView[]}` | one line per scout: id, state, cost, caller, concern |
 
 ```
 scout 5c0a7d21  done  $0.12
@@ -223,13 +217,12 @@ MISSING
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
 | `gates.prove` | `{repo, branch?}` | `{proof: ProofView}` | `started proof 9c1d2e3f  running  master 0ab12cd` |
-| `gates.get` | `{id}` | `{proof: ProofView}` | the proof block below |
 
 `ProofView`: `{id, repo, branch, commit, origin, createdAt, state: running \| passed \| flaky \| failing, steps: {command, passed, wallMs, flaky}[], flaky, failing: {step, tail, log} \| null, endedAt, running, interrupted}`.
-`tasks.wait {ids}` takes proof ids: `proofs` in its answer, a `failing` or interrupted proof in `attention`.
+`tasks.wait {ids}` takes proof ids: `proofs` in its answer, a `failing` or interrupted proof in `attention`. The
+proof block of a notice:
 
 ```
-gates.get {id: "9c1d"}
   proof 9c1d2e3f  failing  master 0ab12cd
     failing: bun scripts/changed-tests.ts, last lines:
       (fail) the wave merges
@@ -242,19 +235,18 @@ gates.get {id: "9c1d"}
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
 | `repos.list` | `{}` | `{repos: string[]}` | one path per line |
-| `repos.add` · `repos.remove` | `{repo}` | `{repo, repos}` · `{repos}` | `registered ~/git/app` · `unregistered ...` |
-| `branches.list` | `{repo}` | `{branches: {name, default: boolean, hasConfig: boolean}[]}` | `master (default) · waves (factory.yaml)` |
+| `repos.add` | `{repo}` | `{repo, repos}` | `registered ~/git/app` |
+| `branches.list` | `{repo}` | `{branches: {name}[]}` | `master · waves` |
 | `models.get` | `{}` | `{models: string[]}` | one id per line |
 | `models.set` | `{models}` | `{models: string[]}` | `2 models set` |
-| `settings.get` | `{repo}` | `{stored, resolved, defaults}` each `{branch, merge, maxRounds, review, models: {coder, reviewer}, preview, remote, squash}` | the resolved values, one per line, `(default)` after those not stored |
+| `settings.get` | `{repo}` | `{stored, resolved, defaults}` each `{branch, merge, maxRounds, review, models: {coder, reviewer}, preview, squash}` | the resolved values, one per line, `(default)` after those not stored |
 | `settings.set` | `{repo, settings}` | as `settings.get` | the changed values only |
-| `config.get` | `{repo, branch?}` | `{exists: boolean, text: string \| null, draft: string \| null, source: string[]}` | `factory.yaml (committed on waves)` + the text; without one: `no factory.yaml` + the draft |
+| `config.get` | `{repo}` | `{exists: boolean, text: string \| null, draft: string \| null, source: string[]}` | `factory.yaml (working copy)` + the text; without one: `no factory.yaml` + the draft |
 | `config.write` | `{repo, text, overwrite?}` | `{path: string}` | `wrote factory.yaml (not committed)` |
 
 ## Waves and tasks: throughput lines
 
 - `waiting for a test slot`: a task's or wave's runner waits for one of the machine's test slots (`waitingForSlot: true` in the full view)
-- `resolved` (full view, absent when none): the rebases onto the target whose conflicts only added lines on both sides, resolved by the factory `{at, phase: "review" | "merge", onto, files}`
 - `conflicts` (full view, absent when none): the conflict tasks added to the wave `{at, phase: "review" | "merge", key: "conflict-<n>", head, onto, files}`; the task is a `fix: resolve the conflict of ...` in the task list. Not in the agent view
 
 ## Errors
@@ -341,7 +333,7 @@ interface FactoryCard {
 
 Kinds, each with an example (JSON abridged):
 
-- `wave`: tag, id, stage as state, cost, task progress; rows wave, why, waits for, can never start, merged, pull request,
+- `wave`: tag, id, stage as state, cost, task progress; rows wave, why, waits for, can never start, merged,
   tasks; the last review's findings unless approved
   `{kind:"wave", tone:"attention", title:"wave factory/w1 was rejected", tag:"factory/w1", id:"3f2a91c0", state:"rejected", cost:1840, progress:{done:4,total:5}, rows:[{label:"why",text:"review 2 rejected"}], findings:[{severity:"major", file:"src/wave-runner.ts", line:309, text:"..."}]}`
 - `task`: id, tag, state, cost; rows task, round, why, merged, flaky; text is the question, the failure (fenced) or the coder's last message
@@ -366,7 +358,7 @@ decision without `answers`. Each is appended to `decisions/<origin>.jsonl` under
 
 | Action | Params | Full view | Agent view |
 |---|---|---|---|
-| `decisions.list` | `{origin?}` | `{decisions: {at, key?, answers?, card}[]}` | one line per decision: time, title |
+| `decisions.list` | `{origin?}` | `{decisions: {at, card}[]}` (`card.answers`: the notice key) | one line per decision: time, title |
 
 Pi: notices (`factory-notice`) and the `factory` tool's call and result are drawn as cards: icon `◆`, title, tag, state,
 cost, progress, rows, findings grouped by severity (collapsed to counts, expanded shows all), text. Readable is the

@@ -9,7 +9,7 @@
  * - `waveCause(id)`: the wave's open notice (rejected, blocked, waiting for approve, interrupted, can never start)
  * - `contractCause(store, name)`: the latest rejection or block of the waves of `store` listing the contract
  * - The keys are those of `notify.ts`, computed by its own functions: an answer names exactly the notice it settles
- * - The log: `decisions/<origin>.jsonl` under the factory home, one JSON line `{at, key?, answers?, card}` per decision,
+ * - The log: `decisions/<origin>.jsonl` under the factory home, one JSON line `{at, card}` per decision (what it answers: `card.answers`),
  *   append-only; a line cut short or not a decision is skipped when read
  */
 import { appendFile, mkdir, readFile } from "node:fs/promises";
@@ -21,14 +21,13 @@ import { findWave, waveLook } from "./core-waves.ts";
 import { taskNotice, waveNotice } from "./notify.ts";
 import { factoryHome } from "./settings.ts";
 import type { TaskRecord } from "./tasks.ts";
-import { isRecord } from "./util.ts";
 import { foldWave, listWaves, type WaveFile, type WaveStage } from "./waves.ts";
 
 /** What a decision answers: the notice key it settles, absent when it settles nothing open. */
 export type Cause = { answers?: string };
 
 /** One decision of a session, as `decisions.list` answers it. */
-export type DecisionEntry = { at: string; key?: string; answers?: string; card: FactoryCard };
+export type DecisionEntry = { at: string; card: FactoryCard };
 
 const cause = (answers: string | undefined): Cause => (answers === undefined ? {} : { answers });
 
@@ -103,15 +102,6 @@ export async function appendDecision(origin: string, entry: DecisionEntry): Prom
   await appendFile(path, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
-function parseEntry(raw: unknown): DecisionEntry | null {
-  if (!isRecord(raw) || typeof raw.at !== "string" || !isRecord(raw.card)) return null;
-  // SAFETY: the factory wrote the card (a FactoryCard); a renderer ignores fields it does not know.
-  const entry: DecisionEntry = { at: raw.at, card: raw.card as unknown as FactoryCard };
-  if (typeof raw.key === "string") entry.key = raw.key;
-  if (typeof raw.answers === "string") entry.answers = raw.answers;
-  return entry;
-}
-
 /** The decisions of `origin` in the order they were taken; none without a log. */
 export async function readDecisions(origin: string): Promise<DecisionEntry[]> {
   const text = await readFile(decisionsPath(origin), "utf8").catch((error: NodeJS.ErrnoException) => {
@@ -122,8 +112,7 @@ export async function readDecisions(origin: string): Promise<DecisionEntry[]> {
   for (const line of text.split("\n")) {
     if (line.trim() === "") continue;
     try {
-      const entry = parseEntry(JSON.parse(line));
-      if (entry !== null) entries.push(entry);
+      entries.push(JSON.parse(line) as DecisionEntry);
     } catch {
       // A line a crash cut short.
     }

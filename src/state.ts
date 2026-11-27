@@ -13,7 +13,7 @@ import type { FeedbackEntry } from "./feedback.ts";
 
 /**
  * `waiting_answer`: the coder asked the supervisor (`factory-question`); the next message answers it. `reviewing`: a
- * task of a wave with `reviewEach` passed its gates and waits for the wave's reviewer (`review-each.ts`), whose
+ * task of a wave passed its gates and waits for the wave's reviewer (`review-each.ts`), whose
  * verdict comes as `/factory reviewed`.
  */
 export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked" | "merging" | "done" | "cancelled" | "reviewing";
@@ -21,11 +21,10 @@ export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked"
 export const RESTING_STATES: readonly State[] = ["waiting_approve", "waiting_answer", "blocked", "done", "cancelled", "reviewing"];
 /** Resting states whose next step is the factory's, not someone's: no attention, and a watcher does not count them as rest. */
 export const FACTORY_TURN_STATES: readonly State[] = ["reviewing"];
-export type GatePhase = "hooks" | "gates" | "merge_gates" | "after_merge";
-export type Trigger = "start" | "hooks" | "gates" | "review" | "protected" | "message" | "retry" | "conflict";
+export type GatePhase = "gates" | "merge_gates" | "after_merge";
+export type Trigger = "start" | "gates" | "review" | "protected" | "message" | "retry" | "conflict";
 export type Severity = "blocker" | "major" | "minor";
-/** `timeout`: only in entries written while the reviewer had a time limit; a review no longer times out. */
-export type ReviewStatus = "ok" | "malformed" | "timeout" | "aborted" | "failed" | "no_diff";
+export type ReviewStatus = "ok" | "malformed" | "aborted" | "failed" | "no_diff";
 
 export interface Settings {
   /** The branch the task's worktree starts from, is rebased onto and merges into. */
@@ -56,17 +55,7 @@ export interface Task extends StartPayload {
   mainBranch: string;
   /** HEAD at start. */
   baseSha: string;
-  /** `PROTOCOL_VERSION` of the plugin that started the task. Absent on tasks started before it was written. */
-  protocol?: number;
-  /**
-   * Only in the entry of an old merge request (written while they existed): it keeps its old limits (invariant 7), no
-   * approve and no retry, from its own session too; it can only be removed.
-   */
-  kind?: "merge_request";
 }
-
-/** The version of the entry protocol, written into every new `factory-task` entry. */
-export const PROTOCOL_VERSION = 2;
 
 export interface RoundData {
   round: number;
@@ -103,18 +92,9 @@ export interface MinorFinding {
   task?: string;
 }
 
-/** The minor findings of a review's `findings` as stored; malformed entries of old records are skipped. */
-export function minorFindings(round: number, findings: unknown): MinorFinding[] {
-  if (!Array.isArray(findings)) return [];
-  const minors: MinorFinding[] = [];
-  for (const raw of findings) {
-    if (typeof raw !== "object" || raw === null) continue;
-    const finding = raw as Record<string, unknown>;
-    if (finding.severity !== "minor" || typeof finding.file !== "string" || typeof finding.text !== "string") continue;
-    const line = typeof finding.line === "number" ? finding.line : null;
-    minors.push({ round, file: finding.file, line, text: finding.text });
-  }
-  return minors;
+/** The minor findings of a review's `findings`. */
+export function minorFindings(round: number, findings: readonly Finding[]): MinorFinding[] {
+  return findings.filter((finding) => finding.severity === "minor").map(({ file, line, text }) => ({ round, file, line, text }));
 }
 
 export interface ReviewUsage {
@@ -150,8 +130,6 @@ export interface MergeData {
 export interface MergeIntentData {
   commit: string;
   before: string;
-  /** The message of the merge commit. Absent on entries written before it existed. */
-  message?: CommitMessage;
 }
 
 /** A task the coder started with `factory_new_task` from a follow-up of this one. */

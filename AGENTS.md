@@ -72,8 +72,6 @@ A test that pins behaviour nobody relies on is deleted, not adapted. Tests of de
 ## Working on this repository
 - The `factory` command on this machine runs from the checkout `~/git/agent-factory`. Work in a worktree on a
   development branch; merge into the default branch only while no wave of any repository is running
-- Every change is additive for declarations that do not use it: old logs and records still parse and fold to the
-  same state
 - A new feature is one module (`src/feature-<name>.ts`) and one line in `src/features.ts`; its actions, renderers and
   notices register from there. One registration serves the CLI, the MCP server and the Pi tool. A new action or field updates
   `VIEWS.md`, `README.md` and the tool's description
@@ -85,5 +83,5 @@ A test that pins behaviour nobody relies on is deleted, not adapted. Tests of de
   to a wrong summary
 - A process that imports the core by path (gigachad-bot's pi-host) keeps the modules it loaded: after a merge into the
   default branch restart it, or it mixes old and new modules ("Export named ... not found")
-- A new task state, event kind or notice kind names every list that enumerates them (`MARKED_STATES`, the resting and
+- A new task state, event kind or notice kind names every list that enumerates them (the resting and
   attention states, the notice keys, the views) in its contract and updates each

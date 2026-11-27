@@ -139,25 +139,6 @@ function parseUsage(value: unknown): ScoutUsage | null {
   return { input: numberOr0(value.input), output: numberOr0(value.output), cacheRead: numberOr0(value.cacheRead), cacheWrite: numberOr0(value.cacheWrite), cost: numberOr0(value.cost) };
 }
 
-export function parseScoutDeclaration(raw: unknown): ScoutDeclaration {
-  if (!isRecord(raw) || typeof raw.id !== "string" || !isRecord(raw.caller) || typeof raw.concern !== "string") throw new Error("not a scout declaration");
-  const kind = raw.caller.kind;
-  if (kind !== "task" && kind !== "wave" && kind !== "session") throw new Error("not a scout caller");
-  const text = (value: unknown) => (typeof value === "string" ? value : "");
-  return {
-    id: raw.id,
-    caller: { kind, id: typeof raw.caller.id === "string" ? raw.caller.id : null },
-    repo: text(raw.repo),
-    cwd: text(raw.cwd),
-    concern: raw.concern,
-    questions: Array.isArray(raw.questions) ? raw.questions.filter((item): item is string => typeof item === "string") : [],
-    store: text(raw.store),
-    commit: text(raw.commit),
-    model: typeof raw.model === "string" ? raw.model : null,
-    createdAt: text(raw.createdAt),
-  };
-}
-
 export interface ScoutFold {
   state: ScoutState;
   error: string | null;
@@ -182,7 +163,7 @@ export function foldScout(events: Record<string, unknown>[]): ScoutFold {
 }
 
 export async function readScout(dir: string): Promise<{ declaration: ScoutDeclaration; fold: ScoutFold }> {
-  const declaration = parseScoutDeclaration(JSON.parse(await readFile(join(dir, "scout.json"), "utf8")));
+  const declaration = JSON.parse(await readFile(join(dir, "scout.json"), "utf8")) as ScoutDeclaration;
   const events = jsonLines(await readFile(join(dir, "events.jsonl"), "utf8").catch(() => ""));
   return { declaration, fold: foldScout(events) };
 }

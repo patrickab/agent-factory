@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import { caseDir, expectError, git, makeRepo, until, useCoreFixture } from "./core-test-kit.ts";
-import { PROOF_KEEP_MS, PROOF_RUNNER_PATH, proofsDir, type ProofView } from "./gates-prove.ts";
+import { PROOF_KEEP_MS, PROOF_RUNNER_PATH, proofsDir, proofView, type ProofView } from "./gates-prove.ts";
 import { worktreePath } from "./launch.ts";
 import { pendingNotices } from "./notify.ts";
 import { procStart } from "./queue.ts";
@@ -27,8 +27,7 @@ type WaitAnswer = { proofs: ProofView[]; attention: string[]; timedOut: boolean 
 async function prove(repo: string): Promise<{ started: ProofView; answer: WaitAnswer; proof: ProofView }> {
   const { proof: started } = (await callAction("gates.prove", {}, { cwd: repo, origin: ORIGIN })) as { proof: ProofView };
   const answer = (await callAction("tasks.wait", { ids: [started.id.slice(0, 8)], timeoutMs: 60_000 })) as WaitAnswer;
-  const { proof } = (await callAction("gates.get", { id: started.id.slice(0, 8) })) as { proof: ProofView };
-  return { started, answer, proof };
+  return { started, answer, proof: await proofView(started.id) };
 }
 
 /** The worktree of the proof is gone, from the disk and from git. */
@@ -120,11 +119,10 @@ describe("gates.prove", () => {
     expect(log).toContain("500\nlast line");
   });
 
-  test("refused without a committed factory.yaml; gates.get of an unknown id is not_found", async () => {
+  test("refused without a committed factory.yaml; tasks.wait of an unknown id is not_found", async () => {
     const repo = makeRepo(false);
     await expectError(callAction("gates.prove", {}, { cwd: repo }), "refused", "has no factory.yaml");
     await expectError(callAction("gates.prove", { branch: "nope" }, { cwd: repo }), "not_found", "no local branch nope");
-    await expectError(callAction("gates.get", { id: "0000" }), "not_found", "no proof");
     await expectError(callAction("tasks.wait", { ids: ["0000"] }), "not_found", "no task");
   });
 
@@ -152,7 +150,7 @@ describe("a proof whose runner is gone", () => {
     return id;
   }
 
-  const get = async (id: string) => ((await callAction("gates.get", { id })) as { proof: ProofView }).proof;
+  const get = (id: string) => proofView(id);
 
   test("no runner note: running while it may still be spawned, interrupted a few seconds after its declaration", async () => {
     const repo = repoWith("merge_gates: []\n");
@@ -170,17 +168,15 @@ describe("a proof whose runner is gone", () => {
     expect(await get(id)).toMatchObject({ state: "passed", interrupted: false });
   });
 
-  test("its leftover worktree is removed by the next gates.get of it and by the next gates.prove in its repo", async () => {
+  test("its leftover worktree is removed by the next gates.prove in its repo", async () => {
     const repo = repoWith("merge_gates: []\n");
-    for (const act of [(id: string) => get(id), () => callAction("gates.prove", {}, { cwd: repo, origin: ORIGIN })]) {
-      const id = proofRecord(repo, "2026-01-01T00:00:00.000Z", "999999999 1\n");
-      const path = worktreePath(repo, `proof-${id.slice(0, 8)}`);
-      git(repo, "worktree", "add", "--quiet", "--detach", path, "main");
-      writeFileSync(join(path, "scratch.txt"), "left by the killed runner");
-      await act(id);
-      expect(existsSync(path)).toBe(false);
-      expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(path);
-    }
+    const id = proofRecord(repo, "2026-01-01T00:00:00.000Z", "999999999 1\n");
+    const path = worktreePath(repo, `proof-${id.slice(0, 8)}`);
+    git(repo, "worktree", "add", "--quiet", "--detach", path, "main");
+    writeFileSync(join(path, "scratch.txt"), "left by the killed runner");
+    await callAction("gates.prove", {}, { cwd: repo, origin: ORIGIN });
+    expect(existsSync(path)).toBe(false);
+    expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(path);
   });
 
   test("its runner is judged as the merge queue judges a ticket's owner, a zombie as gone", async () => {

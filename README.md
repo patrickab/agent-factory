@@ -1,9 +1,9 @@
 # agent-factory
 
 Background coding tasks for agents. Each task gets its own git worktree and branch; a coder agent (Pi) works on it in
-rounds, and after every turn the repo's hooks and gates run, then an optional review, and problems go back to the
+rounds, and after every turn the repo's gates run, then an optional review, and problems go back to the
 coder. A passed round merges into the target branch, or waits for approve. A wave runs a declared set of tasks on a
-branch of its own and reviews and merges that branch into its target as a whole, without a Pi session. Agents and hosts reach the factory through one core (`src/core.ts`): the Pi extension
+branch of its own, reviews each task and then how they fit together, and merges that branch into its target, without a Pi session. Agents and hosts reach the factory through one core (`src/core.ts`): the Pi extension
 (the `factory` tool and `/factory` commands), a CLI (`factory`) and an MCP server (`factory-mcp`). State is plain
 files under Pi's agent dir; there is no daemon.
 
@@ -12,7 +12,7 @@ files under Pi's agent dir; there is no daemon.
 | Term | Meaning |
 |---|---|
 | **task** | One request in one worktree on its own branch, run by a detached runner that drives `pi --mode rpc`. |
-| **round** | A coder turn, then `after_code`, the gates and the optional review; a failed round goes back to the coder. |
+| **round** | A coder turn, then the gates and the optional review; a failed round goes back to the coder. |
 | **gates** | The commands in the target's `factory.yaml` that must pass: `gates` after every turn, `task_gates` when a wave's task merges, `merge_gates` before the merge. |
 | **tag** | Path segments (`plugin/m1/w1`) grouping tasks; `tasks.list` and `tasks.wait` filter by a tag or its prefix. |
 | **wave** | A declared set of tasks on one branch, started in order, then reviewed and merged as a whole by its runner. |
@@ -77,7 +77,6 @@ defaults to. Tasks still run in Pi: the extension must be installed whatever the
 - `hooks.after_create`: argv lists, run once in a new task worktree, and in the worktrees the factory makes itself (a
   wave's review worktree, a `gates.prove` worktree). Those are not made by `agent-worktree`: nothing copies packages
   into them, so the repository installs them here, e.g. `after_create: [[bun, install, --frozen-lockfile]]`
-- `hooks.after_code`: run after every coder turn, before the gates
 - `hooks.after_merge`: run in the main checkout after a merge that changed a lockfile
 - Gates, three argv lists. Exit 0 passes, 75 = broken environment (the task blocks), else fails. A failed step runs
   once more (not after exit 75, a kill or a timeout): passing then, it counts as passed and is recorded `flaky` (the
@@ -121,7 +120,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   module only; a new feature is a new module and one line in `features.ts`
 - The tool description's sentences and the notices (after waves and tasks) follow the feature list; both changed order
   with the registry (gate proofs' notices before scouts', `contracts.apply` its own sentence)
-- `core.ts` is the one module clients import, the package's entry (`import { callAction } from "agent-factory"`): `ACTIONS` (name -> `{summary, params (JSON schema), mutates, hostOnly}`)
+- `core.ts` is the one module clients import, the package's entry (`import { callAction } from "agent-factory"`): `ACTIONS` (name -> `{summary, params (JSON schema), mutates}`)
   and `callAction(name, params, {cwd?, signal?, env?, origin?})`, plain JSON in and out (`origin`: the calling Pi
   session's id, which `waves.start` records; the Pi tool passes it, the CLI and MCP do not). A failure throws
   `FactoryError(code, message, detail?)`, one sentence, `code` one of `invalid`, `not_found`, `busy`, `refused`,
@@ -131,13 +130,13 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   secrets. With `systemd-run` on PATH every runner (a task's, a wave's) runs in a systemd user scope of its own
   (`systemd-run --user --scope --quiet --collect`), else detached in its own process group: a restart of the service
   or the terminal the caller lived in leaves it running
-- Actions: `repos.list|add|remove` (a repo's settings file is its registration; `add` -> `{repo, repos}`),
-  `branches.list`, `settings.get|set` (`{stored, resolved, defaults}`; `preview` is a stored boolean only clients
-  read), `config.get` (working copy, or a branch's committed `factory.yaml`, a draft when there is none),
+- Actions: `repos.list|add` (a repo's settings file is its registration; `add` -> `{repo, repos}`),
+  `branches.list` (`{branches: {name}[]}`), `settings.get|set` (`{stored, resolved, defaults}`; `preview` is a stored boolean only clients
+  read), `config.get` (the working copy's `factory.yaml`, a draft when there is none),
   `config.write` (a registered repo; checked, not committed; replaces a file only with `overwrite: true`),
   `tasks.list|get` (a `TaskView`: record fields (`tag`, `plan`, `wave` included), last state with its time, `question`
   (the coder's open question while `waiting_answer`, else null), `running` = a live runner holds it,
-  `interrupted`, the task's settings, token (`input` uncached, `output`, `cacheRead`, `cacheWrite`) and cost usage of coder, reviews and scouts (`scoutingCost`: the scouts alone), `lastMessage` (the coder's last
+  `interrupted`, the task's settings, token (`input` uncached, `output`, `cacheRead`, `cacheWrite`) and cost usage of coder, reviews and scouts, `lastMessage` (the coder's last
   message, not its commit message), `failure` (while `blocked`: the failed gate with its output tail, or the merge's
   error), `review` (the last one: round, status, approved, findings), `minors` (the minor findings of every review: kept, they never reject or start a round), `merged` (the commit the last merge landed), `flaky` (gate steps that passed on their rerun),
   `actions` = the task actions the core accepts now), `tasks.timeline` (session entries as `{at, kind, data}`,
@@ -147,10 +146,9 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `contracts.apply` (below), `scouts.start|get|list` (below), `gates.prove|get` (below)
 - `tasks.list {repo?, tag?}`: `tag` keeps the tasks whose tag is it or starts with `tag + "/"` (`a` holds `a/b`, not
   `ab`)
-- `tasks.wait {ids? | tag? | wave?, ignore?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique
+- `tasks.wait {ids? | tag? | wave?, timeoutMs?}` (`mutates: false`): exactly one of `ids` (ids or unique
   prefixes of tasks or gate proofs, resolved once), `tag` (the tasks and the waves under it as in `tasks.list`, re-listed on every poll, so
-  tasks and waves started later count) and `wave` (that wave, id or unique prefix, and its tasks); `ignore` leaves task
-  or wave ids out; `timeoutMs` 1000..3600000, default 600000. A task rests when no runner lives and its state is
+  tasks and waves started later count) and `wave` (that wave, id or unique prefix, and its tasks); `timeoutMs` 1000..3600000, default 600000. A task rests when no runner lives and its state is
   `waiting_approve`, `waiting_answer`, `blocked`, `done` or `cancelled`, or it is interrupted; it needs attention when
   it rests and is not `done` (a `cancelled` task of a watched wave needs none: it left the wave, which goes on). A wave
   rests `merged` or `cancelled`; it needs attention `rejected`, `blocked`, `waiting_approve`, interrupted,
@@ -161,9 +159,6 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   timeout passes or nothing is watched; an abort fails it. A wave's tasks all resting while the wave builds, reviews
   or merges is not the end. A poll re-reads a session file only when it changed and looks for runners only where that
   decides the answer
-- `tasks.import` (`hostOnly`, `{record}`): registers a task record another store kept; an existing id stays. It refuses
-  a record unless `repo` is a primary checkout and `worktree` one of its linked worktrees with `branch` checked out. A
-  `wave` field is dropped: an imported task belongs to no wave
 - A `repo` param is a path inside the repository, relative to the caller's `cwd`, which is also its default; without
   `cwd` it must be absolute. `id` accepts a unique prefix. Each action that checks a task's state and acts on it holds a
   per-task lock from the check on (a runner keeps it until it exits)
@@ -180,9 +175,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   running (an interrupted task counts as not running) and not in `waiting_answer`. It refuses a task with commits its target branch lacks or
   uncommitted changes (untracked files count whatever `status.showUntrackedFiles` says); with `force: true` it removes it anyway and names what it dropped.
   A task outside a wave is archived first (see "Where state lives"); when that fails the removal is refused with nothing deleted
-  (`the archive failed: <why>; nothing was deleted`), and with `force: true` it goes on and the answer has `archive: "failed: <why>"`. A record an older
-  version wrote with a `kind` loads; an old `merge_request` keeps its limits: its `branch` is the source it merged,
-  which removing it keeps (its commits count as no unmerged work), and approve, retry, cancel and message are refused
+  (`the archive failed: <why>; nothing was deleted`), and with `force: true` it goes on and the answer has `archive: "failed: <why>"`
 - `overrides` and stored settings: `merge` (`auto` | `review`), `maxRounds` (1..20), `review` (bool), `branch`,
   `models.coder`, `models.reviewer`, `models.big`, `models.small` (`provider/model`). `coder` and `reviewer` mean
   what they always did: each the stored or overridden one, else Pi's session model (no reviewer is implied by the
@@ -211,8 +204,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   every wave it names is `merged`: their runner pokes it, nothing polls. Its branch taken by then: `blocked`
   (`waves.retry` queues it again); a branch of its name taken after the start event, before its first task launched, blocks it too (`infra`). A named wave `rejected` or `blocked` keeps it queued; `waves.cancel` of one makes it a wave that can never start (a `stage`
   event, still `queued`, its `detail` says why; reported once, attention in `tasks.wait`). `waves.remove` of a wave that any wave not yet started names is refused. `waves.add` cannot change `after`; it adds tasks to a queued wave, which stays queued
-- `reviewEach` (default false: one review per wave, as before; the `review` setting keeps its meaning for tasks outside a
-  wave): a task whose round passed its `gates` rests `reviewing` (the factory's turn, not an attention state) and the wave's
+- Every wave reviews each task (the `review` setting keeps its meaning for tasks outside a wave): a task whose round passed its `gates` rests `reviewing` (the factory's turn, not an attention state) and the wave's
   runner has the wave's reviewer judge that task's diff, one task at a time. Blocker and major findings start the task's
   next round through its inbox (within `maxRounds`; out of rounds: `blocked`, reason `review`); else the task goes on to
   `task_gates`, commit and merge. Minor findings never start a round: they are stored on the review (`minors`, listed by
@@ -229,14 +221,14 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `start_fix {title, request, model?}` (adds a `fix:` task to the wave, at most three per wave; then refused, with the hint to
   use `notify_supervisor`; the task runs on the `small` model, `model: "big"` for a fix that needs design; no small model
   configured: it runs as before)
-- With `reviewEach`, after `merge_gates` the same reviewer does one pass on how the tasks fit together. Its blocker and
+- After `merge_gates` the same reviewer does one pass on how the tasks fit together. Its blocker and
   major findings become one `fix:` task (`model: small`, as the reviewer's `start_fix`; stage `building`, then reviewed again); the cap of three used up: `rejected` to
   the supervisor as before
 - `overrides` are stored with the wave: its tasks start with their `models`, `maxRounds`, `review`, target = the wave
   branch and `merge: auto` (a task merges into the wave branch by itself); `merge` is the wave's own
 - A task's `model` (`"small"` | `"big"`, default `big`) picks which of the wave's two models its coder runs with,
   resolved against the wave's stored settings when the task starts. It is stored in the `tasks` event (absent: `big`)
-  and shown as `WaveView.tasks[].model`, never null (`big` also for logs written before the field). The reviewer's
+  and shown as `WaveView.tasks[].model`, never null. The reviewer's
   model stays the wave's: a chain of easy tasks runs on a cheaper model without a wave of its own
 - The wave's tasks carry its `tag`, `plan` and `wave` id; `tasks.start` cannot set `wave` (a task joins a wave only
   through `waves.start`/`waves.add`)
@@ -261,9 +253,9 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   `{removed: id, archive?}`
 - `WaveView.actions` lists exactly the `waves.*` actions valid now
 - The record `waves/<id>.jsonl` is an event log, append-only: line 1 the declaration, then one event per line
-  (`tasks`, `task`, `stage`, `gate`, `review`, `merge`, `remote`); the wave's state is their fold plus its tasks' states
+  (`tasks`, `task`, `stage`, `gate`, `review`, `merge`); the wave's state is their fold plus its tasks' states
   and is never stored. Every append holds `waves/<id>.log.lock` from its read of the log to its write, and a stage
-  change is a compare-and-append on the stage it leaves (a `waves.add` that came first wins). `waves.timeline` replays it
+  change is a compare-and-append on the stage it leaves (a `waves.add` that came first wins)
 - A wave never waits silently: whenever it cannot move without the supervisor it rests in a stage or state
   `tasks.wait` reports as attention, and a `stage` event's `detail` says why (a block's cause: the conflicting paths,
   the failing gate, the dirty worktree (named by its wave, never by its path: that is in the runner's log) and the
@@ -310,7 +302,7 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   the target: `merged` without a review. `factory.yaml` and the reviewer prompt come from the target's tip
 - `merging`: the normal merge queue (`merge_gates` only when the target moved since the review's run, fast-forward of
   the target); `merge` records the commit range and the queue wait
-- With the repository setting `squash` (default off, stored resolved in the wave's declaration like `remote`; off: nothing
+- With the repository setting `squash` (default off, stored in the wave's declaration only when on; off: nothing
   changes) the wave lands as one commit. After the rebase and the merge gates: `refs/factory/waves/<tag with "/" as "-">-<first 8 of
   the wave id>` is set to the rebased tip (the task commits stay under it), one commit with the tip's tree on the target's tip is
   made (`commit-tree`, no signing; subject = the wave's title, body = one `- <task commit subject>` per commit, a blank line,
@@ -321,20 +313,9 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   rerun after any step ends with one commit, the ref, no branch and one `merge` event. The `merge` event gets `ref` and
   `commits`; the views show `history: <ref> (<n> commits)`. The factory never deletes the ref (`waves.remove` skips the
   branch delete when it is gone; "the target has all of it" holds for the tree)
-- With `squash` and `remote` both on the forge makes the squash: the branch is pushed (`--force-with-lease`), and only when
-  origin's target equals the local target and a request is known the request is merged on the forge with squash and branch
-  deletion and the same message (`gh pr merge --squash --delete-branch`, `glab mr merge --squash --remove-source-branch`).
-  Then origin's target is fetched, its tree must equal the gated tree (else `blocked` `infra`, nothing moved locally) and the
-  local target moves to the forge's commit (`merge.to`; `remote.merged` records it). Never a second landing: origin's target
-  differing, no request, an unsupported forge or a refusal with the request still open land locally and push the target,
-  the reason recorded in the `remote` event's `error` (`landed locally: <reason>`). Merged on the forge but the fetch failed:
-  `blocked` `infra` ("merged on the forge, the local target is behind"); `waves.retry` resumes at the fetch. `remote` off: no
-  forge command runs
 - The reviewer has no time limit, a wave's and a task's alike: it runs until it answers or is cancelled
-  (`waves.cancel`, `tasks.cancel`). `timeout`, a status of older review entries, still reads
-- A rebase conflict where both sides only added lines (lists, imports, docs) is resolved by the factory, ours then
-  theirs, per hunk, no model involved (`additions-merge.ts`; never git's `union` driver); the commit goes on to the
-  gates and the wave's view lists the files (`resolved`). Any other rebase conflict, at review or at merge, puts the wave
+  (`waves.cancel`, `tasks.cancel`)
+- A rebase conflict, at review or at merge, puts the wave
   back to `building` with a task `fix: resolve the conflict of <tag> with <target>` (key `conflict-<n>`): its worktree is
   the wave's whole change on the target's tip with the markers left, its request names the files and the subjects of both
   sides' commits (`conflicts` in the view). At most two per wave, then `blocked` `conflict`. A conflict task keeps the big model
@@ -351,14 +332,12 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - Every step appends its event (`stage`, `gate`, `review` with the reviewer's session id, model, findings, usage and
   wall time, `merge`). The review worktree is removed when the wave leaves review and merge (unless it is dirty: then
   it stays). A runner started on a wave in `reviewing` or `merging` runs that step again from its start
-- `waves.get {id}` / `waves.list {repo?, tag?, origin?, open?, archived?}` (`archived: true` adds the removed waves
-  from the archive, `archived: true` in their view, `actions: []`, `running: false`, their cost computed from the archived log,
-  sessions and scouts, none stored; `open: true` leaves them out; `waves.get` of a removed wave answers from the archive; tag: equal or prefix + `/`; origin: the declaring Pi
+- `waves.get {id}` / `waves.list {repo?, tag?, origin?, open?}` (`waves.get` of a removed wave answers from the archive,
+  `archived: true` in its view, `actions: []`, its cost computed from the archived log, sessions and scouts, none stored; tag: equal or prefix + `/`; origin: the declaring Pi
   session's id; `open: true`: not merged or cancelled; filters combine) answer `WaveView`s: the declaration
   (without `overrides`), `stage`, `detail` (the last `stage` event's why, else null), each task's `state` (`pending`
   before it started) and `usage`, `counts` (`{total, done}`, cancelled tasks in neither), `usage` (tasks plus
-  reviews), `reviews`, `minors` (its tasks' minor findings with the task's key, then its own reviews'), `gates` (each with `flaky` when a step passed on its rerun), `merge`, `remote`, `running`, `interrupted`, `actions`. `waves.timeline {id, since?}`
-  answers `{events, next}` (`since`/`next` count events)
+  reviews), `reviews`, `minors` (its tasks' minor findings with the task's key, then its own reviews'), `gates` (each with `flaky` when a step passed on its rerun), `merge`, `running`, `interrupted`, `actions`
 
 ### Test slots (`src/test-slots.ts`)
 
@@ -372,25 +351,6 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
 - `factory slot -- <command...>` runs a command holding one slot, its exit code passed through; with
   `FACTORY_SLOT_HELD` set it runs it directly. For test runs outside the gates
 
-### Files in step (`src/sync.ts`)
-
-- Parallel tasks and waves may edit the same files: a merge reaches the running tasks below its branch at the end of
-  their coder turn, not at their own merge
-- A task merges into its wave's branch: the wave's other tasks in `running`, `waiting_answer`, `merging` and `waiting_approve` get a due sync. A wave merges into its
-  target: the branch of every other `building` wave on that target is rebased onto it first (no worktree; a conflict
-  or a checkout leaves it as it is), then its tasks in those states get one. Plain tasks are never synced
-- At the end of the coder turn, before the gates: the worktree's snapshot, then a three-way merge of the task's whole
-  change onto the branch's tip, left uncommitted (untracked files too); the tip is the task's base from then on. Two
-  merges before the turn ends make one sync
-- The task has read or edited a changed file (its `read`, `edit`, `write` calls, `session-files.ts`): one
-  `factory-sync` message to the coder, the changed files with the subjects of their commits, conflicting files first
-  with their markers left, and "re-read these". It counts as no round; the gates run at the end of the next turn.
-  Markers of that sync still in a file it named then: said once more. Without such a file, or with HEAD already on the tip: no message
-- Every sync is a `factory-sync` session entry (`synced` with tip, named and conflicting files; `failed` with the error
-  and whether the snapshot was restored; `reminded`; `cleared`). A failure restores HEAD, worktree and index, consumes
-  the due syncs and blocks nothing: the task meets the change at its merge
-- Marks, branch rebases and syncs hold the merge lock; a running turn, a gate run or a merge is never interrupted
-
 ### Gate proofs (`src/gates-prove.ts`)
 
 - `gates.prove {repo, branch?}` (`mutates: true`): runs `merge_gates` of the branch's committed `factory.yaml` on its
@@ -402,9 +362,9 @@ logic. The timelines are for programs only: not in the Pi or MCP tool, JSON in t
   command), `failing` (`failing`: the step, `hooks.after_create` for a hook, its output's tail and `log`, the path of
   its full output, a hook's included). `interrupted`: `running` and its runner no longer lives, or noted no pid 10
   seconds after the declaration. The worktree is removed (forced) before the end is recorded; one an interrupted
-  proof left by the next `gates.get` of it or `gates.prove` in its repo
-- `gates.get {id}`: `{proof: ProofView}` (declaration, `state`, `steps` with `flaky`, `flaky`, `failing`, `endedAt`,
-  `running`, `interrupted`). `tasks.wait {ids}` watches a proof; it needs attention `failing` or interrupted
+  proof left by the next `gates.prove` in its repo
+- `tasks.wait {ids}` watches a proof (`ProofView`: declaration, `state`, `steps` with `flaky`, `flaky`, `failing`,
+  `endedAt`, `running`, `interrupted`); it needs attention `failing` or interrupted
 - The declaring Pi session gets one notice when it ends: `passed`, `flaky`, `failing` or `interrupted`
 
 ### CLI (`factory`)
@@ -424,8 +384,8 @@ factory --core-path                                     # absolute path of src/c
 
 - `factory <action> [<json params> | -] [--json]`: no params means `{}`, `-` reads them from stdin. stdout gets the
   agent view, or with `--json` (anywhere after the action) the full view, `callAction`'s result as JSON; exit 0.
-  Scripts that parse the output pass `--json`. `tasks.timeline` and `waves.timeline` always print JSON. `cwd` is the
-  caller's directory. `hostOnly` actions are available (the CLI is the host); Ctrl-C aborts a blocking `tasks.wait`
+  Scripts that parse the output pass `--json`. `tasks.timeline` always prints JSON. `cwd` is the
+  caller's directory. Ctrl-C aborts a blocking `tasks.wait`
 - The CLI is the host's interface: it is not restricted in a task session (`FACTORY_TASK_SESSION=1`), where the
   `factory` tool and the MCP server offer only the actions with `mutates: false`. A coder with a shell and `factory`
   on PATH reaches every action
@@ -436,8 +396,7 @@ factory --core-path                                     # absolute path of src/c
 ### MCP server (`factory-mcp`)
 
 - stdio, one tool `factory` with the name, description and schema of the Pi tool (both come from
-  `src/factory-tool.ts`, so they cannot drift): `{action, ...params}`, `action` an `ACTIONS` name that is neither
-  `hostOnly` nor a timeline
+  `src/factory-tool.ts`, so they cannot drift): `{action, ...params}`, `action` an `ACTIONS` name that is not a timeline
 - The answer is the agent view as text; a failure is an error result, the agent view's one line
   (`<code>: <message> · next: <the way out>`). Started by a task's runner (`FACTORY_TASK_SESSION=1`) it offers only
   the actions with `mutates: false`
@@ -445,7 +404,7 @@ factory --core-path                                     # absolute path of src/c
 
 ### Pi extension (`src/pi/`)
 
-- The `factory` tool for agents: `{action, ...}` with `action` an `ACTIONS` name that is neither `hostOnly` nor a
+- The `factory` tool for agents: `{action, ...}` with `action` an `ACTIONS` name that is not a
   timeline, and that action's params. The answer is the agent view as text and `details {result, card}`: the full
   view and the card (below); errors are error results with no details, the agent view's one line. Calls run one at a time
 - In a task's own session (Pi started by the runner, `FACTORY_TASK_SESSION=1`, or a session holding a `factory-task`
@@ -520,7 +479,7 @@ Commands (inside a task's own Pi session):
   the caller's working directory (`read`, `grep`, `find`, `ls`, `map_write`). It answers from `map/` of the memory store
   (the task's or wave's `plan`, else `store`; none: `refused`), explores where the map is not current, writes there and
   reports `MISSING` / `DECISIONS` / `KEY FACTS` / `MEMORY`. At most four of a caller run, more queue. A scout starts no
-  scout. `scouts.get {id}`, `scouts.list {repo?, caller?}`
+  scout. `scouts.get {id}`
 - The Pi tool `scout` (same params) in supervisor sessions and coders, never in a scout's child. `wait: true` returns the
   report, after 15 minutes at the latest with what it wrote so far; `wait: false` returns its id at once
 - A coder's report arrives as a `factory-scout` message: its turn does not end (`agent_before_settle`) before its
@@ -533,7 +492,7 @@ Commands (inside a task's own Pi session):
 
 - `tasks.start` makes the worktree, runs `after_create` and spawns the runner, which starts `pi --mode rpc` in the
   worktree with `/factory start`. The extension records the task and its rounds as `factory-*` session entries: the
-  coder's turn, `after_code`, the gates, the review; a failure goes back to the coder until `maxRounds`, then the
+  coder's turn, the gates, the review; a failure goes back to the coder until `maxRounds`, then the
   task blocks. A passed round is squashed into one commit, rebased onto the target and joins the merge queue (`merge_gates`, fast-forward), or
   waits in `waiting_approve` with `merge: review`
 - `tasks.approve`, `retry` and `cancel` each start a runner for one command, as does `message` to a task no runner
@@ -567,19 +526,16 @@ Commands (inside a task's own Pi session):
 
 ## Where state lives (`<agent dir>/factory/`, agent dir = `PI_CODING_AGENT_DIR` or `~/.pi/agent`)
 
-- `tasks/<id>.json`: the task record (repo, worktree, branch, title, session id and dir, tag, plan, wave; a record
-  without the last three reads as the system user's, no plan, no wave; an older record's `kind` is ignored); `tasks/<id>.log`: runner
+- `tasks/<id>.json`: the task record (repo, worktree, branch, title, session id and dir, tag, plan, wave); `tasks/<id>.log`: runner
   output; `tasks/<id>.lock`: `<pid> <start time>` of whoever acts on the task (a dead holder's lock is taken over); `tasks/<id>.inbox`:
   messages for the live runner (`<inbox>.read`: how far it sent them)
 - `sessions/<repo dir name>/` (`/a/b` -> `--a-b--`): the Pi session files of a repository's tasks, apart from
   Pi's own sessions (`pi -r` does not list them). The task's truth is its `factory-*` session entries
-- `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models` (`coder` with its alias `big`, `reviewer`, `small`), `preview`, `remote`, `squash`); the file registers the repo
+- `repos/<URI-encoded path>.yaml` (`/a/b` -> `%2Fa%2Fb.yaml`): per-repo settings (`merge`, `maxRounds`, `review`, `branch`, `models` (`coder` with its alias `big`, `reviewer`, `small`), `preview`, `squash`); the file registers the repo
 - `models.yaml`: the factory models, a YAML list of `provider/model` ids
 - `waves/<id>.jsonl`: a wave, append-only: line 1 its declaration, every later line one event; `waves/<id>.lock` its
   runner's lock, `.log.lock` the append lock, `.poke` an unseen poke, `.log` the runner's output, `.reviews/` its reviewer's
   sessions and patch files
-- `sync/<task id>.jsonl`: a task's due syncs (`due` lines, `done` lines consume them); a round that passed its gates rewrites it with the unconsumed `due` lines (none: it goes) and drops the ref, the task's removal drops both. The worktree before
-  its last sync: the ref `refs/factory/sync/<task id>` in the repo
 - `refs/factory/waves/<tag>-<wave id, 8>` in the repo: the task commits of a wave landed with `squash`; the factory never deletes it
 - `scouts/<caller kind>-<caller id>/<id>/`: a scout (`scout.json`, `events.jsonl`, `report.md`, `written.jsonl`)
 - `proofs/<id>.jsonl`: a gate proof, append-only, written by its runner: line 1 its declaration, then one `step` per
@@ -603,7 +559,7 @@ Commands (inside a task's own Pi session):
 
 ## Entry protocol
 
-- Version 2 (`PROTOCOL_VERSION` in `state.ts`, written into every `factory-task` entry). Entries: `factory-task`,
+- Entries: `factory-task`,
   `-round`, `-gate`, `-review`, `-merge-intent`, `-merge`, `-state`, `-commit-message`, `-spawn`, `-question`, and
   `factory-feedback` and `factory-commit-ask` messages
 

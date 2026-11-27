@@ -6,16 +6,16 @@ import { agentView } from "./agent-view.ts";
 import { callAction } from "./core.ts";
 import { launchSpec, recordStart } from "./core-plan.ts";
 import { startWaveTasks } from "./core-waves.ts";
-import { caseDir, expectError, fakeRecord, fakeWaveRunner, git, ID_1, makeRepo, RUN, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { caseDir, expectError, fakeRecord, fakeWaveRunner, ID_1, makeRepo, RUN, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import type { TaskView } from "./core-tasks.ts";
 import { taskInboxPath } from "./launch.ts";
 import { readTask, writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, stopWaveRunners } from "./wave-poke.ts";
-import { appendWaveEvent, createWave, foldWave, parseWaveFile, readWave, type WaveView } from "./waves.ts";
+import { appendWaveEvent, createWave, readWave, type WaveView } from "./waves.ts";
 
 useCoreFixture();
 
-const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after });
+const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after, id: crypto.randomUUID() });
 const getWave = async (id: string) => ((await callAction("waves.get", { id })) as { wave: WaveView }).wave;
 const taskOf = (wave: WaveView, key: string) => wave.tasks.find((task) => task.key === key);
 type Updated = { wave: WaveView; key: string; changed: boolean; delivery: string };
@@ -27,7 +27,7 @@ async function writtenWave(n: number, tasks: ReturnType<typeof spec>[], states: 
   const id = `50000000-${RUN}-4000-8000-00000000000${n}`;
   await createWave({ id, repo, tag: `plan/w${n}`, plan: null, title: "Wave", request: "review it", branch: `main-plan-w${n}`, target: "main", base: "abc", origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
   const ids = new Map(tasks.map((task, index) => [task.key, `7${n}${index}00000-${RUN}-4000-8000-000000000000`]));
-  await appendWaveEvent(id, { kind: "tasks", tasks: tasks.map((task) => ({ ...task, id: ids.get(task.key) })) });
+  await appendWaveEvent(id, { kind: "tasks", tasks: tasks.map((task) => ({ ...task, id: ids.get(task.key) as string })) });
   const records = new Map<string, TaskRecord>();
   for (const [key, state] of Object.entries(states)) {
     const record = { ...fakeRecord(ids.get(key) as string, repo), title: `Task ${key}`, wave: id };
@@ -186,59 +186,5 @@ describe("waves.update", () => {
     expect(wave.updates).toEqual([{ at: expect.any(String), key: null, fields: ["title", "request"] }]);
     expect(((await callAction("waves.update", { id, title: "Wave two" })) as { changed: boolean }).changed).toBe(false);
     expect((await readWave(id)).declaration.request).toBe("review it");
-  });
-});
-
-describe("old logs", () => {
-  test("a spec without an id (a log written before ids) launches with a new id; one with an id launches with it", async () => {
-    const repo = makeRepo(true, "repo-old");
-    git(repo, "branch", "main-plan-old");
-    const id = `50000000-${RUN}-4000-8000-000000000008`;
-    await createWave({ id, repo, tag: "plan/old", plan: null, title: "W", request: "r", branch: "main-plan-old", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    const declared = `7f000000-${RUN}-4000-8000-000000000000`;
-    await appendWaveEvent(id, { kind: "tasks", tasks: [spec("old"), { ...spec("new"), id: declared }] });
-    expect(taskOf(await getWave(id), "old")?.id).toBeUndefined();
-    expect(await startWaveTasks(id)).toEqual(["old", "new"]);
-    const wave = await getWave(id);
-    const old = taskOf(wave, "old");
-    expect(old?.taskId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(old?.taskId).not.toBe(declared);
-    expect([old?.id, taskOf(wave, "new")?.taskId]).toEqual([old?.taskId, declared]);
-    expect((await readTask(declared)).wave).toBe(id);
-    await expectError(update({ id: `ffff1111-${RUN}`, request: "r" }), "not_found", "no task has an id");
-  });
-
-  test("a log without update or launch events folds as before: no updates, no launching", () => {
-    const id = `50000000-${RUN}-4000-8000-000000000009`;
-    const declaration = { id, repo: "/r", tag: "t", plan: null, title: "W", request: "r", branch: "main-t", target: "main", base: "abc", origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} };
-    const lines = [
-      declaration,
-      { at: "2026-01-01T00:00:01.000Z", kind: "tasks", tasks: [{ key: "a", title: "A", request: "do a", after: [] }] },
-      { at: "2026-01-01T00:00:02.000Z", kind: "task", key: "a", taskId: ID_1, sessionId: "s" },
-      { at: "2026-01-01T00:00:03.000Z", kind: "stage", stage: "reviewing", reason: null },
-    ];
-    const { declaration: parsed, events } = parseWaveFile(lines.map((line) => `${JSON.stringify(line)}\n`).join(""), id);
-    const fold = foldWave(parsed, events);
-    expect(fold).toEqual({
-      ...declaration,
-      after: [],
-      stage: "reviewing",
-      reason: null,
-      detail: null,
-      tasks: [{ key: "a", title: "A", request: "do a", after: [], model: "big", taskId: ID_1, sessionId: "s" }],
-      reviews: [],
-      gates: [],
-      merge: null,
-      remote: null,
-    });
-    // A started task's update keeps its after and model; the wave's changes its title and request.
-    const later = [
-      ...events,
-      { at: "2026-01-01T00:00:04.000Z", kind: "update" as const, key: "a", request: "do a well", model: "small" as const },
-      { at: "2026-01-01T00:00:05.000Z", kind: "update" as const, request: "review the docs" },
-    ];
-    const updated = foldWave(parsed, later);
-    expect([updated.tasks[0].request, updated.tasks[0].model, updated.request]).toEqual(["do a well", "big", "review the docs"]);
-    expect(updated.updates?.map((entry) => [entry.key, entry.fields])).toEqual([["a", ["request"]], [null, ["request"]]]);
   });
 });

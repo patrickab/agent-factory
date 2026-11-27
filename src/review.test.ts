@@ -163,42 +163,11 @@ describe("runReview", () => {
     expect(calls[0].argv.at(-1)).toContain("Follow-up messages from the user in the task file are part of the task");
   });
 
-  test("a wave's prompt names the branch, its request file holds the request verbatim under its own heading", async () => {
-    const calls: { argv: string[]; options: CommandOptions }[] = [];
-    const wave: Task = { ...task, title: "Wave 1", request: "Read plan/w1.md.\nThe wave adds a greeting.", branch: "wave" };
-    rmSync(join(reviewsDir, "round-3.request.md"), { force: true });
-    await runReview({ exec: async (argv, options) => (calls.push({ argv, options }), child()), root: "/repo", round: 3, task: wave, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => false, wave: true });
-    const prompt = calls[0].argv.at(-1)!;
-    expect(prompt).toContain('Review the wave "Wave 1": the branch wave, rebased onto main, merges into it.');
-    expect(prompt).toContain(join(reviewsDir, "round-3.patch"));
-    expect(prompt).toContain(join(reviewsDir, "round-3.request.md"));
-    expect(prompt).not.toContain("Read plan/w1.md.");
-    expect(readFileSync(join(reviewsDir, "round-3.request.md"), "utf8")).toBe("# Wave 1\n\n## Instructions from the supervisor\n\nRead plan/w1.md.\nThe wave adds a greeting.\n");
-    // A wave's reviewer has no time limit either.
-    expect(calls[0].options.timeoutMs).toBeUndefined();
-  });
-
-  test("a wave's request file lists its done tasks after the instructions: title, request, the coder's last message", async () => {
-    const calls: { argv: string[]; options: CommandOptions }[] = [];
-    const wave: Task = { ...task, title: "Wave 1", request: "Check it.", branch: "wave" };
-    const waveTasks = [
-      { title: "Add a", request: "add a", lastMessage: "Open risk: a is untested." },
-      { title: "Add b", request: "add b", lastMessage: null },
-    ];
-    await runReview({ exec: async (argv, options) => (calls.push({ argv, options }), child()), root: "/repo", round: 4, task: wave, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => false, wave: true, waveTasks });
-    expect(readFileSync(join(reviewsDir, "round-4.request.md"), "utf8")).toBe(
-      "# Wave 1\n\n## Instructions from the supervisor\n\nCheck it.\n\n## Tasks of the wave\n\n" +
-        "### Add a\n\n#### Request\n\nadd a\n\n#### The coder's last message\n\nOpen risk: a is untested.\n\n" +
-        "### Add b\n\n#### Request\n\nadd b\n\n#### The coder's last message\n\n(none)\n",
-    );
-    expect(calls[0].argv.at(-1)).not.toContain("Open risk");
-  });
-
-  test.each([false, true])("a review longer than the old limits is not cut (wave: %p): its verdict counts", async (wave) => {
+  test("a review longer than the old limits is not cut: its verdict counts", async () => {
     // The fake child reports a run of an hour (past the old 5 and 20 minutes): no limit may have stopped it.
     const calls: { argv: string[]; options: CommandOptions }[] = [];
     const hour = child({ durationMs: 60 * 60_000, stdout: [line({ type: "session", id: "abc-123" }), verdictEnd([])].join("\n") });
-    const data = await runReview({ exec: async (argv, options) => (calls.push({ argv, options }), hour), root: "/repo", round: 4, task, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => false, wave });
+    const data = await runReview({ exec: async (argv, options) => (calls.push({ argv, options }), hour), root: "/repo", round: 4, task, followUps: [], diff: { base: "b", paths: ["a"], patch: "diff\n" }, model: null, rolePrompt: undefined, reviewsDir, cancelled: () => false });
     expect(calls[0].options.timeoutMs).toBeUndefined();
     expect(data).toMatchObject({ status: "ok", approved: true, findings: [], wallMs: 60 * 60_000 });
   });

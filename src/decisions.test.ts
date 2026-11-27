@@ -15,8 +15,8 @@ import { appendWaveEvent, createWave, readWave, type WaveView } from "./waves.ts
 
 useCoreFixture();
 
-const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [] });
-const tool = (params: Record<string, unknown>, origin: string, callId?: string) => callFactoryTool(params, false, { origin, ...(callId === undefined ? {} : { callId }) }, () => "text");
+const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [], id: crypto.randomUUID() });
+const tool = (params: Record<string, unknown>, origin: string) => callFactoryTool(params, false, { origin }, () => "text");
 
 describe("decisions", () => {
   test("an answer to a question names that question's notice key; the log holds it under the session", async () => {
@@ -29,12 +29,12 @@ describe("decisions", () => {
     const asked = (await callAction("tasks.get", { id: record.id })) as TaskView;
     const question = taskNotice(asked, origin);
     expect(question?.key).toStartWith(`task:${record.id}:waiting_answer:`);
-    const answer = await tool({ action: "tasks.message", id: record.id, text: "use the old table" }, origin, "call-1");
+    const answer = await tool({ action: "tasks.message", id: record.id, text: "use the old table" }, origin);
     expect(answer.card).toMatchObject({ kind: "decision", answers: question?.key, text: "use the old table" });
     // The message started a runner: stopped without the tool, so the log keeps only the answer.
     await callAction("tasks.cancel", { id: record.id });
     await until(() => runnerEnded(record));
-    expect(await readDecisions(origin)).toEqual([{ at: expect.any(String), key: "call-1", answers: question?.key, card: answer.card }]);
+    expect(await readDecisions(origin)).toEqual([{ at: expect.any(String), card: answer.card }]);
   }, 30_000);
 
   test("a task added to a rejected wave names the rejection; then an action with no open cause is a decision without answers", async () => {
@@ -66,7 +66,7 @@ describe("decisions", () => {
     const listed = await tool({ action: "decisions.list" }, origin);
     expect((listed.result as { decisions: unknown[] }).decisions.length).toBe(2);
     const decisions = await readDecisions(origin);
-    expect(decisions.map((entry) => [entry.card.title, entry.answers])).toEqual([
+    expect(decisions.map((entry) => [entry.card.title, entry.card.answers])).toEqual([
       ["added 1 task to wave factory/d1", rejection?.key],
       ["updated wave factory/d2", undefined],
     ]);
@@ -87,7 +87,7 @@ describe("decisions", () => {
   test("the list is in order, skips a torn line and survives a restart", async () => {
     const origin = `decide-r-${RUN}`;
     const card = (title: string) => ({ v: 1 as const, kind: "decision" as const, tone: "quiet" as const, title });
-    await appendDecision(origin, { at: "2026-01-01T00:00:01.000Z", key: "c1", answers: "task:x:blocked:1@t", card: card("first") });
+    await appendDecision(origin, { at: "2026-01-01T00:00:01.000Z", card: card("first") });
     appendFileSync(decisionsPath(origin), '{"at": "2026-01-01T00:00:0');
     appendFileSync(decisionsPath(origin), "\n");
     await appendDecision(origin, { at: "2026-01-01T00:00:02.000Z", card: card("second") });

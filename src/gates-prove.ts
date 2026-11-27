@@ -5,13 +5,12 @@
  * - `gates.prove {repo, branch?}` (`PROOF_HANDLERS`): writes the record and spawns `bun gates-prove.ts <id>` detached
  *   (`spawnDetached`, like a wave's runner). Branch: the given one, else the repo's stored branch, else its default.
  *   Refused without a committed `factory.yaml`. Answers `{proof}`
- * - `gates.get {id}`: `{proof: ProofView}`
  * - The record `proofs/<id>.jsonl`, append-only and written by its runner alone: line 1 the declaration, then a `step`
  *   event per gate step, then one `end` event (`passed`, `flaky` or `failing`; failing names the step and the path of
  *   its output, `proofs/<id>.failing.log`). Without an `end` it is `running`, or `interrupted` once its runner (noted in
  *   `proofs/<id>.pid` by `gates.prove` and by the runner as it starts: pid and start time) no longer lives, or no note
  *   is there `NOTE_GRACE_MS` after its declaration. `<id>.log` is the runner's output. The worktree an interrupted
- *   proof left is removed by the next `gates.get` of it and the next `gates.prove` in its repo, which also removes the
+ *   proof left is removed by the next `gates.prove` in its repo, which also removes the
  *   records of its repo's proofs that rest and were declared more than `PROOF_KEEP_MS` ago
  * - The runner: a detached worktree of the tip, `hooks.after_create` of the tip, then every `merge_gates` step through
  *   `runGateStep` (one rerun: passing then, the proof is `flaky`). `FACTORY_BASE` is the empty tree: the whole tree is
@@ -284,12 +283,6 @@ export const PROOF_HANDLERS = {
     }
     await notePid(declaration.id, pid);
     return { proof: await proofView(declaration.id) };
-  },
-  "gates.get": async (params) => {
-    const id = await findProof(params.id);
-    const proof = await proofView(id);
-    await removeLeftover(proof);
-    return { proof };
   },
 } satisfies Record<string, Handler>;
 

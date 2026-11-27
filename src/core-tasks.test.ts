@@ -32,7 +32,7 @@ import { liveRunners, stopRunners, taskInboxPath } from "./launch.ts";
 import { lastFactoryState, sessionFilePath } from "./runner.ts";
 import { taskArchiveDir } from "./archive.ts";
 import { callerKey, scoutsDir } from "./scouts.ts";
-import { listTasks, lockTask, taskLogPath, tasksDir, unlockTask, writeTask } from "./tasks.ts";
+import { listTasks, lockTask, taskLogPath, unlockTask, writeTask } from "./tasks.ts";
 import { appendWaveEvent, createWave } from "./waves.ts";
 
 useCoreFixture();
@@ -49,7 +49,7 @@ describe("task reads", () => {
       message: { role: "assistant", content: [{ type: "thinking", thinking: "x" }, { type: "text", text: "done" }], usage: { input: 10, output: 5, cacheRead: 3000, cacheWrite: 20, cost: { total: 0.5 } } },
     },
     { type: "message", timestamp: "t5", message: { role: "assistant", content: [{ type: "toolCall" }], usage: { input: 1, output: 1, cacheRead: 500, cost: { total: 0.25 } } } },
-    { type: "custom", customType: "factory-review", timestamp: "t6", data: { round: 1, usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 1 } } },
+    { type: "custom", customType: "factory-review", timestamp: "t6", data: { round: 1, status: "ok", approved: true, findings: [], model: null, sessionFile: null, wallMs: 1, usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 1 } } },
     { type: "custom", customType: "factory-merge-intent", timestamp: "t7", data: { commit: "c", before: "b" } },
     { type: "custom_message", customType: "factory-feedback", content: "fix", timestamp: "t8" },
     { type: "message", timestamp: "t9", message: { role: "user", content: [{ type: "text", text: "/factory retry" }] } },
@@ -82,10 +82,9 @@ describe("task reads", () => {
       interrupted: false,
       settings: { branch: "main", merge: "auto", maxRounds: 2, review: true, models: {} },
       usage: { input: 111, output: 56, cacheRead: 3500, cacheWrite: 20, cost: 1.75 },
-      scoutingCost: 0,
       lastMessage: "done",
       failure: null,
-      review: { round: 1, status: "unknown", approved: false, findings: [] },
+      review: { round: 1, status: "ok", approved: true, findings: [] },
       merged: null,
       minors: [],
       flaky: [],
@@ -117,7 +116,7 @@ describe("task reads", () => {
     expect(await callAction("tasks.get", { id: ID_1 })).toMatchObject({ failure: null });
   });
 
-  test("tasks.get: the flaky names of the gate records, none for old records without them", async () => {
+  test("tasks.get: the flaky names of the gate records", async () => {
     const record = fakeRecord(ID_1, "/r");
     await writeTask(record);
     const custom = (customType: string, data: object) => ({ type: "custom", customType, timestamp: "t", data });
@@ -129,7 +128,7 @@ describe("task reads", () => {
     expect(((await callAction("tasks.get", { id: ID_1 })) as TaskView).flaky).toEqual(["a > b", "c"]);
   });
 
-  test("tasks.get: the minor findings of every review, an approving one too; old review records without findings parse", async () => {
+  test("tasks.get: the minor findings of every review, an approving one too", async () => {
     const record = fakeRecord(ID_1, "/r");
     await writeTask(record);
     const custom = (customType: string, data: object) => ({ type: "custom", customType, timestamp: "t", data });
@@ -137,9 +136,8 @@ describe("task reads", () => {
     writeSession(record, [
       sessionEntries[0],
       sessionEntries[1],
-      custom("factory-review", { round: 1 }),
       custom("factory-review", { round: 2, status: "ok", approved: false, findings: [finding("major", "a.ts", "bug", 3), finding("minor", "a.ts", "rename x", 4)] }),
-      custom("factory-review", { round: 3, status: "ok", approved: true, findings: [finding("minor", "b.ts", "doc it"), { severity: "minor" }] }),
+      custom("factory-review", { round: 3, status: "ok", approved: true, findings: [finding("minor", "b.ts", "doc it")] }),
       custom("factory-state", { state: "merging", round: 3, reason: "passed" }),
     ]);
     const view = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
@@ -239,14 +237,13 @@ describe("task actions", () => {
     }
   }, 30_000);
 
-  test("tasks.diff: base, patch and per-file counts of the worktree, uncommitted files included", async () => {
+  test("tasks.diff: patch and per-file counts of the worktree, uncommitted files included", async () => {
     const repo = makeRepo();
     const record = await restingTask(repo, "waiting_approve");
     writeFileSync(join(record.worktree, "a.txt"), "a\nmore\n");
     git(record.worktree, "commit", "--quiet", "-am", "more");
     writeFileSync(join(record.worktree, "b.txt"), "b\nc\n");
-    const diff = (await callAction("tasks.diff", { id: record.id })) as { base: string; diff: string; files: object[] };
-    expect(diff.base).toBe(git(repo, "rev-parse", "main"));
+    const diff = (await callAction("tasks.diff", { id: record.id })) as { diff: string; files: object[] };
     expect(diff.files).toEqual([
       { path: "a.txt", added: 1, removed: 0 },
       { path: "b.txt", added: 2, removed: 0 },
@@ -363,88 +360,6 @@ describe("tasks.message", () => {
   }, 30_000);
 });
 
-describe("tasks.import", () => {
-  const ID = "11111111-2222-3333-4444-555555555555";
-
-  test("hostOnly: tasks.import only", () => {
-    expect(Object.entries(ACTIONS).filter(([, spec]) => spec.hostOnly).map(([name]) => name)).toEqual(["tasks.import"]);
-  });
-
-  test("writes a record of a linked worktree on its branch once, keeps an existing one, refuses a wrong shape", async () => {
-    const repo = makeRepo();
-    const worktree = join(caseDir, "task-wt");
-    git(repo, "worktree", "add", "--quiet", "-b", "task", worktree);
-    const record = { id: ID, repo, worktree, branch: "task", title: "first", sessionId: `test-session-s-${RUN}`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
-    expect(await callAction("tasks.import", { record })).toMatchObject({ id: ID, title: "first", state: null });
-    expect(await callAction("tasks.import", { record: { ...record, title: "second" } })).toMatchObject({ title: "first" });
-    await expect(callAction("tasks.import", { record: { ...record, id: "abc" } })).rejects.toMatchObject({ code: "invalid" });
-    await expect(callAction("tasks.import", { record: { ...record, id: ID.replace("1", "9"), title: "" } })).rejects.toMatchObject({ code: "invalid" });
-    await expect(callAction("tasks.import", { record: { ...record, id: ID.replace("1", "9"), worktree: "task-wt" } })).rejects.toMatchObject({ code: "invalid" });
-    expect((await listTasks()).map((task) => task.id)).toEqual([ID]);
-  });
-
-  test("refuses a record that would let tasks.remove delete a checkout or branch the task does not own", async () => {
-    const repo = makeRepo();
-    const victim = join(caseDir, "victim-wt");
-    git(repo, "worktree", "add", "--quiet", "-b", "precious", victim);
-    const other = makeRepo(true, "other");
-    const base = { id: ID, repo, worktree: victim, branch: "precious", title: "t", sessionId: `test-session-s-${RUN}`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z" };
-    const refused = async (change: object, message: string) => expectError(callAction("tasks.import", { record: { ...base, ...change } }), "refused", message);
-    await refused({ worktree: repo, branch: "main" }, `${repo} is not a linked worktree of ${repo}`);
-    await refused({ branch: "main" }, `${victim} does not have branch main checked out`);
-    await refused({ repo: victim }, `${victim} is not the primary checkout of its repository`);
-    await refused({ repo: other }, `${victim} is not a linked worktree of ${other}`);
-    await refused({ repo: join(caseDir, "nothing") }, "is not a git repository");
-    expect(await listTasks()).toEqual([]);
-    expect(existsSync(victim)).toBe(true);
-  });
-
-  test("an imported record belongs to no wave, whatever its wave field says (invariant 4)", async () => {
-    const repo = makeRepo();
-    const worktree = join(caseDir, "task-wt");
-    git(repo, "worktree", "add", "--quiet", "-b", "task", worktree);
-    const wave = `60000000-${RUN}-4000-8000-000000000001`;
-    const record = { id: ID, repo, worktree, branch: "task", title: "t", sessionId: `test-session-s-${RUN}`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:00.000Z", wave };
-    expect(((await callAction("tasks.import", { record })) as TaskView).wave).toBeNull();
-    expect((await listTasks()).map((task) => [task.id, task.wave])).toEqual([[ID, null]]);
-  });
-});
-
-describe("an old merge request record (invariant 7)", () => {
-  test("keeps its limits: removing it keeps its source branch and its commits, approve, retry, cancel and message are refused", async () => {
-    const repo = makeRepo();
-    const worktree = join(caseDir, "mr-wt");
-    git(repo, "worktree", "add", "--quiet", "-b", "feature", worktree);
-    writeFileSync(join(worktree, "f.txt"), "f\n");
-    git(worktree, "add", "-A");
-    git(worktree, "commit", "--quiet", "-m", "feature work");
-    const feature = git(repo, "rev-parse", "feature");
-    const record = { ...fakeRecord(ID_1, repo), worktree, branch: "feature" };
-    mkdirSync(tasksDir(), { recursive: true });
-    writeFileSync(join(tasksDir(), `${ID_1}.json`), JSON.stringify({ ...record, kind: "merge_request", source: "feature" }));
-    writeSession(record, [{ type: "custom", customType: "factory-state", timestamp: "t", data: { state: "waiting_approve", round: 1, reason: "passed" } }]);
-    const [loaded] = await listTasks();
-    expect(loaded.kind).toBe("merge_request");
-    const view = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
-    expect("kind" in view).toBe(false);
-    expect(view.actions).toEqual(["tasks.remove"]);
-    for (const [action, params, what] of [
-      ["tasks.approve", {}, "approve"],
-      ["tasks.retry", {}, "retry"],
-      ["tasks.cancel", {}, "cancel"],
-      ["tasks.message", { text: "hi" }, "a message"],
-    ] as const) {
-      await expectError(callAction(action, { id: ID_1, ...params }), "refused", `is an old merge request: ${what} is refused, it can only be removed`);
-    }
-    expect(prompts()).toEqual([]);
-    // Its commits are its source branch's, which it never owned: no force needed, and the branch stays.
-    expect(await callAction("tasks.remove", { id: ID_1 })).toEqual({ removed: ID_1, dropped: null });
-    expect(git(repo, "rev-parse", "feature")).toBe(feature);
-    expect(existsSync(worktree)).toBe(false);
-    expect(await listTasks()).toEqual([]);
-  });
-});
-
 describe("D review fixes", () => {
   test("a relative repo without cwd is invalid", async () => {
     await expectError(callAction("settings.get", { repo: "some/repo" }), "invalid", "repo some/repo must be an absolute path (the call has no cwd)");
@@ -526,34 +441,24 @@ describe("D review fixes", () => {
 });
 
 describe("task tags", () => {
-  test("tasks.start: tag defaults to the system user, plan to null; given ones are stored", async () => {
+  test("tasks.start: tag defaults to the system user; a given one is stored", async () => {
     const repo = makeRepo();
     const plain = (await callAction("tasks.start", { title: "Add b", request: "add b.txt" }, { cwd: repo })) as TaskView;
     expect([plain.tag, plain.plan]).toEqual([userInfo().username, null]);
-    const tagged = (await callAction("tasks.start", { title: "Add c", request: "add c.txt", tag: "plugin/m1/w1", plan: "plan/plugin/m1/w1.md" }, { cwd: repo })) as TaskView;
-    expect([tagged.tag, tagged.plan]).toEqual(["plugin/m1/w1", "plan/plugin/m1/w1.md"]);
-    const stored = await recordOf(tagged);
-    expect([stored.tag, stored.plan]).toEqual(["plugin/m1/w1", "plan/plugin/m1/w1.md"]);
+    const tagged = (await callAction("tasks.start", { title: "Add c", request: "add c.txt", tag: "plugin/m1/w1" }, { cwd: repo })) as TaskView;
+    expect(tagged.tag).toBe("plugin/m1/w1");
+    expect((await recordOf(tagged)).tag).toBe("plugin/m1/w1");
   }, 30_000);
 
-  test("tasks.start refuses a malformed tag and an empty plan before any worktree; kind and source are no params", async () => {
+  test("tasks.start refuses a malformed tag before any worktree; kind and source are no params", async () => {
     const repo = makeRepo();
     for (const tag of ["", "a//b", "/a", "a/", "a b", "ä"]) {
       await expectError(callAction("tasks.start", { title: "t", request: "r", tag }, { cwd: repo }), "invalid", "is not segments of");
     }
-    await expectError(callAction("tasks.start", { title: "t", request: "r", plan: " " }, { cwd: repo }), "invalid", "plan must not be empty");
     expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("kind");
     expect(Object.keys(ACTIONS["tasks.start"].params.properties)).not.toContain("source");
     expect(await listTasks()).toEqual([]);
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
-  });
-
-  test("a record written without tag and plan still lists, with the defaults; an old kind is ignored", async () => {
-    const { tag: _tag, plan: _plan, ...old } = fakeRecord(ID_1, "/r");
-    mkdirSync(tasksDir(), { recursive: true });
-    writeFileSync(join(tasksDir(), `${ID_1}.json`), JSON.stringify({ ...old, kind: "merge_request" }));
-    const views = ((await callAction("tasks.list", {})) as { tasks: TaskView[] }).tasks;
-    expect(views.map((view) => [view.id, view.tag, view.plan, "kind" in view])).toEqual([[ID_1, userInfo().username, null, false]]);
   });
 
   test("tasks.list tag: the tag itself and the tags under it, not a longer segment", async () => {

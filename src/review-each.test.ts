@@ -11,7 +11,6 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readDiffText } from "./review-diff.ts";
-import { reviewNext } from "./review-each.ts";
 import { STUB_PREFIX } from "./review-session.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { stopWaveRunners, waveReviewsDir } from "./wave-poke.ts";
@@ -118,10 +117,10 @@ const sessionPath = (key: string) => join(caseDir, "sessions", `2026-01-01T00-00
 const setState = (key: string, state: string, round: number) => appendFileSync(sessionPath(key), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round, reason: "r" } })}\n`);
 
 /**
- * A repo on `main` with a wave (`reviewEach` unless `each` is false) whose tasks `keys` each have a worktree off the
+ * A repo on `main` with a wave whose tasks `keys` each have a worktree off the
  * wave's branch holding an uncommitted file `<key>.txt`, and a session resting in `state` (round 1).
  */
-async function eachWave(keys: string[], state = "reviewing", each = true): Promise<string> {
+async function eachWave(keys: string[], state = "reviewing"): Promise<string> {
   const repo = join(caseDir, "repo");
   mkdirSync(repo);
   git(repo, "init", "--quiet", "-b", "main");
@@ -130,8 +129,8 @@ async function eachWave(keys: string[], state = "reviewing", each = true): Promi
   git(repo, "commit", "--quiet", "-m", "init");
   const base = git(repo, "rev-parse", "main");
   git(repo, "branch", BRANCH);
-  await createWave({ id: WAVE, repo, tag: "factory/each", plan: null, title: "Each wave", request: "Check it.", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {}, ...(each ? { reviewEach: true } : {}) });
-  await appendWaveEvent(WAVE, { kind: "tasks", tasks: keys.map((key) => ({ key, title: `Add ${key}`, request: `add ${key}.txt`, after: [] })) });
+  await createWave({ id: WAVE, repo, tag: "factory/each", plan: null, title: "Each wave", request: "Check it.", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
+  await appendWaveEvent(WAVE, { kind: "tasks", tasks: keys.map((key) => ({ key, title: `Add ${key}`, request: `add ${key}.txt`, after: [], id: crypto.randomUUID() })) });
   mkdirSync(join(caseDir, "sessions"), { recursive: true });
   for (const [index, key] of keys.entries()) {
     const worktree = join(caseDir, `task-${key}`);
@@ -260,20 +259,6 @@ describe("review per task", () => {
     expect(handed.map((hand) => hand.key).sort()).toEqual(["a", "b"]);
   });
 
-  test("a wave without reviewEach behaves as before: a task resting reviewing is never judged, its done tasks merge as before", async () => {
-    await eachWave(["a"], "reviewing", false);
-    const handed = playTasks(() => undefined);
-    const file = await readWave(WAVE);
-    const fold = foldWave(file.declaration, file.events);
-    expect(fold.reviewEach).toBeUndefined();
-    const deps = { ...reviewEachDeps, log: () => undefined };
-    expect(await reviewNext(fold as Parameters<typeof reviewNext>[0], new Map([["a", "reviewing"]]), deps)).toBe(false);
-    setState("a", "done", 1);
-    expect(await runWave(WAVE)).toBe(0);
-    expect(handed).toEqual([]);
-    expect(taskCalls()).toEqual([]);
-    expect(foldWave((await readWave(WAVE)).declaration, (await readWave(WAVE)).events).stage).toBe("merged");
-  });
 });
 
 describe("read_diff", () => {

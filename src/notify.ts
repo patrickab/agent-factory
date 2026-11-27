@@ -147,9 +147,7 @@ export function pendingNotices(tasks: readonly TaskView[], waves: readonly Notic
   for (const wave of waves) {
     const interruptedTasks = wave.view.interrupted ? tasks.filter((task) => task.wave === wave.view.id && task.interrupted && !task.running) : [];
     const notice = wave.view.origin === null ? null : waveNotice(wave, wave.view.origin, interruptedTasks);
-    // An interrupted notice delivered under its old key (every event counted) stays delivered.
-    const legacy = `wave:${wave.view.id}:interrupted:${wave.events.length}`;
-    if (notice !== null && !(wave.view.interrupted && delivered.has(legacy))) notices.push(notice);
+    if (notice !== null) notices.push(notice);
     if (wave.view.origin !== null) notices.push(...contractNotices(wave, wave.view.origin), ...reviewerNotices(wave, wave.view.origin));
   }
   for (const task of tasks) {

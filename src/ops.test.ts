@@ -94,7 +94,7 @@ function fake(cwd: string) {
   const states = () => entries.filter((entry) => entry.customType === "factory-state").map((entry) => `${entry.data.state}/${entry.data.reason}`);
   /** Puts a task in `state` into the session, as its entries would. */
   const holdTask = (state: State) => {
-    const task: Task = { title: "t", request: "r", settings, branch: "task", mainBranch: "main", baseSha: "0".repeat(40), protocol: 2 };
+    const task: Task = { title: "t", request: "r", settings, branch: "task", mainBranch: "main", baseSha: "0".repeat(40) };
     record(deps, "factory-task", task);
     record(deps, "factory-state", { state, round: 1, reason: "test" });
   };
@@ -391,20 +391,6 @@ describe("initConfig", () => {
     rmSync(join(repo, "factory.yaml"));
     expect(await initConfig(fake(repo).deps)).toEqual({ ok: true, message: `wrote ${join(repo, "factory.yaml")} (nothing detected, fill the gates in). Review it, then commit it.` });
     expect(readFileSync(join(repo, "factory.yaml"), "utf8")).toContain("gates");
-  });
-});
-
-describe("an old merge request in its own session (invariant 7)", () => {
-  test("approve and retry are refused: nothing is recorded, nothing reaches the coder", async () => {
-    const pi = fake(addTaskWorktree());
-    const task: Task = { title: "t", request: "r", settings, branch: "task", mainBranch: "main", baseSha: "0".repeat(40), kind: "merge_request" };
-    record(pi.deps, "factory-task", task);
-    record(pi.deps, "factory-state", { state: "waiting_approve", round: 1, reason: "test" });
-    expect(await approveTask(pi.deps)).toEqual({ ok: false, error: "this task is an old merge request: approve is refused, it can only be removed" });
-    record(pi.deps, "factory-state", { state: "blocked", round: 1, reason: "test" });
-    expect(await retryTask(pi.deps)).toEqual({ ok: false, error: "this task is an old merge request: retry is refused, it can only be removed" });
-    expect(pi.states()).toEqual(["waiting_approve/test", "blocked/test"]);
-    expect([pi.userMessages, pi.coderMessages]).toEqual([[], []]);
   });
 });
 

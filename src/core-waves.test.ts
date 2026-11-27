@@ -12,7 +12,7 @@ import { lastFactoryState } from "./runner.ts";
 import { defaultModels } from "./settings.ts";
 import { listTasks, writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath } from "./wave-poke.ts";
-import { appendWaveEvent, appendWaveEvents, createWave, listWaves, readWave, type WaveView } from "./waves.ts";
+import { appendWaveEvent, appendWaveEvents, createWave, foldWave, listWaves, readWave, type WaveView } from "./waves.ts";
 
 useCoreFixture();
 
@@ -22,7 +22,7 @@ const waveId = (series: number, n: number): string => `${series}0000000-${RUN}-4
 const taskId = (n: number): string => `abc${n}0000-${RUN}-4000-8000-${caseDigits(caseSerial() * 10 + n)}`;
 
 describe("waves", () => {
-  const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after });
+  const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after, id: crypto.randomUUID() });
   const TAG = "factory/w1";
 
   async function registeredRepo(withConfig = true): Promise<string> {
@@ -58,7 +58,7 @@ describe("waves", () => {
     const main = git(repo, "rev-parse", "main");
     const overrides = { maxRounds: 3, merge: "review" as const, models: { small: "c/d", big: "a/b" } };
     let wave = await startWave(repo, [spec("a"), spec("b", ["a"]), spec("c")], { plan: "plan/w1.md", overrides });
-    expect(wave).toMatchObject({ repo, tag: TAG, plan: "plan/w1.md", title: "Wave one", request: "review the wave", branch: "main-factory-w1", target: "main", base: main });
+    expect(wave).toMatchObject({ repo, tag: TAG, plan: "plan/w1.md", title: "Wave one", request: "review the wave", branch: "main-factory-w1", target: "main" });
     expect(wave).toMatchObject({ origin: "session-0", stage: "building", reason: null, counts: { total: 3, done: 0 } });
     expect("overrides" in wave).toBe(false);
     expect(git(repo, "rev-parse", "refs/heads/main-factory-w1")).toBe(main);
@@ -81,7 +81,7 @@ describe("waves", () => {
     }
     const file = await readWave(wave.id);
     // Stored resolved: the overrides over the repository's stored settings (none here) over the defaults.
-    expect(file.declaration.overrides).toEqual({ ...overrides, models: { ...overrides.models, coder: "a/b" }, review: false, remote: false });
+    expect(file.declaration.overrides).toEqual({ ...overrides, models: { ...overrides.models, coder: "a/b" }, review: false });
     expect(file.events.map((event) => event.kind)).toEqual(["tasks", "launch", "task", "launch", "task"]);
     expect(prompts().filter((line) => line === "prompt /factory start")).toHaveLength(2);
     // The same tag on the same target: its branch exists.
@@ -95,7 +95,7 @@ describe("waves", () => {
     // Its runner's launch ends before the test does: a runner stopped mid-launch outlasts the test's time.
     await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null);
     // Models merged per name: the override's coder (big its alias), the stored reviewer.
-    const resolved = { merge: "review" as const, maxRounds: 1, review: false, models: { coder: "c/d", big: "c/d", reviewer: "c/d" }, remote: false };
+    const resolved = { merge: "review" as const, maxRounds: 1, review: false, models: { coder: "c/d", big: "c/d", reviewer: "c/d" } };
     expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
     await callAction("settings.set", { repo, settings: { merge: "auto", models: { reviewer: "a/b" } } });
     expect((await readWave(wave.id)).declaration.overrides).toEqual(resolved);
@@ -433,11 +433,6 @@ describe("waves", () => {
     expect((await getWave(id)).interrupted).toBe(true);
     await appendWaveEvent(id, { kind: "stage", stage: "rejected", reason: null });
     expect((await getWave(id)).interrupted).toBe(false);
-    const timeline = (await callAction("waves.timeline", { id, since: 4 })) as { events: { kind: string }[]; next: number };
-    expect(timeline.events.map((event) => event.kind)).toEqual(["review", "stage", "stage"]);
-    expect(timeline.next).toBe(7);
-    expect(((await callAction("waves.timeline", { id, since: 7 })) as { events: unknown[] }).events).toEqual([]);
-    await expectError(callAction("waves.timeline", { id, since: 8 }), "invalid", "past");
   });
 
   test("a record of the wave no task event names (its runner died after the launch) is adopted, not launched again", async () => {
@@ -445,10 +440,10 @@ describe("waves", () => {
     git(repo, "branch", "main-factory-w9");
     const id = waveId(2, 2);
     await createWave({ id, repo, tag: "factory/w9", plan: null, title: "w", request: "r", branch: "main-factory-w9", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a")] });
+    await appendWaveEvent(id, { kind: "tasks", tasks: [{ ...spec("a"), id: taskId(1) }] });
     const orphan = { ...fakeRecord(taskId(1), repo), title: "Task a", tag: "factory/w9", wave: id };
     await writeTask(orphan);
-    // Another wave's record and one of another title are no orphans of this task.
+    // Another wave's record is no orphan of this task.
     await writeTask({ ...fakeRecord(taskId(2), repo), title: "Task a", wave: waveId(2, 3) });
     expect(await startWaveTasks(id)).toEqual(["a"]);
     expect(taskOf(await getWave(id), "a")).toMatchObject({ taskId: taskId(1), sessionId: orphan.sessionId });
@@ -566,7 +561,7 @@ describe("waves", () => {
       const repo = await registeredRepo();
       const p1 = await predecessor(repo, "factory/p1", 1);
       const queued = await startWave(repo, [spec("a")], { tag: "factory/w3", after: ["factory/p1"] });
-      expect(queued).toMatchObject({ stage: "queued", branch: null, base: null, after: [p1], detail: null });
+      expect(queued).toMatchObject({ stage: "queued", branch: null, after: [p1], detail: null });
       expect((await readWave(queued.id)).declaration.after).toEqual([p1]);
       expect(git(repo, "branch", "--list", "main-factory-w3")).toBe("");
       // The same tag again: its branch name is reserved.
@@ -581,7 +576,8 @@ describe("waves", () => {
       await until(async () => taskOf(await getWave(queued.id), "a").taskId !== null, 20_000);
       const started = await getWave(queued.id);
       const main = git(repo, "rev-parse", "main");
-      expect([started.stage, started.branch, started.base]).toEqual(["building", "main-factory-w3", main]);
+      const file = await readWave(queued.id);
+      expect([started.stage, started.branch, foldWave(file.declaration, file.events).base]).toEqual(["building", "main-factory-w3", main]);
       expect(git(repo, "rev-parse", "refs/heads/main-factory-w3")).toBe(main);
       expect(git(repo, "show", "main-factory-w3:1.txt")).toBe("1");
       const record = await recordById(taskOf(started, "a").taskId);
@@ -731,34 +727,12 @@ describe("waves", () => {
       await until(async () => taskOf(await getWave(id), "a").taskId !== null, 20_000);
       expect(git(repo, "rev-parse", "refs/heads/main-factory-w3")).toBe(main);
     }, 30_000);
-
-    test("a runner that died before the first launch, another wave merged and fast-forwarded the empty branch: waves.retry starts the wave", async () => {
-      const repo = await registeredRepo();
-      const p1 = await predecessor(repo, "factory/p1", 1);
-      await merge(repo, p1);
-      const p2 = await predecessor(repo, "factory/p2", 2);
-      const id = WAVE_N(9);
-      const base = git(repo, "rev-parse", "main");
-      await createWave({ id, repo, tag: "factory/w3", plan: null, title: "w3", request: "r", branch: null, target: "main", base: null, after: [p1], origin: null, createdAt: "2026-01-09T00:00:00.000Z", overrides: {} });
-      await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a")] });
-      await appendWaveEvent(id, { kind: "start", branch: "main-factory-w3", base });
-      git(repo, "branch", "main-factory-w3", base);
-      await merge(repo, p2);
-      // The test's `merge` helper is a plain `git merge` plus a `merged` event and runs no `waveLanded`: the branch
-      // stays on `base`. The forced move stands in for the sync p2's runner would do at its merge.
-      expect(git(repo, "rev-parse", "main-factory-w3")).toBe(base);
-      git(repo, "branch", "-f", "main-factory-w3", "main");
-      await callAction("waves.retry", { id });
-      await until(async () => taskOf(await getWave(id), "a").taskId !== null, 20_000);
-      expect((await getWave(id)).stage).toBe("building");
-      expect(git(repo, "show", "main-factory-w3:2.txt")).toBe("2");
-    }, 30_000);
   });
 });
 
 describe("waiting on waves and the wave actions", () => {
   const WAVE = (): string => waveId(5, 1);
-  const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [] });
+  const spec = (key: string) => ({ key, title: `Task ${key}`, request: `do ${key}`, after: [], id: crypto.randomUUID() });
   const stateEntry = (state: string) => ({ type: "custom", customType: "factory-state", timestamp: "t", data: { state, round: 1, reason: "r" } });
   type WaitResult = { tasks: TaskView[]; waves: WaveView[]; attention: string[]; timedOut: boolean };
   const wait = async (params: object) => (await callAction("tasks.wait", params)) as WaitResult;
@@ -815,8 +789,6 @@ describe("waiting on waves and the wave actions", () => {
     expect([rejected.timedOut, rejected.attention, rejected.waves[0].stage]).toEqual([false, [WAVE()], "rejected"]);
     const byTag = await wait({ tag: "factory", timeoutMs: 5_000 });
     expect([byTag.attention, byTag.waves.map((wave) => wave.id)]).toEqual([[WAVE()], [WAVE()]]);
-    // An ignored wave is not watched.
-    expect((await wait({ tag: "factory", ignore: [WAVE().slice(0, 8)] })).waves).toEqual([]);
   });
 
   test("by wave: a task's question needs attention while the wave builds; a cancelled task of it does not", async () => {
@@ -834,7 +806,7 @@ describe("waiting on waves and the wave actions", () => {
 
   test("by wave: building with a task that can never start needs attention once no task runs, its runner alive or not", async () => {
     await writtenWave("/r", ["cancelled", "starting"]);
-    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Task c", request: "do c", after: ["a"] }] });
+    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Task c", request: "do c", after: ["a"], id: crypto.randomUUID() }] });
     const stop = await fakeRunner();
     // b still runs: the wave may move on by itself.
     const quiet = await wait({ wave: WAVE(), timeoutMs: 1_000 });
@@ -917,11 +889,8 @@ describe("waiting on waves and the wave actions", () => {
   });
 
   test("a task's merge is refused once its wave's review began, whatever started it, until the wave builds again", async () => {
-    const [task] = await writtenWave("/r", ["running"]);
-    // A factory task's session lies under the factory's home.
-    const record = { ...task, sessionDir: join(caseDir, "agent", "factory", "sessions", "r") };
-    await writeTask(record);
-    const refusal = () => waveMergeRefusal(record.sessionDir, record.sessionId);
+    const [record] = await writtenWave("/r", ["running"]);
+    const refusal = () => waveMergeRefusal(record.sessionId);
     expect(await refusal()).toBeNull();
     // A launch failed while it built: no review began, its running tasks still merge.
     await appendWaveEvent(WAVE(), { kind: "stage", stage: "blocked", reason: "infra" });
@@ -934,20 +903,16 @@ describe("waiting on waves and the wave actions", () => {
     await appendWaveEvent(WAVE(), { kind: "stage", stage: "building", reason: null });
     expect(await refusal()).toBeNull();
     await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
-    // A session outside the factory's home, a task outside a wave: never refused.
-    expect(await waveMergeRefusal(task.sessionDir, task.sessionId)).toBeNull();
+    // A task outside a wave: never refused.
     await writeTask({ ...record, wave: null });
     expect(await refusal()).toBeNull();
   });
 
-  test("taskWave: the wave of a factory task's session, null outside a wave or the factory's home", async () => {
-    const [task] = await writtenWave("/r", ["running"]);
-    const record = { ...task, sessionDir: join(caseDir, "agent", "factory", "sessions", "r") };
-    await writeTask(record);
-    expect(await taskWave(record.sessionDir, record.sessionId)).toBe(WAVE());
-    expect(await taskWave(task.sessionDir, task.sessionId)).toBeNull();
+  test("taskWave: the wave of a factory task's session, null outside a wave", async () => {
+    const [record] = await writtenWave("/r", ["running"]);
+    expect(await taskWave(record.sessionId)).toBe(WAVE());
     await writeTask({ ...record, wave: null });
-    expect(await taskWave(record.sessionDir, record.sessionId)).toBeNull();
+    expect(await taskWave(record.sessionId)).toBeNull();
   });
 
   test("waves.cancel stops the wave's runner and its running tasks, the branch stays; then nothing moves", async () => {

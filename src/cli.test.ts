@@ -3,7 +3,7 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentActions, agentError, agentView } from "./agent-view.ts";
@@ -101,12 +101,11 @@ describe("factory <action>", () => {
   });
 
   test("a FactoryError other than invalid exits 1 with its code and message on stderr", () => {
-    const repo = makeRepo();
-    const result = factory(["repos.remove", "--json"], { agent: agentDir(), cwd: repo });
-    expect(result).toEqual({ code: 1, stdout: "", stderr: `factory: not_found: ${repo} is not registered\n` });
-    const agentResult = factory(["repos.remove"], { agent: agentDir(), cwd: repo });
-    expect(agentResult.code).toBe(1);
-    expect(agentResult.stderr).toEndWith(" · next: repos.list\n");
+    const params = JSON.stringify({ id: "00000000" });
+    const result = factory(["tasks.get", params, "--json"], { agent: agentDir() });
+    expect([result.code, result.stdout, result.stderr.startsWith("factory: not_found: ")]).toEqual([1, "", true]);
+    const agentResult = factory(["tasks.get", params], { agent: agentDir() });
+    expect([agentResult.code, agentResult.stderr.includes(" · next: ")]).toEqual([1, true]);
   });
 
   test("more than one params argument is a usage error", () => {
@@ -152,26 +151,16 @@ describe("factory commands", () => {
 describe("factory as the host", () => {
   const ID = "11111111-2222-3333-4444-555555555555";
 
-  /** A task record of a linked worktree that never started: no runner, no state, so it never rests. */
-  function importableRecord() {
-    const repo = makeRepo();
-    execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", "init"]);
-    const worktree = join(scratch, `wt-${counter}`);
-    execFileSync("git", ["-C", repo, "worktree", "add", "--quiet", "-b", "task", worktree]);
-    return { id: ID, repo, worktree, branch: "task", title: "t", sessionId: "test-session-s", sessionDir: join(scratch, `sessions-${counter}`), createdAt: "2026-01-01T00:00:00.000Z" };
+  /** A task record that never started: no runner, no state, so it never rests. */
+  function writeRecord(agent: string): void {
+    mkdirSync(join(agent, "factory", "tasks"), { recursive: true });
+    const record = { id: ID, repo: scratch, worktree: join(scratch, "wt"), branch: "task", title: "t", sessionId: "test-session-s", sessionDir: join(scratch, "sessions"), createdAt: "2026-01-01T00:00:00.000Z", tag: "t", plan: null, wave: null, origin: null };
+    writeFileSync(join(agent, "factory", "tasks", `${ID}.json`), JSON.stringify(record));
   }
 
-  test("runs the hostOnly tasks.import: refuses a record whose worktree is the primary checkout, registers a linked one", () => {
+  test("the timelines print JSON without --json: programs replay them", () => {
     const agent = agentDir();
-    const record = importableRecord();
-    const refused = factory(["tasks.import", JSON.stringify({ record: { ...record, worktree: record.repo, branch: "main" } }), "--json"], { agent });
-    expect(refused).toEqual({ code: 1, stdout: "", stderr: `factory: refused: tasks.import: ${record.repo} is not a linked worktree of ${record.repo}\n` });
-    const imported = factory(["tasks.import", JSON.stringify({ record }), "--json"], { agent });
-    expect(imported.code).toBe(0);
-    expect(JSON.parse(imported.stdout)).toMatchObject({ id: ID, state: null });
-    // Imported again (an existing id stays unchanged): the agent view by default.
-    expect(factory(["tasks.import", JSON.stringify({ record })], { agent }).stdout).toStartWith("imported task 11111111");
-    // The timelines print JSON without --json: programs replay them.
+    writeRecord(agent);
     const timeline = factory(["tasks.timeline", JSON.stringify({ id: ID })], { agent });
     expect(timeline).toMatchObject({ code: 0, stderr: "" });
     expect(JSON.parse(timeline.stdout)).toEqual({ entries: [], next: 0 });
@@ -179,7 +168,7 @@ describe("factory as the host", () => {
 
   test("SIGINT aborts a blocking tasks.wait: exit 1, failed", async () => {
     const agent = agentDir();
-    expect(factory(["tasks.import", JSON.stringify({ record: importableRecord() })], { agent }).code).toBe(0);
+    writeRecord(agent);
     const wait = Bun.spawn(["bun", CLI, "tasks.wait", JSON.stringify({ ids: [ID] }), "--json"], { cwd: scratch, env: cliEnv(agent), stdout: "pipe", stderr: "pipe" });
     await Bun.sleep(1000);
     expect(wait.exitCode).toBeNull();

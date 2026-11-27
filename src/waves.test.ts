@@ -15,8 +15,6 @@ import {
   readWave,
   readyForReview,
   removeWave,
-  parseWaveEvent,
-  parseWaveFile,
   startableKeys,
   stuckKeys,
   unreachableKeys,
@@ -69,7 +67,7 @@ function declaration(id: string, overrides: Partial<WaveDeclaration> = {}): Wave
   };
 }
 
-const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after });
+const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after, id: `id-${key}` });
 const states = (entries: Record<string, string | null>) => new Map(Object.entries(entries));
 
 function folded(tasks: ReturnType<typeof spec>[], started: string[] = []): WaveFold {
@@ -109,11 +107,8 @@ describe("wave records", () => {
     expect((await readWave(ONE)).events).toEqual([{ at: "t1", kind: "tasks", tasks: [spec("a")] }, stage]);
   });
 
-  test("append refuses an unknown wave and an invalid event, and writes nothing then", async () => {
+  test("append refuses an unknown wave", async () => {
     await expect(appendWaveEvent(ONE, { kind: "stage", stage: "merged", reason: null })).rejects.toMatchObject({ code: "not_found" });
-    await createWave(declaration(ONE));
-    await expect(appendWaveEvent(ONE, { kind: "stage", stage: "done" as "merged", reason: null })).rejects.toThrow("stage must be one of");
-    expect((await readWave(ONE)).events).toEqual([]);
   });
 
   test("a torn line is skipped and the next append starts a line of its own", async () => {
@@ -124,12 +119,9 @@ describe("wave records", () => {
     expect((await readWave(ONE)).events).toEqual([{ at: "t2", kind: "stage", stage: "blocked", reason: "infra" }]);
   });
 
-  test("readWave: not_found for a missing wave or a bad id, an error naming the file when invalid", async () => {
+  test("readWave: not_found for a missing wave or a bad id", async () => {
     await expect(readWave(ONE)).rejects.toBeInstanceOf(FactoryError);
     await expect(readWave("../../etc/passwd")).rejects.toMatchObject({ code: "not_found" });
-    await createWave(declaration(ONE));
-    appendFileSync(wavePath(ONE), `${JSON.stringify({ at: "t", kind: "nope" })}\n`);
-    await expect(readWave(ONE)).rejects.toThrow(`${wavePath(ONE)}: line 2: kind "nope" is no wave event`);
   });
 
   test("listWaves: oldest first, filtered by repo, skips invalid and temp files", async () => {
@@ -138,8 +130,6 @@ describe("wave records", () => {
     await createWave(declaration(uuid(3), { createdAt: "2026-02-01T00:00:00.000Z" }));
     await createWave(declaration(uuid(4), { repo: "/repo/b" }));
     writeFileSync(wavePath(uuid(5)), "{\n");
-    writeFileSync(wavePath(uuid(6)), `${JSON.stringify(declaration(uuid(7)))}\n`);
-    writeFileSync(wavePath(uuid(8)), `${JSON.stringify({ ...declaration(uuid(8)), tag: 3 })}\n`);
     writeFileSync(wavePath(uuid(9)), "");
     writeFileSync(join(wavesDir(), "x.jsonl.1.tmp"), "{}");
     writeFileSync(join(wavesDir(), "not-an-id.jsonl"), `${JSON.stringify(declaration("not-an-id"))}\n`);
@@ -160,37 +150,20 @@ describe("wave records", () => {
 
 describe("foldWave", () => {
   test("a declared wave is building with nothing else", () => {
-    expect(foldWave(declaration(ONE), [])).toEqual({ ...declaration(ONE), after: [], stage: "building", reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null });
+    expect(foldWave(declaration(ONE), [])).toEqual({ ...declaration(ONE), after: [], stage: "building", reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null });
   });
 
-  test("a wave with after is queued without branch and base until its start event; an old declaration has neither after nor a null branch", () => {
+  test("a wave with after is queued without branch and base until its start event", () => {
     const queued = declaration(ONE, { branch: null, base: null, after: [uuid(2)] });
-    const text = `${JSON.stringify(queued)}\n${JSON.stringify({ at: "t1", kind: "tasks", tasks: [spec("a")] })}\n`;
-    const file = parseWaveFile(text, ONE);
-    expect(file.declaration).toEqual(queued);
-    const before = foldWave(file.declaration, file.events);
+    const before = foldWave(queued, [{ at: "t1", kind: "tasks", tasks: [spec("a")] }]);
     expect([before.stage, before.branch, before.base, before.after]).toEqual(["queued", null, null, [uuid(2)]]);
-    const start = parseWaveEvent({ at: "t2", kind: "start", branch: "main-factory-w1", base: "def456" });
-    const after = foldWave(file.declaration, [...file.events, start]);
+    const after = foldWave(queued, [{ at: "t2", kind: "start", branch: "main-factory-w1", base: "def456" }]);
     expect([after.stage, after.branch, after.base]).toEqual(["building", "main-factory-w1", "def456"]);
-    expect(() => parseWaveEvent({ at: "t", kind: "start", branch: "b" })).toThrow("base must be a non-empty string");
-    // A declaration of before the field: no after, a branch and a base it must have.
-    const { after: _after, ...old } = declaration(ONE);
-    expect(foldWave(parseWaveFile(`${JSON.stringify(old)}\n`, ONE).declaration, [])).toMatchObject({ stage: "building", after: [], branch: "main-factory-w1", base: "abc123" });
-    expect(() => parseWaveFile(`${JSON.stringify({ ...old, branch: null })}\n`, ONE)).toThrow("branch must be a non-empty string");
-    expect("after" in parseWaveFile(`${JSON.stringify(old)}\n`, ONE).declaration).toBe(false);
   });
 
-  test("a task's model: stored in the tasks event, folded; an old log without the field folds to big", () => {
-    const old = `${JSON.stringify(declaration(ONE))}\n${JSON.stringify({ at: "t1", kind: "tasks", tasks: [spec("a")] })}\n`;
-    const file = parseWaveFile(old, ONE);
-    expect(file.events[0]).toEqual({ at: "t1", kind: "tasks", tasks: [spec("a")] });
-    expect(foldWave(file.declaration, file.events).tasks[0].model).toBe("big");
-    const withModel = parseWaveEvent({ at: "t2", kind: "tasks", tasks: [{ ...spec("b"), model: "small" }, { ...spec("c"), model: null }] });
-    expect(withModel).toEqual({ at: "t2", kind: "tasks", tasks: [{ ...spec("b"), model: "small" }, spec("c")] });
-    expect(foldWave(declaration(ONE), [withModel]).tasks.map((task) => task.model)).toEqual(["small", "big"]);
-    expect(() => parseWaveEvent({ at: "t3", kind: "tasks", tasks: [{ ...spec("d"), model: 4 }] })).toThrow("model must be a string or null");
-    expect(() => parseWaveEvent({ at: "t4", kind: "tasks", tasks: [{ ...spec("e"), model: "p/m" }] })).toThrow('model must be "small", "big" or null');
+  test("a task's model: folded from the tasks event, big when absent", () => {
+    const fold = foldWave(declaration(ONE), [{ at: "t2", kind: "tasks", tasks: [{ ...spec("b"), model: "small" }, spec("c")] }]);
+    expect(fold.tasks.map((task) => task.model)).toEqual(["small", "big"]);
   });
 
   test("tasks and task: specs in order, ids once started; unknown keys and repeated keys change nothing", () => {
@@ -232,15 +205,15 @@ describe("foldWave", () => {
       { at: "t1", kind: "gate", phase: "review", passed: true, wallMs: 100, log: "/logs/g1" },
       { at: "t2", kind: "review", ...review },
       { at: "t3", kind: "gate", phase: "merge", passed: false, wallMs: 50, log: null },
-      { at: "t4", kind: "merge", from: "abc", to: "def", queueMs: 7 },
-      { at: "t5", kind: "merge", from: "def", to: "fed", queueMs: 8 },
+      { at: "t4", kind: "merge", from: "abc", to: "def" },
+      { at: "t5", kind: "merge", from: "def", to: "fed" },
     ]);
     expect(fold.gates).toEqual([
       { at: "t1", phase: "review", passed: true, wallMs: 100, log: "/logs/g1" },
       { at: "t3", phase: "merge", passed: false, wallMs: 50, log: null },
     ]);
     expect(fold.reviews).toEqual([{ at: "t2", ...review }]);
-    expect(fold.merge).toEqual({ at: "t5", from: "def", to: "fed", queueMs: 8 });
+    expect(fold.merge).toEqual({ at: "t5", from: "def", to: "fed" });
   });
 
   test("gatedCommit: the commit of the last passed review gate; the fold and so the view leave it out", () => {
@@ -251,25 +224,11 @@ describe("foldWave", () => {
     expect(gatedCommit(events)).toBe("c1");
     expect(gatedCommit([...events, gate("t4", "review", true, "c4")])).toBe("c4");
     expect(foldWave(declaration(ONE), events).gates[0]).toEqual({ at: "t1", phase: "review", passed: true, wallMs: 1, log: null });
-    expect(parseWaveEvent(JSON.parse(JSON.stringify(events[0])))).toEqual(events[0]);
-    expect(() => parseWaveEvent({ ...events[0], commit: 3 })).toThrow("commit must be a string or null");
   });
 
-  test("a gate event's flaky names are kept and folded into the view; an old event without them still parses", () => {
-    const old = { at: "t1", kind: "gate", phase: "review", passed: true, wallMs: 1, log: null };
-    expect(parseWaveEvent(old)).toEqual(old as WaveEvent);
-    const flaky = parseWaveEvent({ ...old, flaky: ["a > b", 3] });
-    expect(flaky).toEqual({ ...old, flaky: ["a > b"] } as WaveEvent);
+  test("a gate event's flaky names are folded into the view", () => {
+    const flaky: WaveEvent = { at: "t1", kind: "gate", phase: "review", passed: true, wallMs: 1, log: null, flaky: ["a > b"] };
     expect(foldWave(declaration(ONE), [flaky]).gates).toEqual([{ at: "t1", phase: "review", passed: true, wallMs: 1, log: null, flaky: ["a > b"] }]);
-  });
-
-  test("remote: each event sets the fields it carries", () => {
-    const fold = foldWave(declaration(ONE), [
-      { at: "t1", kind: "remote", number: 12, url: "https://forge/pr/12" },
-      { at: "t2", kind: "remote", pushed: "abc" },
-      { at: "t3", kind: "remote", error: "push refused" },
-    ]);
-    expect(fold.remote).toEqual({ number: 12, url: "https://forge/pr/12", pushed: "abc", error: "push refused" });
   });
 
   test("replays a file written by appendWaveEvent", async () => {
@@ -335,15 +294,10 @@ describe("scheduling", () => {
     expect(f.tasks[0]?.dropped).toBeUndefined();
   });
 
-  test("a stage event's detail: parsed, folded as the last stage's, optional", () => {
-    const f = foldWave(declaration(ONE), [
-      parseWaveEvent({ at: "t1", kind: "stage", stage: "blocked", reason: "infra", detail: "starting its task a failed" }),
-    ]);
+  test("a stage event's detail: folded as the last stage's, optional", () => {
+    const f = foldWave(declaration(ONE), [{ at: "t1", kind: "stage", stage: "blocked", reason: "infra", detail: "starting its task a failed" }]);
     expect([f.stage, f.reason, f.detail]).toEqual(["blocked", "infra", "starting its task a failed"]);
     expect(foldWave(declaration(ONE), [{ at: "t1", kind: "stage", stage: "blocked", reason: "infra", detail: "x" }, { at: "t2", kind: "stage", stage: "reviewing", reason: null }]).detail).toBeNull();
-    expect(parseWaveEvent({ at: "t", kind: "stage", stage: "building", reason: null })).toEqual({ at: "t", kind: "stage", stage: "building", reason: null });
-    expect(() => parseWaveEvent({ at: "t", kind: "stage", stage: "building", reason: null, detail: 3 })).toThrow("detail must be a string or null");
-    expect(() => parseWaveEvent({ at: "t", kind: "tasks", tasks: [], dropped: [1] })).toThrow("dropped must be an array of keys");
   });
 
   test("readyForReview: every task done or cancelled, at least one done", () => {
@@ -384,16 +338,16 @@ describe("validateTaskSpecs", () => {
 
   test("returns the specs with after defaulted and deduplicated; after may name existing keys", () => {
     expect(validateTaskSpecs([{ key: "a.1_x-y", title: "A", request: "do a" }, { key: "b", title: "B", request: "do b", after: ["a.1_x-y", "old", "old"] }], [{ key: "old" }])).toEqual([
-      { key: "a.1_x-y", title: "A", request: "do a", after: [] },
-      { key: "b", title: "B", request: "do b", after: ["a.1_x-y", "old"] },
+      { key: "a.1_x-y", title: "A", request: "do a", after: [], id: expect.any(String) },
+      { key: "b", title: "B", request: "do b", after: ["a.1_x-y", "old"], id: expect.any(String) },
     ]);
   });
 
   test("keeps a task's model, small or big, omits it when absent; refuses a concrete model id", () => {
     expect(validateTaskSpecs([{ key: "a", title: "A", request: "r", model: "small" }, { key: "b", title: "B", request: "r", model: null }, { key: "c", title: "C", request: "r", model: "big" }])).toEqual([
-      { key: "a", title: "A", request: "r", after: [], model: "small" },
-      { key: "b", title: "B", request: "r", after: [] },
-      { key: "c", title: "C", request: "r", after: [], model: "big" },
+      { key: "a", title: "A", request: "r", after: [], model: "small", id: expect.any(String) },
+      { key: "b", title: "B", request: "r", after: [], id: expect.any(String) },
+      { key: "c", title: "C", request: "r", after: [], model: "big", id: expect.any(String) },
     ]);
     invalid([{ key: "a", title: "A", request: "r", model: "p/m" }], [], 'tasks[0].model must be "small" or "big"');
     invalid([{ key: "a", title: "A", request: "r", model: "sonnet" }], [], 'tasks[0].model must be "small" or "big"');

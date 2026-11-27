@@ -1,5 +1,5 @@
 /**
- * The conflict task (throughput/1): a wave whose rebase onto its target conflicts (not additions-only) builds again
+ * The conflict task (throughput/1): a wave whose rebase onto its target conflicts builds again
  * with a task whose worktree holds the markers. Real git repos, the core kit's fake `pi` for the task, a fake reviewer
  * (`--mode json`) in front of it, a detached wave runner.
  */
@@ -84,7 +84,7 @@ async function conflictingWave(setup: WaveSetup = {}): Promise<{ repo: string; w
   git(repo, "worktree", "remove", work);
   const main = setup.main === undefined ? commit(repo, "a.txt", "main's a\n", "main: change a") : setup.main(repo);
   await createWave({ id: WAVE, repo, tag: "factory/w1", plan: null, title: "Wave one", request: "Check a.", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: setup.overrides ?? {} });
-  await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "a", title: "Change a", request: "change a", after: [] }] });
+  await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "a", title: "Change a", request: "change a", after: [], id: crypto.randomUUID() }] });
   const record: TaskRecord = { id: `41000000-${RUN}-4000-8000-000000000001`, repo, worktree: join(caseDir, "task-a"), branch: "task-a", title: "Change a", sessionId: `session-${RUN}-a`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:01.000Z", tag: "factory/w1", plan: null, wave: WAVE, origin: null };
   await writeTask(record);
   writeSession(record, [{ type: "custom", customType: "factory-state", data: { state: "done", round: 1, reason: "merged" } }]);

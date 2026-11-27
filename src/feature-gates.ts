@@ -29,18 +29,15 @@ export const GATES = feature({
       ["repo"],
       true,
     ),
-    "gates.get": spec("One gate proof: state (running, passed, flaky, failing), steps, flaky names, the failing step. Answers {proof}", { id: { type: "string", description: "The proof id or a unique prefix of it" } }, ["id"], false),
   },
   get handlers(): Handlers {
     return PROOF_HANDLERS;
   },
   renderers: {
     "gates.prove": (_params, result: { proof: ProofView }) => `started ${proofHeader(result.proof)}`,
-    "gates.get": (_params, result: { proof: ProofView }) => proofBlock(result.proof),
   },
   cards: {
     "gates.prove": (_params, result: { proof: ProofView }) => proofCard(result.proof, `proving the gates of ${result.proof.branch}`),
-    "gates.get": (_params, result: { proof: ProofView }) => proofCard(result.proof, `the gates of ${result.proof.branch}`, result.proof.state === "failing" ? "attention" : "quiet"),
   },
   notices: (items) => proofNotices(items as readonly ProofView[]),
   toolBlurb: '"gates.prove" runs a branch\'s merge_gates in the background before a wave is declared on it: passed, flaky or failing.',

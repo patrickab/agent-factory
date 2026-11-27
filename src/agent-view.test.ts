@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { agentActions, agentError, agentView, taskBlock, unreachableTasks, waveBlock, withoutPaths } from "./agent-view.ts";
+import { agentActions, agentError, agentView, hasAgentView, taskBlock, unreachableTasks, waveBlock, withoutPaths } from "./agent-view.ts";
 import { ACTIONS, type TaskView } from "./core.ts";
 import type { WaveView } from "./waves.ts";
 import { FINDINGS, FIXTURES, OTHER_WAVE, PROOF_ID, proof, review, SESSION, task, TASK_ID, wave, WAVE_ID, waveTask } from "./view-fixtures.ts";
@@ -12,8 +12,9 @@ function clean(text: string): void {
 }
 
 describe("agentView", () => {
-  test("every action in ACTIONS has a rendering", () => {
-    for (const name of Object.keys(ACTIONS)) {
+  test("every action but tasks.timeline has a rendering", () => {
+    expect(Object.keys(ACTIONS).filter((name) => !hasAgentView(name))).toEqual(["tasks.timeline"]);
+    for (const name of Object.keys(ACTIONS).filter(hasAgentView)) {
       const fixture = FIXTURES[name];
       expect(fixture, `fixture for ${name}`).toBeDefined();
       const text = agentView(name, fixture.params, fixture.result);
@@ -61,7 +62,7 @@ describe("agentView", () => {
 
   test("tasks.diff: the file list with counts, never the patch", () => {
     expect(agentView("tasks.diff", {}, FIXTURES["tasks.diff"].result)).toBe("2 files  +40 -2\n  +10 -2  src/x.ts\n  +30 -0  src/x.test.ts");
-    expect(agentView("tasks.diff", {}, { base: "x", diff: "", files: [] })).toBe("no changes");
+    expect(agentView("tasks.diff", {}, { diff: "", files: [] })).toBe("no changes");
   });
 
   test("lists show what is not finished and count the rest", () => {
@@ -95,7 +96,7 @@ describe("agentView", () => {
 
   test("repositories, branches, settings, config", () => {
     expect(agentView("repos.list", {}, FIXTURES["repos.list"].result)).toBe("~/git/app\n~/git/bot");
-    expect(agentView("branches.list", {}, FIXTURES["branches.list"].result)).toBe("master (default) · waves (factory.yaml)");
+    expect(agentView("branches.list", {}, FIXTURES["branches.list"].result)).toBe("master · waves");
     expect(agentView("settings.get", {}, FIXTURES["settings.get"].result)).toBe(
       [
         "branch: master (default)",
@@ -112,7 +113,7 @@ describe("agentView", () => {
     const same = { stored: {}, resolved: { models: { small: "a/s", big: "a/b", coder: "a/b", reviewer: "a/b" } }, defaults: {} };
     expect(agentView("settings.get", {}, same)).toBe("models.small: a/s (default)\nmodels.coder: a/b (default)\nmodels.reviewer: a/b (default)");
     expect(agentView("settings.set", FIXTURES["settings.set"].params, FIXTURES["settings.set"].result)).toBe("settings set:\n  merge: review");
-    expect(agentView("config.get", { branch: "waves" }, FIXTURES["config.get"].result)).toBe("factory.yaml (committed on waves)\ngates:\n  - [bun, run, types]");
+    expect(agentView("config.get", {}, FIXTURES["config.get"].result)).toBe("factory.yaml (working copy)\ngates:\n  - [bun, run, types]");
     expect(agentView("config.get", {}, { exists: false, text: null, draft: "gates: []\n", source: ["package.json"] })).toBe("no factory.yaml, a draft from package.json:\ngates: []");
   });
 });
@@ -245,7 +246,7 @@ describe("waveBlock per stage", () => {
     [
       "building",
       {},
-      ["wave 3f2a91c0  building  1/3 done  factory/w1  $18.40", head, "  tasks: record done · actions running · docs pending", "  next: waves.add, waves.cancel"],
+      ["wave 3f2a91c0  building  1/3 done  factory/w1  $18.40", head, "  tasks: record done · actions running · docs pending (docs0000)", "  next: waves.add, waves.cancel"],
     ],
     [
       "building with tasks that can never start",
@@ -257,7 +258,7 @@ describe("waveBlock per stage", () => {
       [
         "wave 3f2a91c0  building  0/3 done  factory/w1  $18.40",
         head,
-        "  tasks: record cancelled · actions pending · docs pending · free blocked (free0000)",
+        "  tasks: record cancelled · actions pending (actions0) · docs pending (docs0000) · free blocked (free0000)",
         "  cannot start: actions, docs",
         "  next: waves.add, waves.cancel",
       ],
@@ -318,7 +319,7 @@ describe("waveBlock per stage", () => {
       {
         stage: "merged",
         running: false,
-        merge: { at: "2025-01-02T11:10:00.000Z", from: "aaaaaaa1", to: "bbbbbbb2", queueMs: 1 },
+        merge: { at: "2025-01-02T11:10:00.000Z", from: "aaaaaaa1", to: "bbbbbbb2" },
         gates: [{ at: "2025-01-02T11:00:00.000Z", phase: "review", passed: true, wallMs: 1, log: "ok", flaky: ["a > b"] }],
         actions: [],
       },
@@ -340,15 +341,13 @@ describe("waveBlock per stage", () => {
         stage: "merged",
         running: false,
         counts: { total: 3, done: 3 },
-        merge: { at: "2025-01-02T12:00:00.000Z", from: "0ab12cd0ab12cd", to: "40ca0ce40ca0ce", queueMs: 5 },
-        remote: { number: 7, url: "https://gitlab.example/app/-/merge_requests/7", pushed: "40ca0ce", error: null },
+        merge: { at: "2025-01-02T12:00:00.000Z", from: "0ab12cd0ab12cd", to: "40ca0ce40ca0ce" },
         actions: ["waves.remove"],
       },
       [
         "wave 3f2a91c0  merged  3/3 done  factory/w1  $18.40",
         head,
         "  merged 0ab12cd0..40ca0ce4 into master",
-        "  remote: https://gitlab.example/app/-/merge_requests/7",
         "  next: waves.remove",
       ],
     ],
@@ -408,7 +407,7 @@ describe("waveBlock per stage", () => {
     [
       "queued",
       { stage: "queued", after: [OTHER_WAVE], running: false, tasks: [waveTask("record", "pending")], counts: { total: 1, done: 0 }, usage: null },
-      ["wave 3f2a91c0  queued  0/1 done  factory/w1", head, "  waits for: 77b0c2e1", "  tasks: record pending", "  next: waves.add, waves.cancel"],
+      ["wave 3f2a91c0  queued  0/1 done  factory/w1", head, "  waits for: 77b0c2e1", "  tasks: record pending (record00)", "  next: waves.add, waves.cancel"],
     ],
     [
       "queued after a cancelled wave",
@@ -425,7 +424,7 @@ describe("waveBlock per stage", () => {
         "wave 3f2a91c0  queued: can never start  0/1 done  factory/w1",
         head,
         "  waits for: 77b0c2e1",
-        "  tasks: record pending",
+        "  tasks: record pending (record00)",
         "  why: it waits for wave factory/w0 (77b0c2e1), which was cancelled: it can never start; waves.cancel or waves.remove it",
         "  next: waves.add, waves.cancel",
       ],
@@ -503,7 +502,6 @@ describe("tasks.wait", () => {
     expect(agentView("tasks.wait", { ids: ["9c1d"] }, { tasks: [], waves: [], proofs: [flaky], attention: [], timedOut: false })).toBe(
       "proof 9c1d2e3f  flaky  master 0ab12cd  flaky: the wave merges",
     );
-    expect(agentView("gates.get", {}, { proof: flaky })).toBe("proof 9c1d2e3f  flaky  master 0ab12cd\n  steps passed: 1\n  flaky: the wave merges\n  next: waves.start on it");
   });
 });
 
@@ -545,12 +543,12 @@ describe("agentActions", () => {
     const lines = agentActions(ACTIONS).split("\n");
     expect(lines.length).toBe(Object.keys(ACTIONS).length);
     expect(lines).toContain("tasks.get {id} - One task");
-    expect(lines.find((line) => line.startsWith("tasks.start "))).toStartWith("tasks.start {repo, title, request, overrides?, tag?, plan?} - Start a task");
+    expect(lines.find((line) => line.startsWith("tasks.start "))).toStartWith("tasks.start {repo, title, request, overrides?, tag?} - Start a task");
   });
 
   test("one action's params in full", () => {
     const text = agentActions(ACTIONS, "tasks.wait");
-    expect(text.split("\n")[0]).toStartWith("tasks.wait {ids?, tag?, wave?, ignore?, timeoutMs?} - Wait until");
+    expect(text.split("\n")[0]).toStartWith("tasks.wait {ids?, tag?, wave?, timeoutMs?} - Wait until");
     expect(text).toContain("  timeoutMs?: integer (min 1000, max 3600000) - Default: 600000");
     expect(text).toContain("  ids?: string[] - Watch these tasks");
     expect(agentActions(ACTIONS, "waves.start")).toContain("    after?: string[]");

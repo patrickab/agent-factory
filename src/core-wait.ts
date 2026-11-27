@@ -132,20 +132,18 @@ type WaitAnswer = { tasks: TaskView[]; waves: WaveView[]; proofs?: ProofView[]; 
  * views are built only for an answer. A cancelled task of a watched wave needs no attention: it left the wave, which
  * goes on without it.
  */
-async function waitForTasks(watched: Watched, ignore: string[], timeoutMs: number, signal: AbortSignal | undefined): Promise<WaitAnswer> {
+async function waitForTasks(watched: Watched, timeoutMs: number, signal: AbortSignal | undefined): Promise<WaitAnswer> {
   const deadline = Date.now() + timeoutMs;
-  const ignored = (id: string) => ignore.some((prefix) => id.startsWith(prefix));
   const cache: WaitStates = new Map();
   while (true) {
     if (signal?.aborted) throw new FactoryError("failed", "tasks.wait was aborted");
     const all = await watched();
-    const files = all.waves.filter((file) => !ignored(file.declaration.id));
+    const { waves: files, records } = all;
     const waveIds = new Set(files.map((file) => file.declaration.id));
-    const records = all.records.filter((record) => !ignored(record.id));
     const leftWave = (record: TaskRecord, state: State | null) => state === "cancelled" && record.wave !== null && waveIds.has(record.wave);
     const timedOut = Date.now() >= deadline;
     const byId = new Map(all.records.map((record) => [record.id, record]));
-    const proofs = await Promise.all((all.proofs ?? []).filter((id) => !ignored(id)).map(proofView));
+    const proofs = await Promise.all((all.proofs ?? []).map(proofView));
     const proofsBusy = proofs.some((proof) => !proofRests(proof));
     const proofsAttention = proofs.some(proofNeedsAttention);
     let everyWave: Promise<WaveFile[]> | undefined;
@@ -197,7 +195,6 @@ export const WAIT_HANDLERS = {
     const tag = tagParam("tasks.wait", params.tag);
     const wave = params.wave as string | undefined;
     if ([ids, tag, wave].filter((given) => given !== undefined).length !== 1) throw new FactoryError("invalid", "tasks.wait needs exactly one of ids, tag and wave");
-    const ignore = stringsParam("tasks.wait", "ignore", params.ignore) ?? [];
     const timeoutMs = (params.timeoutMs as number | undefined) ?? WAIT_TIMEOUT_MS.default;
     if (ids !== undefined) {
       // Ids are resolved once: a prefix that turns ambiguous later must not end the wait. One no task has may be a proof's.
@@ -211,16 +208,15 @@ export const WAIT_HANDLERS = {
         });
         if (record !== undefined) records.push(record);
       }
-      return waitForTasks(async () => ({ records, waves: [], proofs }), ignore, timeoutMs, signal);
+      return waitForTasks(async () => ({ records, waves: [], proofs }), timeoutMs, signal);
     }
     if (wave !== undefined) {
       const id = (await findWave(wave)).declaration.id;
-      return waitForTasks(async () => ({ records: (await listTasks()).filter((record) => record.wave === id), waves: [await readWave(id)] }), ignore, timeoutMs, signal);
+      return waitForTasks(async () => ({ records: (await listTasks()).filter((record) => record.wave === id), waves: [await readWave(id)] }), timeoutMs, signal);
     }
     const group = tag as string;
     return waitForTasks(
       async () => ({ records: await tasksIn(undefined, group), waves: (await listWaves()).filter((file) => tagInGroup(file.declaration.tag, group)) }),
-      ignore,
       timeoutMs,
       signal,
     );

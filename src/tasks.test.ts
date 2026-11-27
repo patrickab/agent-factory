@@ -1,9 +1,9 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir, userInfo } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { factoryHome } from "./settings.ts";
-import { isTaskTag, listTasks, lockTask, removeTask, systemUser, tagInGroup, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
+import { isTaskTag, listTasks, lockTask, removeTask, tagInGroup, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tasks-test-")));
 const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -65,7 +65,6 @@ describe("task records", () => {
     await writeTask(record(early, { createdAt: "2026-02-01T00:00:00.000Z" }));
     await writeTask(record(other, { repo: "/repo/b" }));
     writeFileSync(join(tasksDir(), `${uuid(5)}.json`), "{");
-    writeFileSync(join(tasksDir(), `${uuid(6)}.json`), JSON.stringify({ id: uuid(6) }));
     writeFileSync(join(tasksDir(), "x.json.1.tmp"), "{}");
     expect((await listTasks()).map((task) => task.id)).toEqual([other, early, late]);
     expect((await listTasks("/repo/a")).map((task) => task.id)).toEqual([early, late]);
@@ -79,24 +78,6 @@ describe("task records", () => {
     write("one", "one");
     await writeTask(record(ONE));
     expect((await listTasks()).map((task) => task.id)).toEqual([ONE]);
-  });
-
-  test("a record without tag, plan and wave reads with the defaults, an old kind is kept only as merge_request; a malformed stored one is skipped", async () => {
-    mkdirSync(tasksDir(), { recursive: true });
-    const { tag: _tag, plan: _plan, wave: _wave, ...old } = record(ONE);
-    writeFileSync(join(tasksDir(), `${ONE}.json`), JSON.stringify({ ...old, kind: "merge_request" }));
-    writeFileSync(join(tasksDir(), `${uuid(2)}.json`), JSON.stringify(record(uuid(2), { tag: "a//b" })));
-    writeFileSync(join(tasksDir(), `${uuid(4)}.json`), JSON.stringify({ ...record(uuid(4)), plan: "" }));
-    writeFileSync(join(tasksDir(), `${uuid(5)}.json`), JSON.stringify({ ...record(uuid(5)), wave: 3 }));
-    writeFileSync(join(tasksDir(), `${uuid(7)}.json`), JSON.stringify({ ...record(uuid(7), { createdAt: "2028-01-01T00:00:00.000Z" }), kind: "task" }));
-    await writeTask(record(uuid(6), { wave: "w-1", createdAt: "2027-01-01T00:00:00.000Z" }));
-    // An old merge request keeps its kind (internal: its branch is its source, never deleted); any other kind is dropped.
-    expect(await listTasks()).toStrictEqual([
-      { ...old, tag: userInfo().username, plan: null, wave: null, kind: "merge_request" },
-      record(uuid(6), { wave: "w-1", createdAt: "2027-01-01T00:00:00.000Z" }),
-      record(uuid(7), { createdAt: "2028-01-01T00:00:00.000Z" }),
-    ]);
-    expect(systemUser()).toBe(userInfo().username);
   });
 
   test("tags: segments joined by /, a group holds itself and the tags under it", () => {

@@ -51,7 +51,6 @@ function wave(over: Partial<WaveView> = {}, stuck = false, events: { kind: strin
     branch: "master-factory-w1",
     after: [],
     target: "master",
-    base: "0ab12cd",
     origin: ORIGIN,
     createdAt: "2025-01-02T10:00:00.000Z",
     stage: "building",
@@ -64,7 +63,6 @@ function wave(over: Partial<WaveView> = {}, stuck = false, events: { kind: strin
     reviews: [],
     gates: [],
     merge: null,
-    remote: null,
     usage: null,
     actions: ["waves.add", "waves.cancel"],
     ...over,
@@ -117,9 +115,9 @@ describe("pendingNotices: tasks", () => {
 });
 
 const stuckTasks: WaveView["tasks"] = [
-  { key: "a", title: "a", after: [], model: "big", taskId: null, sessionId: null, state: "cancelled", usage: null },
-  { key: "b", title: "b", after: ["a"], model: "big", taskId: null, sessionId: null, state: "pending", usage: null },
-  { key: "c", title: "c", after: ["b"], model: "big", taskId: null, sessionId: null, state: "pending", usage: null },
+  { key: "a", title: "a", after: [], model: "big", taskId: null, sessionId: null, state: "cancelled", usage: null, id: "aaaaaaaa-1111-4222-8333-944445555666" },
+  { key: "b", title: "b", after: ["a"], model: "big", taskId: null, sessionId: null, state: "pending", usage: null, id: "bbbbbbbb-1111-4222-8333-944445555666" },
+  { key: "c", title: "c", after: ["b"], model: "big", taskId: null, sessionId: null, state: "pending", usage: null, id: "cccccccc-1111-4222-8333-944445555666" },
 ];
 
 describe("pendingNotices: waves", () => {
@@ -213,17 +211,11 @@ describe("pendingNotices: waves", () => {
     expect(pendingNotices([], [resumed], delivered).map((notice) => notice.key)).toEqual([`wave:${WAVE_ID}:interrupted:4`]);
   });
 
-  test("an interrupted wave delivered under the old key (every event counted) is not announced again", () => {
-    const events = [{ kind: "tasks" }, { kind: "stage" }, { kind: "update" }];
-    const old = new Set([`wave:${WAVE_ID}:interrupted:3`]);
-    expect(pendingNotices([], [wave({ stage: "building", interrupted: true }, false, events)], old).filter((notice) => notice.key.includes(":interrupted:"))).toEqual([]);
-  });
-
   test("an interrupted wave's one notice names its interrupted tasks and waves.retry; they get none of their own", () => {
     const OTHER = "4ae7325b-1111-4222-8333-944445555777";
     const tasks: WaveView["tasks"] = [
-      { key: "a", title: "a", after: [], model: "big", taskId: TASK_ID, sessionId: "s", state: "running", usage: null },
-      { key: "b", title: "b", after: [], model: "big", taskId: OTHER, sessionId: "s2", state: "running", usage: null },
+      { key: "a", title: "a", after: [], model: "big", taskId: TASK_ID, sessionId: "s", state: "running", usage: null, id: TASK_ID },
+      { key: "b", title: "b", after: [], model: "big", taskId: OTHER, sessionId: "s2", state: "running", usage: null, id: OTHER },
     ];
     const own = [task({ wave: WAVE_ID, interrupted: true }), task({ id: OTHER, wave: WAVE_ID, interrupted: true })];
     const notices = pendingNotices(own, [wave({ stage: "building", interrupted: true, tasks })], none);

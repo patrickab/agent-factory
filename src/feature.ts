@@ -6,7 +6,8 @@
  * - `handlers` is a getter: read on the first call, never on load (a handler module may import a module that imports
  *   the registry)
  * - `renderers`: one per action, `(params, result) => text` (`agent-view.ts` scrubs it); `cards`: one per action,
- *   `(params, result) => FactoryCard` (`cards.ts`)
+ *   `(params, result) => FactoryCard` (`cards.ts`). An action without a renderer (`tasks.timeline`: a log programs
+ *   replay) is never offered to an agent and prints as JSON
  * - `decides`: for the actions that settle something, how the cause is read from state at call time, before the action
  *   runs (`decisions.ts`): a `Cause` makes it a decision, null leaves it an action
  * - `notices`: the feature's notices from the items the notifier looked up under the feature's `name`
@@ -23,8 +24,6 @@ export interface ActionSpec {
   summary: string;
   params: { type: "object"; required: string[]; properties: Record<string, Schema> };
   mutates: boolean;
-  /** For the host only: never offered to an agent. */
-  hostOnly: boolean;
 }
 
 export type Handlers = Readonly<Record<string, Handler>>;
@@ -40,9 +39,9 @@ export interface Feature<A extends string = string> {
   actions: { readonly [K in A]: ActionSpec };
   /** Typed loosely: a handler module's types reach `ActionName`. `features.test.ts` checks they match `actions`. */
   readonly handlers: Handlers;
-  renderers: Record<NoInfer<A>, Renderer>;
+  renderers: Partial<Record<NoInfer<A>, Renderer>>;
   /** One card per action (`cards.ts`): the readable form of its result next to the agent's text. */
-  cards: Record<NoInfer<A>, CardBuilder>;
+  cards: Partial<Record<NoInfer<A>, CardBuilder>>;
   notices?: (items: readonly unknown[]) => Notice[];
   /** The actions that settle something: their cause (`decisions.ts`). */
   decides?: Partial<Record<NoInfer<A>, CauseReader>>;
@@ -55,8 +54,8 @@ export function feature<A extends string>(declared: Feature<A>): Feature<A> {
   return declared;
 }
 
-export function spec(summary: string, properties: Record<string, Schema>, required: string[], mutates: boolean, hostOnly = false): ActionSpec {
-  return { summary, params: { type: "object", required, properties }, mutates, hostOnly };
+export function spec(summary: string, properties: Record<string, Schema>, required: string[], mutates: boolean): ActionSpec {
+  return { summary, params: { type: "object", required, properties }, mutates };
 }
 
 export const REPO: Schema = { type: "string", description: "A path inside the git repository. Default: the current directory" };
@@ -92,5 +91,4 @@ export const SETTINGS_PROPERTIES: Record<string, Schema> = {
   },
 };
 
-export const REMOTE: Schema = { type: "boolean", description: "Push a wave's branch, open its pull/merge request on the origin's forge (gh, glab), comment the reviews, push the target after the merge" };
-export const SQUASH: Schema = { type: "boolean", description: "Land a wave as one commit (its title, its commits' subjects), its task commits kept under refs/factory/waves/<tag>-<id>; with remote the forge squash-merges the request and the local target follows" };
+export const SQUASH: Schema = { type: "boolean", description: "Land a wave as one commit (its title, its commits' subjects), its task commits kept under refs/factory/waves/<tag>-<id>" };

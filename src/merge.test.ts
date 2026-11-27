@@ -24,7 +24,7 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const runner = new CommandRunner();
 const settings: Settings = { branch: "main", merge: "auto", maxRounds: 3, review: false, models: {} };
-const noGates: FactoryConfig = { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
+const noGates: FactoryConfig = { hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
 /** `noGates` whose round and merge gates are both `gates`, as a `factory.yaml` without `merge_gates` reads. */
 const gated = (gates: string[][], rest: Partial<FactoryConfig> = {}): FactoryConfig => ({ ...noGates, gates, merge_gates: gates, ...rest });
 
@@ -228,7 +228,7 @@ describe("mergeTask", () => {
     gitIn(repo(), "add", "-A");
     gitIn(repo(), "commit", "--quiet", "-m", "other task");
     writeFileSync(join(worktree, "feature.txt"), "feature\n");
-    const config = gated([["test", "-f", "other.txt"], ["test", "-f", "feature.txt"]], { hooks: { after_create: [], after_code: [], after_merge: [["touch", "synced"]] } });
+    const config = gated([["test", "-f", "other.txt"], ["test", "-f", "feature.txt"]], { hooks: { after_create: [], after_merge: [["touch", "synced"]] } });
 
     const outcome = await mergeTask(input(worktree, task, config, 2));
 
@@ -248,7 +248,7 @@ describe("mergeTask", () => {
     const task = await taskIn(worktree);
     mkdirSync(join(worktree, "pi-host"));
     writeFileSync(join(worktree, "pi-host", "bun.lock"), "lock\n");
-    const config: FactoryConfig = { ...noGates, hooks: { after_create: [], after_code: [], after_merge: [["touch", "synced"]] } };
+    const config: FactoryConfig = { ...noGates, hooks: { after_create: [], after_merge: [["touch", "synced"]] } };
 
     const outcome = await mergeTask(input(worktree, task, config, 1));
 
@@ -262,7 +262,7 @@ describe("mergeTask", () => {
     const worktree = addWorktree("task-lk");
     const task = await taskIn(worktree);
     writeFileSync(join(worktree, "Cargo.lock"), "lock\n");
-    const config: FactoryConfig = { ...noGates, lockfiles: ["Cargo.lock"], hooks: { after_create: [], after_code: [], after_merge: [["touch", "synced-cargo"]] } };
+    const config: FactoryConfig = { ...noGates, lockfiles: ["Cargo.lock"], hooks: { after_create: [], after_merge: [["touch", "synced-cargo"]] } };
 
     const outcome = await mergeTask(input(worktree, task, config, 1));
 
@@ -274,7 +274,7 @@ describe("mergeTask", () => {
     const worktree = addWorktree("task-ln");
     const task = await taskIn(worktree);
     writeFileSync(join(worktree, "bun.lock"), "lock again\n");
-    const config: FactoryConfig = { ...noGates, lockfiles: ["Cargo.lock"], hooks: { after_create: [], after_code: [], after_merge: [["touch", "synced-bun"]] } };
+    const config: FactoryConfig = { ...noGates, lockfiles: ["Cargo.lock"], hooks: { after_create: [], after_merge: [["touch", "synced-bun"]] } };
 
     const outcome = await mergeTask(input(worktree, task, config, 1));
 
@@ -287,7 +287,7 @@ describe("mergeTask", () => {
     const worktree = addWorktree("task-e");
     const task = await taskIn(worktree);
     writeFileSync(join(worktree, "uv.lock"), "lock\n");
-    const config: FactoryConfig = { ...noGates, hooks: { after_create: [], after_code: [], after_merge: [["sh", "-c", "echo no network >&2; exit 1"]] } };
+    const config: FactoryConfig = { ...noGates, hooks: { after_create: [], after_merge: [["sh", "-c", "echo no network >&2; exit 1"]] } };
 
     const outcome = await mergeTask(input(worktree, task, config, 1));
 
@@ -474,7 +474,7 @@ describe("mergeTask", () => {
     gitIn(repo(), "commit", "--quiet", "--allow-empty", "-m", "main moved");
     gitIn(repo(), "switch", "--quiet", "-c", "elsewhere");
     writeFileSync(join(worktree, "uv.lock"), "lock\n");
-    const config: FactoryConfig = { ...noGates, hooks: { after_create: [], after_code: [], after_merge: [["touch", "hook-ran"]] } };
+    const config: FactoryConfig = { ...noGates, hooks: { after_create: [], after_merge: [["touch", "hook-ran"]] } };
 
     const outcome = await mergeTask(input(worktree, task, config));
 
@@ -495,7 +495,7 @@ describe("mergeTask", () => {
     gitIn(repo(), "worktree", "add", "--quiet", other, "main");
     writeFileSync(join(worktree, "feature.txt"), "feature\n");
     writeFileSync(join(worktree, "uv.lock"), "lock\n");
-    const config: FactoryConfig = { ...noGates, hooks: { after_create: [], after_code: [], after_merge: [["touch", "hook-ran"]] } };
+    const config: FactoryConfig = { ...noGates, hooks: { after_create: [], after_merge: [["touch", "hook-ran"]] } };
 
     const outcome = await mergeTask(input(worktree, task, config));
 
@@ -638,7 +638,7 @@ describe("mergeTask: what a merge must not get wrong", () => {
     await holder.exited;
     expect(Date.now() - started).toBeLessThan(4000);
     expect(mergeData(outcome)).toMatchObject({ ok: false, error: "cancelled while waiting for the merge lock" });
-    expect(intents).toEqual([{ commit: gitIn(worktree, "rev-parse", "HEAD"), before: task.baseSha, message: { title: task.title, body: "" } }]);
+    expect(intents).toEqual([{ commit: gitIn(worktree, "rev-parse", "HEAD"), before: task.baseSha }]);
     await Bun.sleep(300);
     expect(gitIn(repo(), "rev-parse", "main")).toBe(task.baseSha);
   });

@@ -16,7 +16,7 @@ import { defaultSmallModel } from "./core-settings.ts";
 import { waveReviewWorktree } from "./core-waves.ts";
 import { git } from "./git.ts";
 import { runCommand } from "./run.ts";
-import { cancelScouts, findScoutDir, FINAL_SCOUT_STATES, SCOUT_ID_ENV, scoutDirs, scoutView, startScout, type ScoutCaller, type ScoutView } from "./scouts.ts";
+import { cancelScouts, findScoutDir, FINAL_SCOUT_STATES, SCOUT_ID_ENV, scoutView, startScout, type ScoutCaller, type ScoutView } from "./scouts.ts";
 import { loadSettings } from "./settings.ts";
 import { listTasks } from "./tasks.ts";
 import { errorText } from "./util.ts";
@@ -114,18 +114,4 @@ export const SCOUT_HANDLERS = {
   },
 
   "scouts.get": async (params) => ({ scout: await scoutView(await scoutDirOf(params.id)) }),
-
-  "scouts.list": async (params, { cwd }) => {
-    const repo = params.repo === undefined ? undefined : await primaryOf(params.repo as string, cwd);
-    const wanted = nonEmpty(params.caller)?.trim();
-    const scouts: ScoutView[] = [];
-    for (const dir of await scoutDirs()) {
-      const scout = await scoutView(dir).catch(() => undefined);
-      if (scout === undefined || (repo !== undefined && scout.repo !== repo)) continue;
-      if (wanted !== undefined && !(scout.caller.id ?? "").startsWith(wanted)) continue;
-      scouts.push(scout);
-    }
-    scouts.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    return { scouts };
-  },
 } satisfies Record<string, Handler>;

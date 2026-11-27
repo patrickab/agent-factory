@@ -4,8 +4,8 @@
  * cannot drift apart.
  *
  * - The description: an opening sentence, the features' `toolBlurb`s (`features.ts`), how answers work
- * - `agentActions`: every `ACTIONS` name but the `hostOnly` ones and the timelines (`NOT_FOR_AGENTS`: they dump a
- *   log, programs replay it through the core or the CLI); in a task session only those with `mutates: false`
+ * - `agentActions`: every `ACTIONS` name with an agent view (`tasks.timeline` has none: programs replay it through
+ *   the core or the CLI); in a task session only those with `mutates: false`
  * - `factoryToolParameters`: `action` (one of them) plus the union of their params
  * - `callFactoryTool`: one tool call, `{action, ...params}`, refusing an action the agent is not offered. Answers the
  *   agent view as `text`, the full view as `result` and its readable form as `card` (`cards.ts`); a failure throws
@@ -15,10 +15,10 @@
  * - `factoryCard(name, params, result, cause?)`: the card of a result, never throwing
  * - A decision (contract `cards`): before the action runs, its feature's `decides` reads the cause from state
  *   (`decisions.ts`); a cause that cannot be read leaves a decision that answers nothing. After it succeeded the card is a
- *   decision and, with an `origin`, appended to that session's log (`key`: the caller's `callId`). A log that fails
+ *   decision and, with an `origin`, appended to that session's log. A log that fails
  *   never fails the answer: the action happened
  */
-import { agentError, agentView } from "./agent-view.ts";
+import { agentError, agentView, hasAgentView } from "./agent-view.ts";
 import { actionCard, fallbackCard, type FactoryCard } from "./cards.ts";
 import { ACTIONS, callAction, FactoryError, type ActionName, type CallOptions } from "./core.ts";
 import type { Params } from "./core-shared.ts";
@@ -31,9 +31,6 @@ type Schema = Record<string, unknown>;
 
 export const FACTORY_TOOL_NAME = "factory";
 
-/** Actions the agent's tool never offers: they dump a log instead of deciding or answering something. */
-const NOT_FOR_AGENTS: readonly string[] = ["tasks.timeline", "waves.timeline"];
-
 /** The opening sentence, then each feature's (`toolBlurb`, in the features' order), then how answers work. */
 export const FACTORY_TOOL_DESCRIPTION = [
   "Run coding work in the background: a task codes in its own git worktree of a repository with a committed factory.yaml, passes its gates and merges into its target.",
@@ -44,9 +41,9 @@ export const FACTORY_TOOL_DESCRIPTION = [
   "Every answer and notice also carries a card for the user, never in your context; an action that settles a question, rejection or block is recorded as a decision on its own: pass nothing for it.",
 ].join(" ");
 
-/** The actions an agent may call: every one but the `hostOnly` ones and the timelines; in a task session only those with `mutates: false`. */
+/** The actions an agent may call: those with an agent view; in a task session only those with `mutates: false`. */
 export function agentActions(taskSession = false): ActionName[] {
-  return (Object.keys(ACTIONS) as ActionName[]).filter((name) => !ACTIONS[name].hostOnly && !NOT_FOR_AGENTS.includes(name) && !(taskSession && ACTIONS[name].mutates));
+  return (Object.keys(ACTIONS) as ActionName[]).filter((name) => hasAgentView(name) && !(taskSession && ACTIONS[name].mutates));
 }
 
 /** `action` and the union of the actions' params. A param several actions share names each of them in its description. */
@@ -91,21 +88,20 @@ function renderFailed(name: string, result: unknown, error: unknown): string {
 
 /**
  * Runs one `factory` tool call: `text` is the agent view, `result` the full view. An action the agent is not offered
- * (host-only, a timeline, a mutating one in a task session) is as unknown as a made-up one. `render` is the agent view
+ * (a timeline, a mutating one in a task session) is as unknown as a made-up one. `render` is the agent view
  * (tests swap it).
  */
 export async function callFactoryTool(
   params: unknown,
   taskSession: boolean,
-  options: CallOptions & { callId?: string },
+  options: CallOptions,
   render = agentView,
 ): Promise<{ text: string; result: unknown; card: FactoryCard }> {
   const { action, ...rest } = isRecord(params) ? params : {};
   const name = String(action);
   if (!(agentActions(taskSession) as string[]).includes(name)) throw new FactoryError("invalid", `unknown action "${name}"`);
-  const { callId, ...callOptions } = options;
-  const cause = await causeOf(name, rest, callOptions);
-  const result = await callAction(name, rest, callOptions);
+  const cause = await causeOf(name, rest, options);
+  const result = await callAction(name, rest, options);
   let text: string;
   try {
     text = render(name, rest, result);
@@ -114,8 +110,7 @@ export async function callFactoryTool(
   }
   const card = factoryCard(name, rest, result, cause);
   if (cause !== null && options.origin !== undefined) {
-    const entry = { at: new Date().toISOString(), ...(callId === undefined ? {} : { key: callId }), ...(card.answers === undefined ? {} : { answers: card.answers }), card };
-    await appendDecision(options.origin, entry).catch(() => undefined);
+    await appendDecision(options.origin, { at: new Date().toISOString(), card }).catch(() => undefined);
   }
   return { text, result, card };
 }

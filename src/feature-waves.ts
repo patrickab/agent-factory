@@ -1,10 +1,10 @@
 /** The waves: a planned set of tasks on one branch, reviewed and merged once (`core-waves.ts`). */
-import { card, decision, shortId, timelineCard, waveCard, waveCardState } from "./cards.ts";
-import { afterNames, plural, short, timelineView, waveBlock, waveList, waveReceipt } from "./agent-view.ts";
+import { card, decision, shortId, waveCard, waveCardState } from "./cards.ts";
+import { afterNames, plural, short, waveBlock, waveList, waveReceipt } from "./agent-view.ts";
 import type { Params } from "./core-shared.ts";
 import { WAVE_HANDLERS } from "./core-waves.ts";
 import { waveCause } from "./decisions.ts";
-import { feature, REMOTE, REPO, SETTINGS_PROPERTIES, spec, SQUASH, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
+import { feature, REPO, SETTINGS_PROPERTIES, spec, SQUASH, TAG, WAVE_ID, WAVE_TASK_ITEM } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
 import type { WaveView } from "./waves.ts";
 
@@ -37,12 +37,7 @@ export const WAVES = feature({
           description:
             "Contracts (memory-store directories run/contract/<name>/ or documents run/contract/<name>.md in plan) the wave's coders work by; core is added when it exists. Needs plan and memory-store on PATH",
         },
-        overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, remote: REMOTE, squash: SQUASH } },
-        reviewEach: {
-          type: "boolean",
-          description:
-            "The wave's reviewer judges each task once its gates passed (the task rests reviewing): blocker and major findings start the task's next round within maxRounds (out of rounds: blocked), else it merges. Default false: one review of the whole wave",
-        },
+        overrides: { type: "object", description: "Settings over the repository's stored ones: branch = the target, merge = the wave's (review: wait for approve)", properties: { ...SETTINGS_PROPERTIES, squash: SQUASH } },
       },
       ["repo", "tag", "title", "request", "tasks"],
       true,
@@ -64,15 +59,8 @@ export const WAVES = feature({
         tag: { type: "string", description: "Only the waves whose tag is this one or lies under it" },
         origin: { type: "string", description: "Only the waves this Pi session (its id) declared" },
         open: { type: "boolean", description: "true: only the waves not merged or cancelled" },
-        archived: { type: "boolean", description: "true: the removed waves from the archive too (archived: true, cost computed from the archive); open leaves them out" },
       },
       [],
-      false,
-    ),
-    "waves.timeline": spec(
-      "A wave's events; poll with since = the last answer's next. Answers {events, next}",
-      { id: WAVE_ID, since: { type: "integer", minimum: 0, description: "The cursor an earlier answer returned as next" } },
-      ["id"],
       false,
     ),
     "waves.retry": spec(
@@ -109,8 +97,6 @@ export const WAVES = feature({
     },
     "waves.get": (_params, result: { wave: WaveView }) => waveBlock(result.wave),
     "waves.list": (_params, result: { waves: WaveView[] }) => waveList(result.waves),
-    "waves.timeline": (_params, result: { events: ({ kind: string } & Record<string, unknown>)[]; next: number }) =>
-      timelineView(result.events, result.next, (event) => event as Record<string, unknown>),
     "waves.retry": (_params, result: { wave: WaveView; retried?: string[]; refused?: { id: string; why: string }[] }) =>
       waveReceipt("", result.wave, [
         ...((result.retried ?? []).length > 0 ? [`retried tasks: ${(result.retried ?? []).map(short).join(", ")}`] : []),
@@ -138,7 +124,6 @@ export const WAVES = feature({
       card("action", "quiet", result.waves.length === 0 ? "no waves" : plural(result.waves.length, "wave"), {
         rows: result.waves.map((wave) => ({ label: wave.tag, text: `${waveCardState(wave)}  ${wave.counts.done}/${wave.counts.total}  ${shortId(wave.id)}` })),
       }),
-    "waves.timeline": (params, result: { events: { kind: string; at?: unknown }[]; next: number }) => timelineCard(`timeline of wave ${String(params.id)}`, result.events, result.next),
     "waves.retry": (_params, result: { wave: WaveView; retried?: string[]; refused?: { id: string; why: string }[] }) => {
       const lines = [...(result.retried ?? []).map((id) => `- retried task ${shortId(id)}`), ...(result.refused ?? []).map((task) => `- refused task ${shortId(task.id)}: ${task.why}`)];
       return decision(waveCard(result.wave, ""), `retried wave ${result.wave.tag}`, ...(lines.length > 0 ? [lines.join("\n")] : []));
@@ -149,5 +134,5 @@ export const WAVES = feature({
       card("action", "quiet", `removed wave ${shortId(result.removed)}`, { id: shortId(result.removed), ...(result.archive ? { rows: [{ label: "archive", text: result.archive }] } : {}) }),
   },
   toolBlurb:
-    '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, reviewed as a whole and merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',
+    '"tasks.start" one self-contained task; "waves.start" a planned set of tasks (after = keys a task waits for) on one branch, each task reviewed, then the whole, merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.',
 });

@@ -278,6 +278,15 @@ async def test_wrong_shaped_json_is_an_error_line_not_a_crash():
         assert "cannot show this wave: unexpected JSON (KeyError" in body(app)
 
 
+async def test_task_without_a_state_is_shown_as_starting():
+    app = FactoryView(FakeClient(tasks=[task("t1", "fresh", state=None)]), refresh_seconds=0)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await started(app, pilot)
+        assert app.snapshot.errors == []
+        assert [t["id"] for t in app.snapshot.tasks] == ["t1"]
+        assert "starting" in labels(app)[-1]
+
+
 async def test_null_usage_everywhere():
     quiet = wave("w1", "a/w1", 0, 1, usage=None)
     quiet["tasks"][0]["usage"] = None

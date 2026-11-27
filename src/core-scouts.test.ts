@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileS
 import { join } from "node:path";
 import { callAction, type TaskView } from "./core.ts";
 import { caseDir, expectError, fakeRecord, git, ID_1, makeRepo, scratch, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
-import { appendScoutEvent, cancelScout, cancelScouts, readScout, runningScouts, scoutDir, scoutDirs, scoutRunnerAlive, writeScoutDeclaration, type ScoutView } from "./scouts.ts";
+import { appendScoutEvent, cancelScout, cancelScouts, readScout, runningScouts, scoutDir, scoutDirs, scoutRunnerAlive, scoutView, writeScoutDeclaration, type ScoutView } from "./scouts.ts";
 import { runCommand } from "./run.ts";
 import { ownRunners, signalRunner } from "./spawn.ts";
 import { writeTask } from "./tasks.ts";
@@ -92,7 +92,7 @@ function createStore(name: string): void {
 const scoutPlan = (plan: object) => (process.env.FAKE_SCOUT = JSON.stringify(plan));
 
 async function scouts(): Promise<ScoutView[]> {
-  return ((await callAction("scouts.list", {})) as { scouts: ScoutView[] }).scouts;
+  return Promise.all((await scoutDirs()).map((dir) => scoutView(dir)));
 }
 
 beforeEach(() => {
@@ -241,14 +241,12 @@ describe("scouting cost", () => {
     await until(async () => ((await callAction("scouts.get", { id: scout.id })) as { scout: ScoutView }).scout.interrupted);
     const task = (await callAction("tasks.get", { id: ID_1 })) as TaskView;
     expect(task.usage?.cost).toBe(1.5);
-    expect(task.scoutingCost).toBe(0.5);
 
     const second = ((await callAction("scouts.start", { concern: "b" }, { cwd: record.worktree })) as { scout: ScoutView }).scout;
     await until(async () => ((await callAction("scouts.get", { id: second.id })) as { scout: ScoutView }).scout.state === "running");
     await cancelScouts({ kind: "task", id: ID_1 });
     const cancelled = ((await callAction("scouts.get", { id: second.id })) as { scout: ScoutView }).scout;
     expect(cancelled).toMatchObject({ state: "cancelled", running: false });
-    expect(((await callAction("scouts.list", { caller: ID_1.slice(0, 8) })) as { scouts: ScoutView[] }).scouts).toHaveLength(2);
   });
 });
 

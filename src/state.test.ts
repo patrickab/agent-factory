@@ -130,12 +130,6 @@ describe("derived values", () => {
     expect(feedback).not.toContain("rename x");
   });
 
-  test("minor findings of old or malformed review records: none, never an error", () => {
-    expect(minorFindings(1, undefined)).toEqual([]);
-    expect(minorFindings(1, "x")).toEqual([]);
-    expect(minorFindings(1, [null, { severity: "minor" }, { severity: "minor", file: "a", text: "t", line: "3" }])).toEqual([{ round: 1, file: "a", line: null, text: "t" }]);
-  });
-
   test("a killed gate keeps a null exit code and only the tail of its output", () => {
     const result = { exitCode: null, killed: true, timedOut: false, durationMs: 12, stdout: "", stdoutTruncated: false, output: `${"x".repeat(5000)}end` };
     const data = gateData(2, "gates", ["sh", "gate.sh"], result);

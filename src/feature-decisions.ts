@@ -26,7 +26,7 @@ export const DECISIONS = feature({
   name: "decisions",
   actions: {
     "decisions.list": spec(
-      "The decisions of a session in order: the supervisor's actions that settle something, each with the notice key it answers. Answers {decisions: {at, key?, answers?, card}[]}",
+      "The decisions of a session in order: the supervisor's actions that settle something, each with the notice key it answers. Answers {decisions: {at, card}[]}, card.answers the notice key",
       { origin: { type: "string", description: "The session's id. Default: the calling session" } },
       [],
       false,
@@ -39,7 +39,7 @@ export const DECISIONS = feature({
     "decisions.list": (_params, result: Listed) =>
       result.decisions.length === 0
         ? "no decisions"
-        : [plural(result.decisions.length, "decision"), ...result.decisions.map((entry, index) => `  ${index + 1}. ${entry.card.title}${entry.answers === undefined ? "" : `  answers ${answered(entry.answers)}`}`)].join("\n"),
+        : [plural(result.decisions.length, "decision"), ...result.decisions.map((entry, index) => `  ${index + 1}. ${entry.card.title}${entry.card.answers === undefined ? "" : `  answers ${answered(entry.card.answers)}`}`)].join("\n"),
   },
   cards: {
     "decisions.list": (_params, result: Listed) =>

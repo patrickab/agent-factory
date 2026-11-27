@@ -5,8 +5,8 @@
  *
  * - `factory <action> [<json params> | -] [--json]`: `-` reads the params from stdin, none means `{}`. stdout gets the
  *   agent view (`agent-view.ts`, text lines), or with `--json` (anywhere after the action) the full view: `callAction`'s
- *   result as JSON. The timelines (`tasks.timeline`, `waves.timeline`) always print JSON: programs replay them. Exit 0.
- *   `cwd` is the caller's directory. `hostOnly` actions are available: the CLI is the host
+ *   result as JSON. An action without an agent view (`tasks.timeline`) always prints JSON. Exit 0.
+ *   `cwd` is the caller's directory
  * - A `FactoryError` goes to stderr as `factory: <code>: <message>`, exit 1 (`invalid`: exit 2); without `--json` the
  *   agent view's way out follows the message (` · next: ...`)
  * - `factory actions [<name>]`: one line per action, or one action's params in full; with `--json` the `ACTIONS` map
@@ -23,8 +23,6 @@ import { errorText } from "./util.ts";
 
 const USAGE = "usage: factory <action> [<json params> | -] [--json] | factory actions [<name>] [--json] | factory slot -- <command...> | factory --core-path | factory --help";
 const JSON_FLAG = "--json";
-/** Actions whose answer is a log for programs: JSON, with or without `--json`. */
-const ALWAYS_JSON: readonly string[] = ["tasks.timeline", "waves.timeline"];
 
 function helpText(): string {
   const lines = Object.entries(ACTIONS).map(([name, spec]) => `${name}  ${spec.summary}`);
@@ -99,7 +97,7 @@ async function main(args: string[]): Promise<number> {
   try {
     const params = await readParams(positional[0]);
     const result = await callAction(first, params, { cwd: process.cwd(), signal: abort.signal });
-    if (json || ALWAYS_JSON.includes(first) || !hasAgentView(first)) printJson(result);
+    if (json || !hasAgentView(first)) printJson(result);
     else process.stdout.write(`${agentView(first, params, result)}\n`);
     return 0;
   } catch (error) {

@@ -259,7 +259,7 @@ describe("/factory start", () => {
     await pi.start();
     await pi.start();
     expect(pi.entries.map((entry) => entry.customType)).toEqual(["factory-task", "factory-round", "factory-state"]);
-    expect(pi.of("factory-task")[0]).toMatchObject({ branch: "task", mainBranch: "main", baseSha: gitIn(repo, "rev-parse", "HEAD"), protocol: 2 });
+    expect(pi.of("factory-task")[0]).toMatchObject({ branch: "task", mainBranch: "main", baseSha: gitIn(repo, "rev-parse", "HEAD") });
     expect(pi.messages).toEqual([coderRequest("Add task.txt")]);
     expect(pi.notes).toEqual(["error: factory: this session already holds a task"]);
   });
@@ -301,7 +301,7 @@ describe("how a run ends", () => {
     expect(gitIn(worktree, "status", "--porcelain")).toBe("?? task.txt");
   });
 
-  test("an abort seen after a passing round of a reviewEach wave's task: no wave review is waited for, the task is stopped", async () => {
+  test("an abort seen after a passing round of a wave's task: no wave review is waited for, the task is stopped", async () => {
     const agent = join(scratch, `agent-${counter}`);
     const saved = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = agent;
@@ -310,7 +310,7 @@ describe("how a run ends", () => {
       const { writeTask } = await import("../tasks.ts");
       const { factoryHome } = await import("../settings.ts");
       const wave = `33000000-${String(counter).padStart(4, "0")}-4000-8000-000000000001`;
-      await createWave({ id: wave, repo, tag: "t/each", plan: null, title: "Each", request: "r", branch: "main", target: "main", base: gitIn(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {}, reviewEach: true });
+      await createWave({ id: wave, repo, tag: "t/each", plan: null, title: "Each", request: "r", branch: "main", target: "main", base: gitIn(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
       const worktree = addTaskWorktree();
       const sessionDir = join(factoryHome(), "sessions", "--each--");
       mkdirSync(sessionDir, { recursive: true });

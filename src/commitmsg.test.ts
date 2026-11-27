@@ -59,7 +59,7 @@ const steps = (ask: boolean): PipelineSteps => ({
   status: () => undefined,
   cancelled: () => false,
   pendingMessages: () => false,
-  config: () => ({ hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: [], lockfiles: [] }),
+  config: () => ({ hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: [], lockfiles: [] }),
   runCommand: async () => ({ exitCode: 0, killed: false, timedOut: false, durationMs: 1, stdout: "", stdoutTruncated: false, output: "" }),
   diff: async () => ({ base: "b", paths: ["a"], patch: "p" }),
   review: async () => {

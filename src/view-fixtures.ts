@@ -51,6 +51,7 @@ export const waveTask = (key: string, state: string, after: string[] = [], taskI
   sessionId: state === "pending" ? null : SESSION,
   state,
   usage: state === "pending" ? null : { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 1 },
+  id: taskId ?? `${key.padEnd(8, "0").slice(0, 8)}-1111-4222-8333-944445555666`,
 });
 
 export function wave(over: Partial<WaveView> = {}): WaveView {
@@ -64,7 +65,6 @@ export function wave(over: Partial<WaveView> = {}): WaveView {
     branch: "master-factory-w1",
     after: [],
     target: "master",
-    base: "0ab12cd0ab12cd0ab12cd0ab12cd0ab12cd0ab12",
     origin: SESSION,
     createdAt: "2025-01-02T10:00:00.000Z",
     stage: "building",
@@ -77,7 +77,6 @@ export function wave(over: Partial<WaveView> = {}): WaveView {
     reviews: [],
     gates: [],
     merge: null,
-    remote: null,
     usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, cost: 18.4 },
     actions: ["waves.add", "waves.cancel"],
     ...over,
@@ -151,14 +150,10 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "models.set": { params: { models: ["anthropic/opus"] }, result: { models: ["anthropic/opus"] } },
   "repos.list": { params: {}, result: { repos: ["/home/me/git/app", "/home/me/git/bot"] } },
   "repos.add": { params: { repo: "/home/me/git/app" }, result: { repo: "/home/me/git/app", repos: ["/home/me/git/app"] } },
-  "repos.remove": { params: { repo: "/home/me/git/app" }, result: { repos: [] } },
   "branches.list": {
     params: { repo: "." },
     result: {
-      branches: [
-        { name: "master", default: true, hasConfig: false },
-        { name: "waves", default: false, hasConfig: true },
-      ],
+      branches: [{ name: "master" }, { name: "waves" }],
     },
   },
   "settings.get": {
@@ -187,21 +182,10 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
     params: { repo: ".", settings: { merge: "review" } },
     result: { stored: { merge: "review" }, resolved: { branch: "master", merge: "review", maxRounds: 3 }, defaults: {} },
   },
-  "config.get": { params: { repo: ".", branch: "waves" }, result: { exists: true, text: "gates:\n  - [bun, run, types]\n", draft: null, source: [] } },
+  "config.get": { params: { repo: "." }, result: { exists: true, text: "gates:\n  - [bun, run, types]\n", draft: null, source: [] } },
   "config.write": { params: { repo: ".", text: "gates: []" }, result: { path: "/home/me/git/app/factory.yaml" } },
   "tasks.list": { params: {}, result: { tasks: [task(), task({ id: "7cf4e91e-0000-4000-8000-000000000000", state: "done", reason: "merged" })] } },
   "tasks.get": { params: { id: "4ae7" }, result: task() },
-  "tasks.import": { params: { record: {} }, result: task() },
-  "tasks.timeline": {
-    params: { id: "4ae7" },
-    result: {
-      entries: [
-        { at: "2025-01-02T10:07:16.000Z", kind: "gate", data: { name: "types", passed: true, sessionPath: "/home/me/x.jsonl", at: "2025-01-02T10:07:16.000Z" } },
-        { at: "2025-01-02T10:08:00.000Z", kind: "coder", data: { text: `Done. Session ${SESSION} wrote /home/me/git/app/src/x.ts\nmore` } },
-      ],
-      next: 4096,
-    },
-  },
   "tasks.diff": {
     params: { id: "4ae7" },
     result: {
@@ -224,25 +208,13 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "waves.add": { params: { id: "3f2a", tasks: [{ key: "fix", title: "fix", request: "SECRET-REQUEST" }] }, result: { wave: wave({ tasks: [...wave().tasks, waveTask("fix", "running")] }) } },
   "waves.get": { params: { id: "3f2a" }, result: { wave: wave() } },
   "waves.list": { params: {}, result: { waves: [wave(), wave({ id: "77b0c2e1-0000-4000-8000-000000000000", stage: "merged" })] } },
-  "waves.timeline": {
-    params: { id: "3f2a" },
-    result: {
-      events: [
-        { at: "2025-01-02T10:00:00.000Z", kind: "task", key: "record", taskId: TASK_ID, sessionId: SESSION },
-        { at: "2025-01-02T10:30:00.000Z", kind: "stage", stage: "reviewing", reason: null },
-      ],
-      next: 2,
-    },
-  },
   "waves.retry": { params: { id: "3f2a" }, result: { wave: wave({ stage: "reviewing" }) } },
   "waves.approve": { params: { id: "3f2a" }, result: { wave: wave({ stage: "merging" }) } },
   "waves.cancel": { params: { id: "3f2a" }, result: { wave: wave({ stage: "cancelled", running: false }) } },
   "waves.remove": { params: { id: "3f2a" }, result: { removed: WAVE_ID } },
   "scouts.start": { params: { concern: "how a.txt is made", wait: true }, result: { scout: SCOUT, timedOut: false } },
   "scouts.get": { params: { id: "5c0a" }, result: { scout: { ...SCOUT, state: "running", report: null, reportPath: null, written: ["map/a"] } } },
-  "scouts.list": { params: {}, result: { scouts: [SCOUT] } },
   "gates.prove": { params: { repo: "." }, result: { proof: proof({ state: "running", running: true, failing: null, steps: [], flaky: [], endedAt: null }) } },
-  "gates.get": { params: { id: "9c1d" }, result: { proof: proof() } },
   "contracts.apply": {
     params: { store: "team/plan", name: "api", op: { op: "update", path: "answer", text: "t" } },
     result: {

@@ -1,5 +1,5 @@
 /**
- * Review per task (`reviewEach` of a wave): the wave's runner has the wave's reviewer judge each task that rests
+ * Review per task (every wave): the wave's runner has the wave's reviewer judge each task that rests
  * `reviewing`, one after another, and hands the verdict to the task (`/factory reviewed`).
  *
  * - The queue (`reviewNext`): the first task of the wave (declaration order) in `reviewing` whose runner does not live.
@@ -239,7 +239,7 @@ export function fitPassPrompt(input: {
 export type FitPass = ReviewerRun & { verdict: "approved" | "rejected" | "failed" };
 
 /**
- * The end of a `reviewEach` wave: one pass of the wave's reviewer session on how its tasks fit together, the wave's
+ * The end of a wave's review: one pass of the wave's reviewer session on how its tasks fit together, the wave's
  * whole change (`diff`, against the target) behind `read_diff`. Null when cut short.
  */
 export async function reviewFit(fold: StartedWaveFold, input: { root: string; round: number; diff: { base: string; paths: string[]; patch: string } }, deps: ReviewEachDeps): Promise<FitPass | null> {
@@ -293,7 +293,6 @@ export function reviewedCommand(review: WaveTaskReview, sessionFilePath: string 
  * did something (look again), false when nothing waits or the review was cut short.
  */
 export async function reviewNext(fold: StartedWaveFold, states: TaskStates, deps: ReviewEachDeps): Promise<boolean> {
-  if (fold.reviewEach !== true) return false;
   const waiting = fold.tasks.filter((task) => task.taskId !== null && states.get(task.key) === "reviewing");
   if (waiting.length === 0) return false;
   const records = new Map((await listTasks()).map((record) => [record.id, record]));

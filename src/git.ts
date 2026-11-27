@@ -48,6 +48,14 @@ export function nulList(text: string): string[] {
   return text.split("\0").filter((path) => path !== "");
 }
 
+/** `git merge-tree --write-tree` of `theirs` onto `ours` from `base`: the tree and the conflicting paths. */
+export async function mergeTrees(exec: Exec, cwd: string, base: string, ours: string, theirs: string): Promise<{ tree: string; conflicts: string[] }> {
+  const result = await exec(["git", "merge-tree", "--write-tree", "-z", "--name-only", "--no-messages", `--merge-base=${base}`, ours, theirs], { cwd, maxStdoutChars: 4_000_000 });
+  if (result.killed || (result.exitCode !== 0 && result.exitCode !== 1)) throw new Error(`git merge-tree: ${result.output.trim()}`);
+  const [tree = "", ...paths] = nulList(result.stdout);
+  return { tree, conflicts: result.exitCode === 1 ? [...new Set(paths)] : [] };
+}
+
 export type TaskGit = Pick<Task, "branch" | "mainBranch" | "baseSha">;
 
 /** Primary checkout of the repository `cwd` belongs to, and its git directory (where the merge lock lives). */

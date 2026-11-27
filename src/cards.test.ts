@@ -3,7 +3,7 @@
  * it is what it was before; every card survives a JSON round trip unchanged.
  */
 import { describe, expect, test } from "bun:test";
-import { proofBlock, taskBlock, waveBlock } from "./agent-view.ts";
+import { hasAgentView, proofBlock, taskBlock, waveBlock } from "./agent-view.ts";
 import { actionCard, card, safeCard, type FactoryCard } from "./cards.ts";
 import { ACTIONS, type TaskView } from "./core.ts";
 import { callFactoryTool, factoryCard } from "./factory-tool.ts";
@@ -37,7 +37,7 @@ const DECISIONS = ["tasks.update", "waves.update", "tasks.retry", "waves.retry",
 
 describe("actionCard", () => {
   test("every action has a card from its fixture view; the settling ones are decisions", () => {
-    for (const name of Object.keys(ACTIONS)) {
+    for (const name of Object.keys(ACTIONS).filter(hasAgentView)) {
       const fixture = FIXTURES[name];
       const built = actionCard(name, fixture.params, fixture.result);
       valid(built, name);
@@ -154,7 +154,7 @@ describe("notice cards", () => {
       [{ stage: "rejected", reviews: [review("rejected", FINDINGS)] }, false, "wave factory/w1 was rejected", "attention"],
       [{ stage: "blocked", reason: "gates" }, false, "wave factory/w1 is blocked", "attention"],
       [{ stage: "waiting_approve" }, false, "wave factory/w1 waits for waves.approve", "attention"],
-      [{ stage: "merged", merge: { at: "x", from: "0ab12cd0ab", to: "2b8a2e5ff", queueMs: 0 } }, false, "wave factory/w1 was merged", "quiet"],
+      [{ stage: "merged", merge: { at: "x", from: "0ab12cd0ab", to: "2b8a2e5ff" } }, false, "wave factory/w1 was merged", "quiet"],
       [{ stage: "reviewing", interrupted: true }, false, "wave factory/w1 was interrupted", "attention"],
       [{ stage: "building", tasks }, true, "wave factory/w1 has tasks that can never start", "attention"],
       [{ stage: "queued", after: ["77b0c2e1-0000-4000-8000-000000000000"], tasks: [] }, true, "wave factory/w1 can never start", "attention"],

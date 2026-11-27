@@ -36,7 +36,7 @@ export function registerFactoryTool(pi: ExtensionAPI, scouts?: ScoutTracker, vie
     parameters: factoryToolParameters(process.env[TASK_SESSION_ENV] === "1"),
     executionMode: "sequential",
     ...factoryToolRenderers(view),
-    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
         const { action, ...rest } = params as Record<string, unknown>;
         if (scouts !== undefined && action === "scouts.start" && !isTaskSession(ctx.sessionManager.getBranch())) {
@@ -48,8 +48,6 @@ export function registerFactoryTool(pi: ExtensionAPI, scouts?: ScoutTracker, vie
           signal,
           // The declaring session of a wave (`waves.start`): Pi's public session id.
           origin: ctx.sessionManager.getSessionId(),
-          // The key of a decision in the session's log (`decisions.list`): its tool call.
-          callId: toolCallId,
         });
         return { content: [{ type: "text", text }], details: { result, card } };
       } catch (error) {

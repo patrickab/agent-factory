@@ -14,7 +14,6 @@ import {
   resolveRepoSettings,
   resolveSettings,
   saveSettings,
-  unregisterRepo,
   type StoredSettings,
 } from "./settings.ts";
 
@@ -62,14 +61,11 @@ describe("paths", () => {
     expect(factoryHome()).toBe(join(homedir(), "agent-x", "factory"));
   });
 
-  test("a settings file registers its repo: registeredRepos lists them sorted, unregisterRepo removes one", async () => {
+  test("a settings file registers its repo: registeredRepos lists them sorted", async () => {
     expect(await registeredRepos()).toEqual([]);
     await saveSettings("/b/repo", {});
     await saveSettings(REPO, {});
     expect(await registeredRepos()).toEqual(["/b/repo", REPO]);
-    expect(await unregisterRepo(REPO)).toBe(true);
-    expect(await unregisterRepo(REPO)).toBe(false);
-    expect(await registeredRepos()).toEqual(["/b/repo"]);
   });
 
   test("two repos whose paths differ only in / and - have their own settings", async () => {
@@ -233,20 +229,11 @@ describe("resolveSettings", () => {
   test("preview is stored and passed through, false by default; resolveSettings leaves it out", async () => {
     await saveSettings(REPO, { preview: true });
     expect(await loadSettings(REPO)).toEqual({ preview: true });
-    expect(resolveRepoSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main", preview: true, remote: false, squash: false });
+    expect(resolveRepoSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main", preview: true, squash: false });
     expect(resolveRepoSettings({}, {}, "main").preview).toBe(false);
     expect(resolveSettings({ preview: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
   });
 
-  test("remote is stored, false by default, an override wins; resolveSettings leaves it out", async () => {
-    await saveSettings(REPO, { remote: true });
-    expect(await loadSettings(REPO)).toEqual({ remote: true });
-    expect(resolveRepoSettings({ remote: true }, {}, "main").remote).toBe(true);
-    expect(resolveRepoSettings({ remote: true }, { remote: false }, "main").remote).toBe(false);
-    expect(resolveRepoSettings({}, {}, "main").remote).toBe(false);
-    expect(resolveSettings({ remote: true }, {}, "main")).toEqual({ ...DEFAULTS, branch: "main" });
-    expect(() => parseStoredSettings({ remote: "yes" })).toThrow("remote must be a boolean");
-  });
 
   test("squash is stored, false by default, an override wins; resolveSettings leaves it out", async () => {
     await saveSettings(REPO, { squash: true });

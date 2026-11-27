@@ -4,10 +4,7 @@
  * - Consumes the task's diff, the reviewer model and role prompt, and the directory for this task's reviews
  * - Provides `runReview` (the `factory-review` data) and the pure parts it is built from: the patch file's text, the
  *   findings check and the reading of the child's `--mode json` stdout
- * - A wave's reviewer (`ReviewInput.wave`) reviews the wave's whole branch against its target, the wave's request as
- *   its instructions, verbatim in the prompt under a heading of its own: it reads like a task description but is not one
- * - The reviewer has no time limit, a task's and a wave's alike: it runs until it answers or is cancelled (`cancelled`,
- *   `tasks.cancel` / `waves.cancel`). `timeout` stays a `ReviewStatus` only so that old entries still read
+ * - The reviewer has no time limit: it runs until it answers or is cancelled (`cancelled`, `tasks.cancel`)
  */
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -44,36 +41,6 @@ export function reviewRequest(task: Pick<Task, "title" | "request">, followUps: 
   if (followUps.length === 0) return request;
   const messages = followUps.map((text, index) => `### Message ${index + 1}\n\n${text}\n`);
   return `${request}\n## Follow-up messages from the user\n\n${messages.join("\n")}`;
-}
-
-/** A task of a wave as its reviewer reads it: what the task was asked, and the coder's last message (its named risks). */
-export interface WaveTaskNote {
-  title: string;
-  request: string;
-  /** Null when the coder left no message. */
-  lastMessage: string | null;
-}
-
-/** The request file of a wave's reviewer: the supervisor's instructions, then every done task (`WaveTaskNote`). */
-export function waveReviewRequest(wave: Pick<Task, "title" | "request">, tasks: WaveTaskNote[]): string {
-  const request = `# ${wave.title}\n\n## Instructions from the supervisor\n\n${wave.request}\n`;
-  if (tasks.length === 0) return request;
-  const notes = tasks.map(
-    (task) => `### ${task.title}\n\n#### Request\n\n${task.request}\n\n#### The coder's last message\n\n${task.lastMessage ?? "(none)"}\n`,
-  );
-  return `${request}\n## Tasks of the wave\n\n${notes.join("\n")}`;
-}
-
-/** The prompt of a wave's reviewer: the wave's branch, the patch file and the supervisor's instructions in a request file. */
-async function wavePrompt({ reviewsDir, round, task, waveTasks }: ReviewInput, patchFile: string): Promise<string> {
-  // The request goes into a file, as a task's does: as an argument a long one would exceed the argv limit.
-  const requestFile = join(reviewsDir, `round-${round}.request.md`);
-  await writeFile(requestFile, waveReviewRequest(task, waveTasks ?? []));
-  return (
-    `Review the wave "${task.title}": the branch ${task.branch}, rebased onto ${task.mainBranch}, merges into it. ` +
-    `The supervisor's instructions are in ${requestFile}, the wave's whole diff against ${task.mainBranch} is the patch file ${patchFile}: ` +
-    `read both with the read tool, look at the surrounding code where the diff alone is not enough, then finish with ${VERDICT_TOOL}.`
-  );
 }
 
 /** The findings of a `submit_verdict` call, or a string that says what is wrong with `value`. */
@@ -142,10 +109,6 @@ export interface ReviewInput {
   /** Holds this task's reviewer sessions and patch files. */
   reviewsDir: string;
   cancelled: () => boolean;
-  /** A wave's review: `task` is the wave (its title, request, branch and target), the prompt `wavePrompt`. */
-  wave?: boolean;
-  /** A wave's review: its done tasks, after the instructions in the request file. */
-  waveTasks?: WaveTaskNote[];
 }
 
 async function taskPrompt({ reviewsDir, round, task, followUps }: ReviewInput, patchFile: string): Promise<string> {
@@ -179,7 +142,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewData> {
   await mkdir(reviewsDir, { recursive: true });
   const patchFile = join(reviewsDir, `round-${round}.patch`);
   await writeFile(patchFile, reviewPatch(input.diff, PATCH_MAX_CHARS));
-  const prompt = input.wave ? await wavePrompt(input, patchFile) : await taskPrompt(input, patchFile);
+  const prompt = await taskPrompt(input, patchFile);
   const argv = ["pi", "--mode", "json", "-p", "--tools", `read,grep,find,ls,${VERDICT_TOOL}`, "-ne", "-e", REVIEWER_TOOL_EXTENSION];
   argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", reviewsDir);
   if (model) argv.push("--model", model);

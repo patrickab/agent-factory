@@ -22,11 +22,9 @@ import type { ProofView } from "./gates-prove.ts";
 const SHORT = 8;
 /** Lines of a failed gate's output shown under a blocked wave. */
 const GATE_TAIL_LINES = 20;
-const TIMELINE_TEXT_CHARS = 120;
 
 const UUID = /\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const HOME = /\/(?:home|Users)\/[^/\s"'`]+/g;
-const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
 /** Every absolute path in free text as `<path>` (one rule for the agent view and a wave's stage details). */
 export function withoutPaths(text: string): string {
@@ -171,12 +169,6 @@ function taskLine(view: TaskView): string {
   return fields(taskHeader(view), view.title);
 }
 
-/** `tasks.get` and the tasks.* mutations answer a TaskView; `{task}` is accepted too. */
-export function asTask(result: unknown): TaskView {
-  const record = result as { task?: TaskView };
-  return record.task ?? (result as TaskView);
-}
-
 export function taskList(tasks: TaskView[]): string {
   const open = tasks.filter((task) => task.state === null || !FINISHED_TASK_STATES.includes(task.state));
   const rest = tasks.length - open.length;
@@ -290,14 +282,6 @@ export function historyText(merge: { ref?: string; commits?: number }): string {
   return `${merge.ref} (${merge.commits ?? 0} ${merge.commits === 1 ? "commit" : "commits"})`;
 }
 
-function remoteLines(view: WaveView): string[] {
-  if (view.remote === null) return [];
-  const lines: string[] = [];
-  if (view.remote.url !== null) lines.push(`  remote: ${view.remote.url}`);
-  if (view.remote.error !== null) lines.push(`  remote failed: ${view.remote.error}`);
-  return lines;
-}
-
 /** `why: <detail>`: the last stage event's sentence on why the wave is at its stage. */
 function detailLine(view: WaveView): string[] {
   return view.detail === null || view.detail === undefined ? [] : labelled("  ", "why: ", view.detail);
@@ -333,7 +317,6 @@ function waveStageLines(view: WaveView): string[] {
         ...(view.merge ? [`  merged ${short(view.merge.from)}..${short(view.merge.to)} into ${view.target}`] : []),
         ...(view.merge?.ref === undefined ? [] : [`  history: ${historyText(view.merge)}`]),
         ...(lastReview && lastReview.findings.length > 0 ? reviewLines(lastReview, true) : []),
-        ...remoteLines(view),
       ];
     case "cancelled":
       return [];
@@ -461,28 +444,6 @@ export function waitView(params: Record<string, unknown>, result: WaitResult): s
     for (const proof of result.proofs ?? []) lines.push(fields(proofHeader(proof), proof.flaky.length > 0 ? `flaky: ${proof.flaky.join(", ")}` : null));
     if (lines.length === 0) lines.push("nothing to wait for");
   }
-  return lines.join("\n");
-}
-
-// ---- timelines (programs read them; the agent's tools do not offer them) ----
-
-/** The primitive fields of an entry, no timestamps, cut to one line. */
-function entryText(kind: string, data: Record<string, unknown>): string {
-  if ((kind === "coder" || kind === "user") && typeof data.text === "string") {
-    const first = data.text.trim().split("\n")[0] ?? "";
-    return `${kind}: ${first.length > TIMELINE_TEXT_CHARS ? `${first.slice(0, TIMELINE_TEXT_CHARS)}...` : first}`;
-  }
-  const parts = Object.entries(data)
-    .filter(([key, value]) => key !== "at" && key !== "kind" && !/session|path|dir|log|request|createdAt|timestamp/i.test(key) && (typeof value !== "string" || !ISO_TIME.test(value)))
-    .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
-    .map(([key, value]) => `${key}=${String(value).split("\n")[0]}`);
-  const text = fields(kind, parts.join(" "));
-  return text.length > TIMELINE_TEXT_CHARS ? `${text.slice(0, TIMELINE_TEXT_CHARS)}...` : text;
-}
-
-export function timelineView(entries: { kind: string; data?: object }[], next: number, read: (entry: { kind: string; data?: object }) => Record<string, unknown>): string {
-  const lines = entries.map((entry) => entryText(entry.kind, read(entry)));
-  lines.push(`${entries.length} ${entries.length === 1 ? "entry" : "entries"} · since: ${next} for the next ones`);
   return lines.join("\n");
 }
 

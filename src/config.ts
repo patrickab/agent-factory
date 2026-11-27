@@ -1,7 +1,7 @@
 /**
  * The repo's side of a factory task.
  *
- * - Consumes `factory.yaml` (the keys the plugin runs: `hooks.after_create`, `hooks.after_code`, `hooks.after_merge`,
+ * - Consumes `factory.yaml` (the keys the plugin runs: `hooks.after_create`, `hooks.after_merge`,
  *   `gates`, `merge_gates`, `task_gates`, `protected`, `lockfiles`)
  *   and the role prompts `.factory/agents/<role>.md`, all as the task's base commit holds them. The working tree is
  *   the coder's to edit, so it is never the source of the rules the coder is held to
@@ -15,7 +15,7 @@ import { errorText, isRecord } from "./util.ts";
 
 export interface FactoryConfig {
   /** `after_create`: once, in a new task worktree (`launch.ts`). */
-  hooks: { after_create: string[][]; after_code: string[][]; after_merge: string[][] };
+  hooks: { after_create: string[][]; after_merge: string[][] };
   /** After every coder turn: cheap checks (lint, types). */
   gates: string[][];
   /**
@@ -53,7 +53,7 @@ function argvList(value: unknown, key: string): string[][] {
 /** `raw` is the parsed YAML document. A missing or empty file (`undefined`, `null`) means no hooks and no gates. */
 export function parseFactoryConfig(raw: unknown): FactoryConfig {
   if (raw === undefined || raw === null) {
-    return { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
+    return { hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
   }
   if (!isRecord(raw)) throw new Error("factory.yaml: the document must be a mapping");
   const unknown = Object.keys(raw).filter((key) => !KNOWN_KEYS.includes(key));
@@ -71,7 +71,6 @@ export function parseFactoryConfig(raw: unknown): FactoryConfig {
   return {
     hooks: {
       after_create: argvList(hooks.after_create, "hooks.after_create"),
-      after_code: argvList(hooks.after_code, "hooks.after_code"),
       after_merge: argvList(hooks.after_merge, "hooks.after_merge"),
     },
     gates: argvList(raw.gates, "gates"),

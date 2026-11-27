@@ -59,10 +59,10 @@ export interface PipelineSteps {
   /** True when a passed round asks the coder for the commit message before it ends. Absent: never. */
   askCommitMessage?(): boolean;
   /**
-   * True when the task's wave reviews each task (`reviewEach`): a passed round rests `reviewing` for the wave's
-   * reviewer instead of the task's own review, approve or merge. Absent: never.
+   * True when the task belongs to a wave: a passed round rests `reviewing` for the wave's reviewer instead of the
+   * task's own review, approve or merge. Absent: never.
    */
-  reviewEach?(): Promise<boolean>;
+  inWave?(): Promise<boolean>;
 }
 
 export interface RoundResult {
@@ -168,16 +168,14 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
     const config = steps.config();
     const conflicts = await steps.openRebase();
     if (conflicts) return problem("conflict", conflictFeedback(round, task.mainBranch, conflicts, true));
-    for (const [phase, commands] of [["hooks", config.hooks.after_code], ["gates", config.gates]] as const) {
-      for (const argv of commands) {
-        steps.status(`round ${round}: ${phase} ${argv.join(" ")}`);
-        // A failed gate runs once more before it counts (`runGateStep`); hooks run once.
-        const { result, flaky } = phase === "gates" ? await runGateStep(argv, (env) => steps.runCommand(argv, env), steps.cancelled) : { result: await steps.runCommand(argv), flaky: null };
-        drafts.push(customDraft("factory-gate", gateData(round, phase, argv, result, flaky)));
-        if (steps.cancelled()) return end("cancelled", "cancelled");
-        if (result.exitCode === INFRA_EXIT && !result.killed) return end("blocked", `infra: ${lastLine(result.output)}`);
-        if (!passed(result)) return problem(phase, commandFeedback(round, argv, result));
-      }
+    for (const argv of config.gates) {
+      steps.status(`round ${round}: gates ${argv.join(" ")}`);
+      // A failed gate runs once more before it counts (`runGateStep`).
+      const { result, flaky } = await runGateStep(argv, (env) => steps.runCommand(argv, env), steps.cancelled);
+      drafts.push(customDraft("factory-gate", gateData(round, "gates", argv, result, flaky)));
+      if (steps.cancelled()) return end("cancelled", "cancelled");
+      if (result.exitCode === INFRA_EXIT && !result.killed) return end("blocked", `infra: ${lastLine(result.output)}`);
+      if (!passed(result)) return problem("gates", commandFeedback(round, argv, result));
     }
 
     steps.status(`round ${round}: diff`);
@@ -187,7 +185,7 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
     const touched = protectedPaths(diff.paths, config.protected);
     if (touched.length > 0) return problem("protected", protectedFeedback(round, touched));
 
-    const byWave = (await steps.reviewEach?.()) ?? false;
+    const byWave = (await steps.inWave?.()) ?? false;
     if (task.settings.review && !byWave) {
       steps.status(`round ${round}: review`);
       const review = await steps.review(round, diff);

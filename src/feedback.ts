@@ -9,7 +9,6 @@
  * - `waveFeedback` lists a wave's entries, oldest first, for `waves.get`
  */
 import { runCommand } from "./run.ts";
-import { isRecord } from "./util.ts";
 
 export const FEEDBACK_KINDS = ["runtime", "context", "request", "contract", "tools", "environment", "communication"] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
@@ -50,19 +49,6 @@ export async function storeFeedback(storeName: string | null, entry: FeedbackEnt
   return (await store(["create", storeName, "run"])).ok && (await store(["apply", storeName, "--ops", ops])).ok;
 }
 
-function parseEntry(text: string): FeedbackEntry | null {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (!isRecord(value) || !FEEDBACK_KINDS.includes(value.kind as FeedbackKind)) return null;
-  if (typeof value.what !== "string" || (value.task !== undefined && value.task !== null && typeof value.task !== "string") || typeof value.role !== "string") return null;
-  const optional = (field: unknown) => (typeof field === "string" ? field : null);
-  return { kind: value.kind as FeedbackKind, what: value.what, cost: optional(value.cost), suggestion: optional(value.suggestion), task: optional(value.task), wave: optional(value.wave), role: value.role };
-}
-
 /** The entries of the wave `wave` in the store `storeName`, oldest first; none without a store. */
 export async function waveFeedback(storeName: string | null, wave: string): Promise<FeedbackEntry[]> {
   if (storeName === null) return [];
@@ -70,9 +56,12 @@ export async function waveFeedback(storeName: string | null, wave: string): Prom
   if (!read.ok) return [];
   const entries: FeedbackEntry[] = [];
   for (const line of read.stdout.split("\n")) {
-    const match = /^- \[[^\]]+\] (.*)$/.exec(line);
-    const entry = match === null ? null : parseEntry(match[1] as string);
-    if (entry !== null && entry.wave === wave) entries.push(entry);
+    try {
+      const entry = JSON.parse(/^- \[[^\]]+\] (.*)$/.exec(line)?.[1] ?? "") as FeedbackEntry;
+      if (entry.wave === wave) entries.push(entry);
+    } catch {
+      // no entry
+    }
   }
   return entries.reverse();
 }

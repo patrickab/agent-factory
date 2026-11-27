@@ -4,7 +4,7 @@
  * reviewer a fake `pi` on PATH that approves.
  */
 import { randomBytes } from "node:crypto";
-import { afterAll, afterEach, beforeEach, describe, expect, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,8 +17,7 @@ import { worktreePath } from "./launch.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { stopWaveRunners } from "./wave-poke.ts";
 import { runWave, squashMessage, waveCommitsRef } from "./wave-runner.ts";
-import { appendWaveEvent, createWave, listWaves, lockWave, unlockWave, wavePath, type WaveView } from "./waves.ts";
-import { pendingMarks } from "./sync.ts";
+import { appendWaveEvent, createWave, listWaves, lockWave, readWave, unlockWave, wavePath, type WaveView } from "./waves.ts";
 
 const test = caseTests();
 const savedEnv = { ...process.env };
@@ -116,7 +115,7 @@ async function waveRepo(overrides: object = { squash: true }, files = ["b", "c"]
   for (const file of files) commit(work, `${file}.txt`, `${file}\n`, `feat: add ${file}`);
   git(repo, "worktree", "remove", work);
   await createWave({ id: WAVE(), repo, tag: TAG, plan: null, title: "Wave one", request: "r", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides });
-  const specs = files.map((file, index) => ({ key: file, title: `Add ${file}`, request: `add ${file}`, after: index === 0 ? [] : [files[index - 1]] }));
+  const specs = files.map((file, index) => ({ key: file, title: `Add ${file}`, request: `add ${file}`, after: index === 0 ? [] : [files[index - 1]], id: crypto.randomUUID() }));
   await appendWaveEvent(WAVE(), { kind: "tasks", tasks: specs });
   for (const [index, spec] of specs.entries()) {
     const record: TaskRecord = {
@@ -143,7 +142,7 @@ async function waveRepo(overrides: object = { squash: true }, files = ["b", "c"]
 }
 
 const getWave = async () => ((await callAction("waves.get", { id: WAVE() })) as { wave: WaveView }).wave;
-const kinds = async () => ((await callAction("waves.timeline", { id: WAVE() })) as { events: { kind: string; stage?: string }[] }).events.map((event) => event.stage ?? event.kind);
+const kinds = async () => (await readWave(WAVE())).events.map((event) => ("stage" in event ? event.stage : event.kind));
 const reviewWorktree = (repo: string) => worktreePath(repo, `wave-${WAVE().slice(0, 8)}-review`);
 const branchExists = (repo: string) => gitOk(repo, "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`);
 
@@ -166,7 +165,7 @@ async function expectLanded(repo: string, from: string, subjects: string[]): Pro
   expect(git(repo, "rev-parse", "main^{tree}")).toBe(git(repo, "rev-parse", `${REF()}^{tree}`));
   expect(branchExists(repo)).toBe(false);
   expect(existsSync(reviewWorktree(repo))).toBe(false);
-  expect(wave.merge).toEqual({ at: expect.any(String), from, to: main, queueMs: expect.any(Number), ref: REF(), commits: subjects.length });
+  expect(wave.merge).toEqual({ at: expect.any(String), from, to: main, ref: REF(), commits: subjects.length });
   expect((await kinds()).filter((kind) => kind === "merge")).toHaveLength(1);
 }
 
@@ -195,7 +194,7 @@ describe("a squash wave", () => {
     expect(git(repo, "rev-parse", "main")).toBe(tip);
     expect(git(repo, "rev-parse", REF())).toBe(tip);
     expect(branchExists(repo)).toBe(false);
-    expect(wave.merge).toEqual({ at: expect.any(String), from: init, to: tip, queueMs: expect.any(Number), ref: REF(), commits: 1 });
+    expect(wave.merge).toEqual({ at: expect.any(String), from: init, to: tip, ref: REF(), commits: 1 });
   });
 
   test("a ref left by a run that died before the move is set again; the wave lands once", async () => {
@@ -264,31 +263,6 @@ describe("a squash wave", () => {
     await expectLanded(repo, git(repo, "rev-parse", "main^"), ["feat: add b", "feat: add c"]);
   }, 30_000);
 
-  test("another building wave is rebased onto the squash commit and its running task marked", async () => {
-    const repo = await waveRepo();
-    const other = `33000000-${RUN}-4000-8000-${caseDigits()}`;
-    const otherBranch = "main-squash-w2";
-    git(repo, "branch", otherBranch, "main");
-    const work = join(caseDir, "work2");
-    git(repo, "worktree", "add", "--quiet", work, otherBranch);
-    commit(work, "e.txt", "e\n", "feat: add e");
-    git(repo, "worktree", "remove", work);
-    await createWave({ id: other, repo, tag: "squash/w2", plan: null, title: "Wave two", request: "r", branch: otherBranch, target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    const running: TaskRecord = { id: taskId(7), repo, worktree: join(caseDir, "task-w2"), branch: "task-w2", title: "Two", sessionId: `session-${RUN}-${caseSerial()}-w2`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:07.000Z", tag: "squash/w2", plan: null, wave: other, origin: null };
-    await writeTask(running);
-    writeFileSync(join(running.sessionDir, `2026-01-01T00-00-00-000Z_${running.sessionId}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "running", round: 1, reason: "r" } })}\n`);
-    const spy = spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      expect(await runWave(WAVE())).toBe(0);
-    } finally {
-      spy.mockRestore();
-    }
-    expect((await getWave()).stage).toBe("merged");
-    expect(git(repo, "rev-parse", `${otherBranch}^`)).toBe(git(repo, "rev-parse", "main"));
-    expect(git(repo, "show", "-s", "--format=%s", "main")).toBe("Wave one");
-    expect((await pendingMarks(running.id)).map((mark) => mark.branch)).toEqual([otherBranch]);
-  });
-
   test("squash off: the task commits land as they are, the branch stays, no ref, the merge event as before", async () => {
     const repo = await waveRepo({});
     const init = git(repo, "rev-parse", "main");
@@ -297,7 +271,7 @@ describe("a squash wave", () => {
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
     expect(git(repo, "rev-parse", BRANCH)).toBe(git(repo, "rev-parse", "main"));
     expect(git(repo, "for-each-ref", "refs/factory/waves")).toBe("");
-    expect(wave.merge).toEqual({ at: expect.any(String), from: init, to: git(repo, "rev-parse", "main"), queueMs: expect.any(Number) });
+    expect(wave.merge).toEqual({ at: expect.any(String), from: init, to: git(repo, "rev-parse", "main") });
     expect((waveCard(wave, "wave").rows ?? []).some((row) => row.label === "history")).toBe(false);
   });
 });

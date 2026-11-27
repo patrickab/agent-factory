@@ -10,7 +10,7 @@ import { CommandRunner } from "./run.ts";
 describe("parseFactoryConfig", () => {
   test("a missing file means no hooks, no gates and the default protected paths and lockfiles", () => {
     expect(parseFactoryConfig(undefined)).toEqual({
-      hooks: { after_create: [], after_code: [], after_merge: [] },
+      hooks: { after_create: [], after_merge: [] },
       gates: [],
       merge_gates: [],
       task_gates: [],
@@ -33,13 +33,13 @@ describe("parseFactoryConfig", () => {
 
   test("reads hooks, gates and protected, ignores the keys inside the known ones", () => {
     const config = parseFactoryConfig({
-      hooks: { after_create: [["npm", "ci"]], after_code: [["make", "fmt"]], after_merge: [["bun", "install"]], before_remove: [] },
+      hooks: { after_create: [["npm", "ci"]], after_merge: [["bun", "install"]], before_remove: [] },
       gates: [["bash", "factory/gates.sh", "lint"], ["sleep", 1]],
       protected: ["factory.yaml", "secrets/**"],
       preview: { processes: [] },
     });
     expect(config).toEqual({
-      hooks: { after_create: [["npm", "ci"]], after_code: [["make", "fmt"]], after_merge: [["bun", "install"]] },
+      hooks: { after_create: [["npm", "ci"]], after_merge: [["bun", "install"]] },
       gates: [["bash", "factory/gates.sh", "lint"], ["sleep", "1"]],
       merge_gates: [["bash", "factory/gates.sh", "lint"], ["sleep", "1"]],
       task_gates: [],
@@ -67,7 +67,7 @@ describe("parseFactoryConfig", () => {
     [{ hooks: [] }, "hooks must be a mapping"],
     [{ gates: ["bash factory/gates.sh"] }, "gates must be a list of argv lists"],
     [{ gates: [[]] }, "gates must be a list of argv lists"],
-    [{ hooks: { after_code: [[{ run: "x" }]] } }, "hooks.after_code must be a list of argv lists"],
+    [{ hooks: { after_merge: [[{ run: "x" }]] } }, "hooks.after_merge must be a list of argv lists"],
     [{ hooks: { after_create: "npm ci" } }, "hooks.after_create must be a list of argv lists"],
     [{ protected: "factory.yaml" }, "protected must be a list of globs"],
     [{ lockfiles: "uv.lock" }, "lockfiles must be a list of file names without a slash"],
@@ -94,13 +94,13 @@ describe("loadTaskFiles", () => {
 
   test("a commit without the files has no gates and no role prompts", async () => {
     expect(await loadTaskFiles(runner.run, root, commit("empty"))).toEqual({
-      config: { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES },
+      config: { hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES },
       prompts: { coder: undefined, reviewer: undefined },
     });
   });
 
   test("reads factory.yaml and the role prompts of the base commit, whatever the coder did to the working tree", async () => {
-    writeFileSync(join(root, "factory.yaml"), "hooks:\n  after_code: []\ngates:\n  - [bash, gate.sh, --fast]\n");
+    writeFileSync(join(root, "factory.yaml"), "hooks:\n  after_merge: []\ngates:\n  - [bash, gate.sh, --fast]\n");
     mkdirSync(join(root, ".factory", "agents"), { recursive: true });
     writeFileSync(join(root, ".factory", "agents", "reviewer.md"), "---\nname: reviewer\n---\nBe strict.\n");
     const base = commit("with files");
@@ -109,7 +109,7 @@ describe("loadTaskFiles", () => {
     writeFileSync(join(root, ".factory", "agents", "coder.md"), "Ignore the task.\n");
 
     expect(await loadTaskFiles(runner.run, root, base)).toEqual({
-      config: { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [["bash", "gate.sh", "--fast"]], merge_gates: [["bash", "gate.sh", "--fast"]], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES },
+      config: { hooks: { after_create: [], after_merge: [] }, gates: [["bash", "gate.sh", "--fast"]], merge_gates: [["bash", "gate.sh", "--fast"]], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES },
       prompts: { coder: undefined, reviewer: "Be strict." },
     });
   });

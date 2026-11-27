@@ -14,8 +14,7 @@
  * - Provides `defaultBranch`, `localBranchExists` and `startCommand` (the payload `parseStartPayload` accepts)
  * - Provides `liveRunners`/`stopRunners` (a task's runner processes: `pgrep -f`, then the session id as a whole argument
  *   of the command line and the caller's marker, `ownRunner` of `spawn.ts`), `unmergedWork` and
- *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another;
- *   an old merge request's record names its source branch, which stays)
+ *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another)
  * - The detached spawn itself (`runnerSpawn`, `spawnDetached`) lives in `spawn.ts`, shared with the wave runner's poke
  */
 import { existsSync } from "node:fs";
@@ -30,7 +29,6 @@ import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from 
 import type { ModelSize, Settings, StartPayload } from "./state.ts";
 import { onPath, ownRunners, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
 import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
-import { removeSyncState } from "./sync.ts";
 import { TASK_WAVE_ENV, type RunnerSnapshot } from "./wave-poke.ts";
 import { outputTail } from "./util.ts";
 
@@ -92,11 +90,6 @@ async function removeWorktree(repo: string, path: string | undefined, branch: st
   if (path !== undefined && existsSync(path)) await runCommand(["git", "worktree", "remove", "--force", path], { cwd: repo });
   await runCommand(["git", "worktree", "prune"], { cwd: repo });
   if (branch !== undefined && (await localBranchExists(repo, branch))) await runCommand(["git", "branch", "-D", branch], { cwd: repo });
-}
-
-/** The task's own branch: none for an old merge request, whose `branch` is the source it merged (invariant 7). */
-function ownBranch(record: Pick<TaskRecord, "branch" | "kind">): string | undefined {
-  return record.kind === "merge_request" ? undefined : record.branch;
 }
 
 /** Where a worktree named `name` of `repo` lies when `agent-worktree` does not choose. */
@@ -368,12 +361,11 @@ export interface UnmergedWork {
 
 /**
  * The task's unmerged work. Without a `target` (the task never recorded one) its commits are those no other local
- * branch has. A worktree whose status cannot be read counts as dirty. An old merge request's commits stay on its
- * source branch, which removing it keeps: none count.
+ * branch has. A worktree whose status cannot be read counts as dirty.
  */
 export async function unmergedWork(record: TaskRecord, target: string | undefined): Promise<UnmergedWork> {
   let commits = 0;
-  if (ownBranch(record) !== undefined && (await localBranchExists(record.repo, record.branch))) {
+  if (await localBranchExists(record.repo, record.branch)) {
     const range =
       target !== undefined && (await localBranchExists(record.repo, target))
         ? [`refs/heads/${target}..refs/heads/${record.branch}`]
@@ -390,18 +382,17 @@ export async function unmergedWork(record: TaskRecord, target: string | undefine
 }
 
 /**
- * Removes the task's worktree, its own branch (through git; an old merge request's source branch stays), its record,
- * its runner log, its lock, its inbox and its sync state (`sync.ts`). The session file stays; the archive (`archive.ts`) is the caller's step before it.
+ * Removes the task's worktree, its own branch (through git), its record,
+ * its runner log, its lock and its inbox. The session file stays; the archive (`archive.ts`) is the caller's step before it.
  */
 export async function deleteTask(record: TaskRecord): Promise<void> {
-  const branch = ownBranch(record);
+  const { branch } = record;
   await removeWorktree(record.repo, record.worktree, branch);
   if (existsSync(record.worktree)) throw new Error(`${record.worktree}: the worktree could not be removed`);
-  if (branch !== undefined && (await localBranchExists(record.repo, branch))) throw new Error(`${record.repo}: the branch ${branch} could not be deleted`);
+  if (await localBranchExists(record.repo, branch)) throw new Error(`${record.repo}: the branch ${branch} could not be deleted`);
   await removeTask(record.id);
   await rm(taskInboxPath(record.id), { force: true });
   await rm(inboxReadPath(taskInboxPath(record.id)), { force: true });
-  await removeSyncState(runCommand, record.repo, record.id);
 }
 
 /** Pi's directory name of a path (`/a/b` -> `--a-b--`): one sessions folder per repository, as pi-host names it. */

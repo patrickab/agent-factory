@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, spyOn } from "bun:te
 import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { caseDigits, caseSerial, caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
 import { archiveRoot, archiveWave, waveArchiveDir } from "./archive.ts";
@@ -18,8 +18,6 @@ import { writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, wavePokePath, waveReviewsDir } from "./wave-poke.ts";
 import { pathFree, runWave } from "./wave-runner.ts";
 import { appendWaveEvent, createWave, foldWave, listWaves, lockWave, readWave, unlockWave, type WaveView } from "./waves.ts";
-import { MERGE_PUSH_PENDING } from "./remote.ts";
-import { pendingMarks } from "./sync.ts";
 
 const test = caseTests();
 const savedEnv = { ...process.env };
@@ -130,8 +128,8 @@ async function waveRepo(config = "gates:\n  - [\"true\"]\n", state = "done", ove
   git(repo, "worktree", "remove", work);
   await createWave({ id: WAVE(), repo, tag: "factory/w1", plan: null, title: "Wave one", request: "Check b and c.\nKeep it small.", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides });
   const specs = [
-    { key: "a", title: "Add b", request: "add b", after: [] },
-    { key: "b", title: "Add c", request: "add c", after: ["a"] },
+    { key: "a", title: "Add b", request: "add b", after: [], id: crypto.randomUUID() },
+    { key: "b", title: "Add c", request: "add c", after: ["a"], id: crypto.randomUUID() },
   ];
   await appendWaveEvent(WAVE(), { kind: "tasks", tasks: specs });
   for (const [index, spec] of specs.entries()) {
@@ -160,7 +158,7 @@ async function waveRepo(config = "gates:\n  - [\"true\"]\n", state = "done", ove
 
 const getWave = async () => ((await callAction("waves.get", { id: WAVE() })) as { wave: WaveView }).wave;
 type Event = { at?: string; kind: string; stage?: string; reason?: string | null; detail?: string; dropped?: string[]; key?: string; taskId?: string };
-const timeline = async () => ((await callAction("waves.timeline", { id: WAVE() })) as { events: Event[] }).events;
+const timeline = async () => (await readWave(WAVE())).events as Event[];
 type WaitResult = { waves: WaveView[]; attention: string[]; timedOut: boolean };
 const waitWave = async (timeoutMs: number) => (await callAction("tasks.wait", { wave: WAVE(), timeoutMs })) as WaitResult;
 /** Overwrites the session of the wave's task `key` with one state. */
@@ -187,89 +185,16 @@ describe("the wave runner", () => {
     expect([wave.stage, wave.reason, wave.running, wave.interrupted, wave.counts]).toEqual(["merged", null, false, false, { total: 2, done: 2 }]);
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\nmain: add d\ninit");
     expect(git(repo, "rev-parse", `refs/heads/${BRANCH}`)).toBe(git(repo, "rev-parse", "main"));
-    expect(wave.merge).toEqual({ at: expect.any(String), from: moved, to: git(repo, "rev-parse", "main"), queueMs: expect.any(Number) });
+    expect(wave.merge).toEqual({ at: expect.any(String), from: moved, to: git(repo, "rev-parse", "main") });
     expect(wave.reviews).toEqual([
       { at: expect.any(String), round: 1, sessionId: "11111111-2222-4333-8444-555555555555", model: null, verdict: "approved", status: "ok", findings: [], usage: { input: 100, output: 20, cacheRead: 900, cacheWrite: 30, cost: 0.5 }, wallMs: expect.any(Number) },
     ]);
     expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", true]]);
     expect(wave.usage).toEqual({ input: 100, output: 20, cacheRead: 900, cacheWrite: 30, cost: 0.5 });
-    const timeline = (await callAction("waves.timeline", { id: WAVE() })) as { events: { kind: string; stage?: string }[] };
-    expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "gate", "review", "merging", "merge", "merged"]);
-    // The reviewer got the wave's whole diff and its request verbatim.
-    const prompt = readFileSync(promptLog, "utf8");
-    expect(prompt).toContain(`Review the wave "Wave one": the branch ${BRANCH}, rebased onto main, merges into it.`);
-    const requestFile = join(waveReviewsDir(WAVE()), "round-1.request.md");
-    expect(prompt).toContain(requestFile);
-    expect(readFileSync(requestFile, "utf8")).toContain("## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n\n## Tasks of the wave\n");
+    const events = await timeline();
+    expect(events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "gate", "review", "merging", "merge", "merged"]);
     expect(existsSync(reviewWorktree(repo))).toBe(false);
   });
-
-  test("a merged wave calls waveLanded: the other building wave's branch is rebased onto the target, its running task marked, both in the log", async () => {
-    const repo = await waveRepo();
-    // A second wave on main, building, with a running task off its branch.
-    const other = `31000000-${RUN}-4000-8000-${caseDigits()}`;
-    const otherBranch = "main-factory-w2";
-    git(repo, "branch", otherBranch, "main");
-    const work = join(caseDir, "work2");
-    git(repo, "worktree", "add", "--quiet", work, otherBranch);
-    commit(work, "e.txt", "e\n", "feat: add e");
-    git(repo, "worktree", "remove", work);
-    await createWave({ id: other, repo, tag: "factory/w2", plan: null, title: "Wave two", request: "r", branch: otherBranch, target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
-    const running: TaskRecord = { id: taskId(7), repo, worktree: join(caseDir, "task-w2"), branch: "task-w2", title: "Two", sessionId: `session-${RUN}-${caseSerial()}-w2`, sessionDir: join(caseDir, "sessions"), createdAt: "2026-01-01T00:00:07.000Z", tag: "factory/w2", plan: null, wave: other, origin: null };
-    await writeTask(running);
-    writeFileSync(join(running.sessionDir, `2026-01-01T00-00-00-000Z_${running.sessionId}.jsonl`), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "running", round: 1, reason: "r" } })}\n`);
-    const lines: string[] = [];
-    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args.join(" ")));
-    try {
-      expect(await runWave(WAVE())).toBe(0);
-    } finally {
-      spy.mockRestore();
-    }
-    expect((await getWave()).stage).toBe("merged");
-    expect(git(repo, "rev-parse", `${otherBranch}^`)).toBe(git(repo, "rev-parse", "main"));
-    expect(lines.some((line) => line.includes(`wave ${other.slice(0, 8)}: ${otherBranch} rebased onto main, 1 task to sync`))).toBe(true);
-    expect((await pendingMarks(running.id)).map((mark) => mark.branch)).toEqual([otherBranch]);
-  });
-
-  test("the reviewer's request file holds each done task's title, request and coder's last message, no cancelled task", async () => {
-    await waveRepo();
-    // Task a's coder said what it left open; a third task was cancelled (its record removed).
-    const say = (text: string) => JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
-    writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseSerial()}-a.jsonl`), [JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "done", round: 1, reason: "r" } }), say("Risk: b.txt has no newline check.")].join("\n") + "\n");
-    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add nothing", request: "a cancelled request", after: [] }] });
-    await appendWaveEvent(WAVE(), { kind: "task", key: "c", taskId: taskId(9), sessionId: `session-${RUN}-${caseSerial()}-c` });
-    expect(await runWave(WAVE())).toBe(0);
-    expect((await getWave()).stage).toBe("merged");
-    const request = readFileSync(join(waveReviewsDir(WAVE()), "round-1.request.md"), "utf8");
-    expect(request).toBe(
-      "# Wave one\n\n## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n\n## Tasks of the wave\n\n" +
-        "### Add b\n\n#### Request\n\nadd b\n\n#### The coder's last message\n\nRisk: b.txt has no newline check.\n\n" +
-        "### Add c\n\n#### Request\n\nadd c\n\n#### The coder's last message\n\n(none)\n",
-    );
-    expect(request).not.toContain("a cancelled request");
-    // Large text stays in the file: the prompt only names it.
-    expect(readFileSync(promptLog, "utf8")).not.toContain("add b");
-  });
-
-  test("a review after waves.update reads the new title and instructions; one that runs keeps the text it started with", async () => {
-    await waveRepo();
-    process.env.FAKE_REVIEW_SLEEP = "1500";
-    process.env.FAKE_VERDICT = "reject";
-    const running = runWave(WAVE());
-    const requestFile = (round: number) => join(waveReviewsDir(WAVE()), `round-${round}.request.md`);
-    await until(() => existsSync(promptLog));
-    await callAction("waves.update", { id: WAVE(), title: "Wave renamed", request: "Check the docs too." });
-    expect(await running).toBe(0);
-    expect((await getWave()).stage).toBe("rejected");
-    expect(readFileSync(requestFile(1), "utf8")).toStartWith("# Wave one\n\n## Instructions from the supervisor\n\nCheck b and c.\nKeep it small.\n");
-    // The supervisor acts on the rejection: the next review reads the new text.
-    delete process.env.FAKE_REVIEW_SLEEP;
-    delete process.env.FAKE_VERDICT;
-    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
-    expect(await runWave(WAVE())).toBe(0);
-    expect(readFileSync(requestFile(2), "utf8")).toStartWith("# Wave renamed\n\n## Instructions from the supervisor\n\nCheck the docs too.\n");
-    expect((await getWave()).updates).toEqual([{ at: expect.any(String), key: null, fields: ["title", "request"] }]);
-  }, 30_000);
 
   test("merge review: an approved wave waits for approve, its worktree removed", async () => {
     const repo = await waveRepo(undefined, "done", { merge: "review" });
@@ -290,14 +215,9 @@ describe("the wave runner", () => {
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
   });
 
-  test("a rejected review rests rejected with its findings; waves.add moves the wave again and pokes the runner", async () => {
-    process.env.FAKE_VERDICT = "reject";
-    const repo = await waveRepo();
-    await runWave(WAVE());
-    const rejected = await getWave();
-    expect(rejected.stage).toBe("rejected");
-    expect(rejected.reviews.map((review) => [review.verdict, review.findings])).toEqual([["rejected", [{ severity: "major", file: "b.txt", line: 1, text: "b is wrong" }]]]);
-    expect(git(repo, "log", "--format=%s", "main")).toBe("init");
+  test("waves.add moves a rejected wave again and pokes the runner", async () => {
+    await waveRepo();
+    await appendWaveEvent(WAVE(), { kind: "stage", stage: "rejected", reason: null });
     // A live runner holds the wave (this process): the poke leaves its marker and starts none.
     await lockWave(WAVE());
     try {
@@ -335,50 +255,8 @@ describe("the wave runner", () => {
     expect([view.stage, view.reason, view.detail]).toEqual(["blocked", "conflict", "the rebase onto main conflicts on a.txt; its 2 conflict tasks are used up"]);
     expect([git(repo, "rev-parse", BRANCH), git(repo, "rev-parse", "main")]).toEqual([wave, main]);
     expect(view.reviews).toEqual([]);
-    expect(view.resolved).toBeUndefined();
-    expect([view.tasks.map((task) => task.key), view.conflicts?.length]).toEqual([["a", "b"], 2]);
+    expect([view.tasks.map((task) => task.key), (await readWave(WAVE())).events.filter((event) => event.kind === "conflict").length]).toEqual([["a", "b"], 2]);
   });
-
-  test("both sides add lines at one place: resolved before the review's gates, ours then theirs, the log names the files", async () => {
-    const count = join(caseDir, "merge-gates");
-    const repo = await waveRepo(`gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "cat a.txt >> ${count}"]\n`);
-    waveCommit(repo, "a.txt", "a\nwave\n", "feat: wave adds to a");
-    const main = commit(repo, "a.txt", "a\nmain\n", "main: add to a");
-    const lines: string[] = [];
-    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args.join(" ")));
-    try {
-      expect(await runWave(WAVE())).toBe(0);
-    } finally {
-      spy.mockRestore();
-    }
-    const wave = await getWave();
-    expect(wave.stage).toBe("merged");
-    // Additions-only: no conflict task.
-    expect([wave.tasks.map((task) => task.key), wave.conflicts]).toEqual([["a", "b"], undefined]);
-    expect(wave.resolved).toEqual([{ at: expect.any(String), phase: "review", onto: main, files: ["a.txt"] }]);
-    expect(git(repo, "show", "main:a.txt")).toBe("a\nmain\nwave");
-    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: wave adds to a\nfeat: add c\nfeat: add b\nmain: add to a\ninit");
-    // The gates ran on the resolved tree.
-    expect(readFileSync(count, "utf8")).toBe("a\nmain\nwave\n");
-    expect((await timeline()).map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "resolved", "gate", "review", "merging", "merge", "merged"]);
-    expect(lines.some((line) => line.includes("resolved ours then theirs: a.txt"))).toBe(true);
-  });
-
-  test("the target gets additions at the same place after the review: the merge resolves them and runs its gates again", async () => {
-    const count = join(caseDir, "merge-gates");
-    const repo = await waveRepo(`gates:\n  - ["true"]\nmerge_gates:\n  - ["sh", "-c", "cat a.txt >> ${count}"]\n`, "done", { merge: "review" });
-    waveCommit(repo, "a.txt", "a\nwave\n", "feat: wave adds to a");
-    await runWave(WAVE());
-    expect((await getWave()).stage).toBe("waiting_approve");
-    const main = commit(repo, "a.txt", "a\nmain\n", "main: add to a");
-    await holding(() => callAction("waves.approve", { id: WAVE() }));
-    expect(await runWave(WAVE())).toBe(0);
-    const wave = await getWave();
-    expect([wave.stage, wave.resolved]).toEqual(["merged", [{ at: expect.any(String), phase: "merge", onto: main, files: ["a.txt"] }]]);
-    expect(git(repo, "show", "main:a.txt")).toBe("a\nmain\nwave");
-    expect(wave.gates.map((gate) => [gate.phase, gate.passed])).toEqual([["review", true], ["merge", true]]);
-    expect(readFileSync(count, "utf8")).toBe("a\nwave\na\nmain\nwave\n");
-  }, 30_000);
 
   test("waves.retry after a blocked rebase: review and merge run again from the rebase, in a runner it starts", async () => {
     const repo = await waveRepo();
@@ -395,8 +273,8 @@ describe("the wave runner", () => {
     await until(async () => (await getWave()).stage === "merged");
     await until(async () => (await liveWaveRunners(WAVE())).length === 0);
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: change a\nfeat: add c\nfeat: add b\ninit");
-    const timeline = (await callAction("waves.timeline", { id: WAVE() })) as { events: { kind: string; stage?: string; reason?: string }[] };
-    expect(timeline.events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "conflict", "conflict", "reviewing", "blocked", "reviewing", "gate", "review", "merging", "merge", "merged"]);
+    const events = await timeline();
+    expect(events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "conflict", "conflict", "reviewing", "blocked", "reviewing", "gate", "review", "merging", "merge", "merged"]);
   }, 30_000);
 
   test("merge review: waves.approve only from waiting_approve, then the runner merges", async () => {
@@ -535,8 +413,8 @@ describe("the wave runner", () => {
     await runWave(WAVE());
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.reviews]).toEqual(["blocked", "infra", []]);
-    const timeline = (await callAction("waves.timeline", { id: WAVE() })) as { events: { kind: string; detail?: string }[] };
-    expect(timeline.events.at(-1)?.detail).toContain("factory.yaml: unknown key task_gate");
+    const events = await timeline();
+    expect(events.at(-1)?.detail).toContain("factory.yaml: unknown key task_gate");
     expect(git(repo, "log", "--format=%s", "main")).toBe("init");
     expect(existsSync(reviewWorktree(repo))).toBe(false);
   });
@@ -606,7 +484,7 @@ describe("a wave never waits silently (invariant 8)", () => {
     await waveRepo();
     // a was cancelled after b finished; c waits for a and can never start.
     setState("a", "cancelled");
-    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"] }] });
+    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"], id: crypto.randomUUID() }] });
     expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect([wave.stage, wave.running, wave.interrupted, wave.tasks.map((task) => task.state)]).toEqual(["building", false, false, ["cancelled", "done", "pending"]]);
@@ -629,7 +507,7 @@ describe("a wave never waits silently (invariant 8)", () => {
 
   test("a task that fails to launch blocks the wave (infra, the error in its stage event); waves.retry builds again", async () => {
     const repo = await waveRepo();
-    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"] }] });
+    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"], id: crypto.randomUUID() }] });
     // The launch refuses before it creates anything: the wave's branch is gone.
     const tip = git(repo, "rev-parse", BRANCH);
     git(repo, "branch", "-D", BRANCH);
@@ -671,7 +549,10 @@ describe("a wave never waits silently (invariant 8)", () => {
     // The next reviewer answers at once.
     delete process.env.FAKE_REVIEW_SLEEP;
     const added = Date.now();
+    // The added task's id is the record's, as the launch that crashed took it.
+    const uuid = spyOn(crypto, "randomUUID").mockReturnValue(taskId(3) as ReturnType<typeof crypto.randomUUID>);
     await callAction("waves.add", { id: WAVE(), tasks: [{ key: "x", title: "Fix b", request: "fix b", after: ["a"] }] });
+    uuid.mockRestore();
     await until(async () => (await timeline()).some((event) => event.kind === "task" && event.key === "x"), 10_000);
     expect(Date.now() - added).toBeLessThan(10_000);
     expect(await run).toBe(0);
@@ -794,156 +675,6 @@ describe("a runner stopped from outside", () => {
   }, 30_000);
 });
 
-describe("the wave on its forge (setting remote)", () => {
-  const forgeLog = () => join(caseDir, "forge.log");
-  const forgeBin = () => join(caseDir, "forge-bin");
-  /** The fake `gh`/`glab`: each call's argv, as `[name, ...args]` JSON lines; `create` prints the request's URL. */
-  const FAKE_FORGE = `#!/usr/bin/env bun
-import { appendFileSync } from "node:fs";
-import { basename } from "node:path";
-const name = basename(process.argv[1]);
-const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_FORGE_LOG, JSON.stringify([name, ...args]) + "\\n");
-if (args[1] === "create") console.log(name === "gh" ? "https://github.com/acme/app/pull/7" : "Creating merge request\\nhttps://gitlab.com/acme/app/-/merge_requests/7");
-`;
-
-  beforeEach(() => {
-    mkdirSync(forgeBin());
-    for (const name of ["gh", "glab"]) {
-      writeFileSync(join(forgeBin(), name), FAKE_FORGE);
-      chmodSync(join(forgeBin(), name), 0o755);
-    }
-    // No real gh or glab is reachable: a directory holding one is left out of PATH (bun's own is kept).
-    const system = (savedEnv.PATH ?? "").split(":").filter((dir) => dir !== "" && !existsSync(join(dir, "gh")) && !existsSync(join(dir, "glab")));
-    process.env.PATH = [forgeBin(), fakeBin, dirname(process.execPath), ...system].join(":");
-    process.env.FAKE_FORGE_LOG = forgeLog();
-  });
-
-  const calls = (): string[][] => (existsSync(forgeLog()) ? readFileSync(forgeLog(), "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]) : []);
-  /** A bare repo as `origin`, reached through `insteadOf` from `url`, so the forge is the URL's. Returns its path. */
-  function origin(repo: string, url = "https://github.com/acme/app.git"): string {
-    const bare = join(caseDir, "origin.git");
-    git(caseDir, "init", "--quiet", "--bare", bare);
-    git(repo, "remote", "add", "origin", url);
-    git(repo, "config", `url.${bare}.insteadOf`, url);
-    return bare;
-  }
-  const refs = (bare: string) => git(bare, "for-each-ref", "--format=%(refname) %(objectname)");
-  const remoteEvents = async () => (await timeline()).filter((event) => event.kind === "remote") as unknown as Record<string, unknown>[];
-
-  test("off: no push, no forge call, no remote event; the wave merges", async () => {
-    const repo = await waveRepo();
-    const bare = origin(repo);
-    expect(await runWave(WAVE())).toBe(0);
-    const wave = await getWave();
-    expect([wave.stage, wave.remote]).toEqual(["merged", null]);
-    expect(refs(bare)).toBe("");
-    expect(calls()).toEqual([]);
-    expect(await remoteEvents()).toEqual([]);
-  });
-
-  test("on (GitHub): the branch pushed, the request opened once, a comment per verdict, the target pushed only after the merge", async () => {
-    process.env.FAKE_VERDICT = "reject";
-    const repo = await waveRepo(undefined, "done", { remote: true });
-    const bare = origin(repo);
-    await runWave(WAVE());
-    const rejected = await getWave();
-    expect(rejected.stage).toBe("rejected");
-    const head = git(repo, "rev-parse", BRANCH);
-    expect(rejected.remote).toEqual({ number: 7, url: "https://github.com/acme/app/pull/7", pushed: head, error: null });
-    expect(git(bare, "rev-parse", BRANCH)).toBe(head);
-    // The target is not the review's to publish: only the merge pushes it.
-    expect(refs(bare)).not.toContain("refs/heads/main ");
-    const [create, comment] = calls();
-    expect(create.slice(0, 7)).toEqual(["gh", "pr", "create", "--base", "main", "--head", BRANCH]);
-    expect(create).toContain("Wave one");
-    expect(comment.slice(0, 4)).toEqual(["gh", "pr", "comment", "7"]);
-    expect(comment[5]).toContain("round 1: rejected");
-    expect(comment[5]).toContain("`b.txt:1`: b is wrong");
-    expect((await timeline()).map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "remote", "remote", "gate", "review", "rejected", "remote"]);
-
-    // A second review (the supervisor's fixes are in): the request is reused, its verdict commented, the merge pushed.
-    delete process.env.FAKE_VERDICT;
-    await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
-    expect(await runWave(WAVE())).toBe(0);
-    const merged = await getWave();
-    expect(merged.stage).toBe("merged");
-    expect(calls().map((call) => call.slice(0, 3).join(" "))).toEqual(["gh pr create", "gh pr comment", "gh pr comment"]);
-    expect(calls()[2][5]).toContain("round 2: approved");
-    const main = git(repo, "rev-parse", "main");
-    expect(merged.remote).toEqual({ number: 7, url: "https://github.com/acme/app/pull/7", pushed: main, error: null });
-    expect(git(bare, "rev-parse", "main")).toBe(main);
-    expect(git(bare, "rev-parse", BRANCH)).toBe(main);
-    // The pending push is in the log before the resting stage, the push's own event after it.
-    const kinds = (await timeline()).map((event) => event.stage ?? event.kind);
-    expect(kinds.slice(-4)).toEqual(["merge", "remote", "merged", "remote"]);
-    const [pending, done] = (await remoteEvents()).slice(-2);
-    expect(pending.error).toBe(MERGE_PUSH_PENDING);
-    expect(done.error).toBeNull();
-  });
-
-  test("a runner that dies between the merge and its push leaves the log saying the push is pending", async () => {
-    const repo = await waveRepo(undefined, "done", { remote: true });
-    origin(repo);
-    await runWave(WAVE());
-    // What the log held before the push: everything up to the merged stage.
-    const { declaration, events } = await readWave(WAVE());
-    const before = events.slice(0, events.findIndex((event) => event.kind === "stage" && event.stage === "merged") + 1);
-    const fold = foldWave(declaration, before);
-    expect(fold.stage).toBe("merged");
-    expect(fold.remote?.error).toBe(MERGE_PUSH_PENDING);
-  });
-
-  test("on (GitLab): glab opens the merge request and notes the verdict", async () => {
-    const repo = await waveRepo(undefined, "done", { remote: true });
-    origin(repo, "git@gitlab.example.com:acme/app.git");
-    await runWave(WAVE());
-    const wave = await getWave();
-    expect([wave.stage, wave.remote?.number, wave.remote?.url]).toEqual(["merged", 7, "https://gitlab.com/acme/app/-/merge_requests/7"]);
-    const [create, note] = calls();
-    expect(create.slice(0, 7)).toEqual(["glab", "mr", "create", "--source-branch", BRANCH, "--target-branch", "main"]);
-    expect(note.slice(0, 4)).toEqual(["glab", "mr", "note", "7"]);
-  });
-
-  test("a refused push is recorded and the wave still merges; no request without the branch", async () => {
-    const repo = await waveRepo(undefined, "done", { remote: true });
-    const bare = origin(repo);
-    writeFileSync(join(bare, "hooks", "pre-receive"), "#!/bin/sh\necho refused by policy >&2\nexit 1\n");
-    chmodSync(join(bare, "hooks", "pre-receive"), 0o755);
-    expect(await runWave(WAVE())).toBe(0);
-    const wave = await getWave();
-    expect(wave.stage).toBe("merged");
-    expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
-    expect(wave.remote?.error).toContain("git push exited 1");
-    expect(wave.remote?.error).toContain("refused by policy");
-    expect(calls()).toEqual([]);
-    expect(refs(bare)).toBe("");
-  });
-
-  test("a missing CLI is recorded and the wave still merges; the target is pushed all the same", async () => {
-    rmSync(join(forgeBin(), "gh"));
-    const repo = await waveRepo(undefined, "done", { remote: true });
-    const bare = origin(repo);
-    expect(await runWave(WAVE())).toBe(0);
-    const wave = await getWave();
-    expect(wave.stage).toBe("merged");
-    const events = await remoteEvents();
-    expect(events.some((event) => typeof event.error === "string" && event.error.startsWith("gh pr could not run"))).toBe(true);
-    expect([wave.remote?.number, wave.remote?.url, wave.remote?.pushed]).toEqual([null, null, git(repo, "rev-parse", "main")]);
-    expect(git(bare, "rev-parse", "main")).toBe(git(repo, "rev-parse", "main"));
-  });
-
-  test("an origin that is no GitHub or GitLab: pushed, the request recorded unsupported", async () => {
-    const repo = await waveRepo(undefined, "done", { remote: true });
-    const bare = origin(repo, "https://git.example.com/acme/app.git");
-    await runWave(WAVE());
-    expect((await getWave()).stage).toBe("merged");
-    expect((await remoteEvents()).some((event) => typeof event.error === "string" && event.error.startsWith("unsupported:"))).toBe(true);
-    expect(calls()).toEqual([]);
-    expect(git(bare, "rev-parse", "main")).toBe(git(repo, "rev-parse", "main"));
-  });
-});
-
 describe("pathFree", () => {
   test("a single-segment absolute path goes too", () => {
     const declaration = { id: "20000000-aaaa-4000-8000-000000000003", repo: "/srv/repo" } as Parameters<typeof pathFree>[0];
@@ -980,7 +711,7 @@ describe("the archive of a wave (contract archive-1)", () => {
     const dir = join(home(), "archive", "factory", "w1", WAVE().slice(0, 8));
     expect(waveArchiveDir(fold)).toBe(dir);
     expect(readFileSync(join(dir, "wave.jsonl"), "utf8")).toContain('"stage":"merged"');
-    expect(readFileSync(join(dir, "reviews", "round-1.request.md"), "utf8")).toBe(readFileSync(join(waveReviewsDir(WAVE()), "round-1.request.md"), "utf8"));
+    expect(readFileSync(join(dir, "reviews", "wave-round-1.diff.json"), "utf8")).toBe(readFileSync(join(waveReviewsDir(WAVE()), "wave-round-1.diff.json"), "utf8"));
     for (const key of ["a", "b"]) {
       expect(readFileSync(join(dir, "tasks", `${key}.jsonl`), "utf8")).toBe(readFileSync(session(key), "utf8"));
       expect(Math.abs(statSync(join(dir, "tasks", `${key}.jsonl`)).mtimeMs - statSync(session(key)).mtimeMs)).toBeLessThan(1);
@@ -1013,7 +744,7 @@ describe("the archive of a wave (contract archive-1)", () => {
     expect(await callAction("waves.remove", { id: WAVE() })).toEqual({ removed: WAVE() });
     expect(existsSync(join(home(), "waves", `${WAVE()}.jsonl`))).toBe(false);
     expect(readFileSync(join(dir, "wave.jsonl"), "utf8")).toBe(log);
-    expect([existsSync(join(dir, "reviews", "round-1.request.md")), existsSync(join(dir, "tasks", "b.jsonl")), existsSync(session("a"))]).toEqual([true, true, true]);
+    expect([existsSync(join(dir, "reviews", "wave-round-1.diff.json")), existsSync(join(dir, "tasks", "b.jsonl")), existsSync(session("a"))]).toEqual([true, true, true]);
   });
 
   test("a wave whose plan has a store is archived in the store's run/sessions; a plan without one in the factory home", async () => {

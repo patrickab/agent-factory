@@ -34,7 +34,7 @@ test("the tool's description, pinned: its sentences in the features' order (chan
   expect(FACTORY_TOOL_DESCRIPTION).toBe(
     [
     "Run coding work in the background: a task codes in its own git worktree of a repository with a committed factory.yaml, passes its gates and merges into its target.",
-    "\"tasks.start\" one self-contained task; \"waves.start\" a planned set of tasks (after = keys a task waits for) on one branch, reviewed as a whole and merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.",
+    "\"tasks.start\" one self-contained task; \"waves.start\" a planned set of tasks (after = keys a task waits for) on one branch, each task reviewed, then the whole, merged once; its after = tags or ids of waves it waits for: it stays queued until they are merged.",
     "\"contracts.apply\" changes one fact of a contract the waves list and tells their tasks.",
     "\"decisions.list\" lists the decisions of a session (your settling actions and what each answers).",
     "\"gates.prove\" runs a branch's merge_gates in the background before a wave is declared on it: passed, flaky or failing.",

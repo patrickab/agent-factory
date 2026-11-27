@@ -31,7 +31,6 @@ import {
   type MergeData,
   mergeFailedPrompt,
   parseStartPayload,
-  PROTOCOL_VERSION,
   RETRY_PROMPT,
   stateDraft,
   type Draft,
@@ -118,8 +117,6 @@ export interface OpsDeps {
    * `gates` and `task_gates` (env `FACTORY_BASE`), not `merge_gates`: the wave runs those. Absent: no wave.
    */
   wave?(): Promise<string | null>;
-  /** Whether this task's wave reviews each task (`reviewEach`): a passed round rests `reviewing`. Absent: never. */
-  reviewEach?(): Promise<boolean>;
 }
 
 export function newTaskSession(): TaskSession {
@@ -202,6 +199,7 @@ export async function openRun(deps: OpsDeps, current: Snapshot): Promise<RunOpen
 export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles, liveness: boolean): PipelineSteps {
   const { session, cwd: root } = deps;
   const { runner } = session;
+  const inWave = async () => ((await deps.wave?.()) ?? null) !== null;
   const status = (text: string) => {
     deps.setStatus(STATUS_KEY, text);
     if (liveness) deps.setStatus(LIVENESS_KEY, text);
@@ -237,14 +235,13 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
       };
       const message = session.snapshot?.commitMessage ?? commitMessageFallback(task.title);
       // A wave's task: what its change reaches, not the whole suite (the wave runs that once, before its reviewer).
-      const inWave = ((await deps.wave?.()) ?? null) !== null;
-      const gates = inWave ? { gates: [...config.gates, ...config.task_gates], baseEnv: true } : {};
+      const gates = (await inWave()) ? { gates: [...config.gates, ...config.task_gates], baseEnv: true } : {};
       return mergeTask({ exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent, status: mergeStatus, message, stop: () => runner.cancelled, ...gates });
     },
     openRebase: () => rebaseInProgress(runner.run, root),
     // A follow-up on a merged task is a new commit of its own: the task title already named the first one.
     askCommitMessage: () => !isConventionalTitle(task.title) || session.snapshot?.mergedCommit != null,
-    reviewEach: async () => (await deps.reviewEach?.()) ?? false,
+    inWave,
   };
 }
 
@@ -335,7 +332,7 @@ export function startTask(deps: OpsDeps, json: string): Promise<OpResult> {
       const loaded = await loadTaskFiles(session.runner.run, deps.cwd, taskGitFacts.baseSha);
       const coder = payload.settings.models.coder;
       if (coder && !(await deps.setModel(coder))) return { ok: false, error: `model ${coder} is not available` };
-      const task: Task = { title: payload.title, request: payload.request, settings: payload.settings, ...taskGitFacts, protocol: PROTOCOL_VERSION };
+      const task: Task = { title: payload.title, request: payload.request, settings: payload.settings, ...taskGitFacts };
       session.files = Promise.resolve(loaded);
       record(deps, "factory-task", task);
       record(deps, "factory-round", { round: 1, trigger: "start" });
@@ -350,17 +347,10 @@ export function startTask(deps: OpsDeps, json: string): Promise<OpResult> {
   });
 }
 
-/** An old merge request (`Task.kind`, invariant 7) is refused approve and retry here too: it can only be removed. */
-function mergeRequestRefusal(current: Snapshot, what: string): OpResult | undefined {
-  return current.task.kind === "merge_request" ? { ok: false, error: `this task is an old merge request: ${what} is refused, it can only be removed` } : undefined;
-}
-
 /** Merges a task that waits for approve. Answers at once: the merge runs in the background. */
 export async function approveTask(deps: OpsDeps): Promise<OpResult> {
   const current = deps.session.snapshot;
   if (!current) return { ok: false, error: "this session holds no task" };
-  const refused = mergeRequestRefusal(current, "approve");
-  if (refused) return refused;
   if (current.state !== "waiting_approve") return { ok: false, error: "the task is not waiting for approve" };
   if (!deps.isIdle()) return { ok: false, error: "the session is busy" };
   return guarded(async () => {
@@ -412,8 +402,6 @@ export async function applyReviewed(deps: OpsDeps, json: string): Promise<OpResu
 export async function retryTask(deps: OpsDeps): Promise<OpResult> {
   const current = deps.session.snapshot;
   if (!current) return { ok: false, error: "this session holds no task" };
-  const refusedRetry = mergeRequestRefusal(current, "retry");
-  if (refusedRetry) return refusedRetry;
   if (current.state !== "blocked" && current.state !== "cancelled") return { ok: false, error: "retry needs a blocked or cancelled task" };
   if (!deps.isIdle()) return { ok: false, error: "the session is busy" };
   return guarded(async () => {

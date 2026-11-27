@@ -57,13 +57,6 @@ describe("tasks.wait", () => {
     expect([result.attention, result.timedOut]).toEqual([[ID_2], false]);
   });
 
-  test("ignore leaves a task out of the watched ones", async () => {
-    await waitTask(ID_1, "w");
-    await waitTask(ID_2, "w", "done");
-    const result = await wait({ tag: "w", ignore: [ID_1] });
-    expect([result.tasks.map((view) => view.id), result.attention, result.timedOut]).toEqual([[ID_2], [], false]);
-  });
-
   test("times out after timeoutMs while a task has not rested; no watched task answers at once", async () => {
     await waitTask(ID_1, "w");
     const started = Date.now();

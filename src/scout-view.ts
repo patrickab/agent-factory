@@ -24,8 +24,4 @@ export function scoutBlock(scout: ScoutView, timedOut = false): string {
 export const SCOUT_RENDERERS = {
   "scouts.start": (_params: Record<string, unknown>, result: { scout: ScoutView; timedOut: boolean }) => scoutBlock(result.scout, result.timedOut),
   "scouts.get": (_params: Record<string, unknown>, result: { scout: ScoutView }) => scoutBlock(result.scout),
-  "scouts.list": (_params: Record<string, unknown>, result: { scouts: ScoutView[] }) =>
-    result.scouts.length === 0
-      ? "no scouts"
-      : result.scouts.map((scout) => `${head(scout)}  ${scout.caller.kind} ${(scout.caller.id ?? "-").slice(0, 8)}  ${scout.concern}`).join("\n"),
 };

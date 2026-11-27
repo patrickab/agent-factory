@@ -12,22 +12,13 @@ import { listTasks } from "./tasks.ts";
 useCoreFixture();
 
 describe("repos", () => {
-  test("add registers the primary checkout, list names it, remove unregisters", async () => {
+  test("add registers the primary checkout, list names it", async () => {
     const repo = makeRepo();
     git(repo, "worktree", "add", "--quiet", "-b", "side", join(caseDir, "side"));
     expect(await callAction("repos.list", {})).toEqual({ repos: [] });
     expect(await callAction("repos.add", { repo: "side" }, { cwd: caseDir })).toEqual({ repo, repos: [repo] });
     expect(await callAction("repos.add", {}, { cwd: repo })).toEqual({ repo, repos: [repo] });
     expect(await callAction("repos.list", {})).toEqual({ repos: [repo] });
-    expect(await callAction("repos.remove", { repo })).toEqual({ repos: [] });
-    await expectError(callAction("repos.remove", { repo }), "not_found", `${repo} is not registered`);
-  });
-
-  test("remove takes a registered path whose repository is gone", async () => {
-    const repo = makeRepo();
-    await callAction("repos.add", { repo });
-    rmSync(repo, { recursive: true, force: true });
-    expect(await callAction("repos.remove", { repo })).toEqual({ repos: [] });
   });
 
   test("core.ts and what it imports load without node_modules", () => {
@@ -117,24 +108,16 @@ describe("models", () => {
 });
 
 describe("branches, settings, config", () => {
-  test("branches.list: name, default, hasConfig", async () => {
+  test("branches.list: the local branches", async () => {
     const repo = makeRepo();
-    git(repo, "checkout", "--quiet", "-b", "bare");
-    git(repo, "rm", "--quiet", "factory.yaml");
-    git(repo, "commit", "--quiet", "-m", "no config");
-    git(repo, "checkout", "--quiet", "main");
-    expect(await callAction("branches.list", { repo })).toEqual({
-      branches: [
-        { name: "bare", default: false, hasConfig: false },
-        { name: "main", default: true, hasConfig: true },
-      ],
-    });
+    git(repo, "branch", "bare");
+    expect(await callAction("branches.list", { repo })).toEqual({ branches: [{ name: "bare" }, { name: "main" }] });
   });
 
   test("settings.get and settings.set: stored, resolved, defaults; preview passes through; invalid values refused", async () => {
     const repo = makeRepo();
     // Nothing stored: no model (Pi's session model), not the ones of defaults.yaml.
-    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, remote: false, squash: false };
+    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, squash: false };
     expect(await callAction("settings.get", { repo })).toEqual({ stored: {}, resolved: defaults, defaults });
     // The names as before, as the settings panel sends them: answered and stored as they are, big added equal to coder.
     const set = await callAction("settings.set", { repo, settings: { merge: "review", preview: true, models: { coder: "a/b" } } });
@@ -155,12 +138,9 @@ describe("branches, settings, config", () => {
     expect(await callAction("repos.list", {})).toEqual({ repos: [repo] });
   });
 
-  test("config.get: the working copy, a branch's committed file, a draft when there is none", async () => {
+  test("config.get: the working copy, a draft when there is none", async () => {
     const repo = makeRepo();
     expect(await callAction("config.get", { repo })).toEqual({ exists: true, text: "gates: []\n", draft: null, source: [] });
-    writeFileSync(join(repo, "factory.yaml"), "gates: [[make, lint]]\n");
-    expect(((await callAction("config.get", { repo, branch: "main" })) as { text: string }).text).toBe("gates: []\n");
-    await expectError(callAction("config.get", { repo, branch: "nope" }), "not_found", "has no local branch nope");
     rmSync(join(repo, "factory.yaml"));
     writeFileSync(join(repo, "package.json"), JSON.stringify({ scripts: { lint: "eslint ." } }));
     const drafted = (await callAction("config.get", { repo })) as { exists: boolean; text: null; draft: string; source: string[] };

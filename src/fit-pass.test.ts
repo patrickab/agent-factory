@@ -1,5 +1,5 @@
 /**
- * The end-of-wave fit pass of a `reviewEach` wave (review/1): `merge_gates`, then the wave's reviewer session passes
+ * The end-of-wave fit pass of a wave (review/1): `merge_gates`, then the wave's reviewer session passes
  * once on how the tasks fit together. Real git repos, the core kit's fake `pi` for the tasks, a fake reviewer
  * (`--mode json`) in front of it that answers `$FAKE_FIT_VERDICT` and notes its argv, a detached wave runner.
  */
@@ -55,7 +55,7 @@ const calls = (): { args: string[]; task: string | null; diff: string | null }[]
   existsSync(reviewerCalls()) ? readFileSync(reviewerCalls(), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
 
 /**
- * A repo whose `reviewEach` wave holds the done tasks `keys` (a commit on the wave's branch each); `fixes` of them
+ * A repo whose wave holds the done tasks `keys` (a commit on the wave's branch each); `fixes` of them
  * were started by the reviewer (`fix-<n>`).
  */
 async function doneWave(keys: string[], fixes: string[] = []): Promise<string> {
@@ -70,9 +70,9 @@ async function doneWave(keys: string[], fixes: string[] = []): Promise<string> {
     git(work, "commit", "--quiet", "-m", `feat: ${key}`);
   }
   git(repo, "worktree", "remove", work);
-  await createWave({ id: WAVE, repo, tag: "factory/fit", plan: null, title: "Fit wave", request: "Check the fit.", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {}, reviewEach: true });
-  await appendWaveEvent(WAVE, { kind: "tasks", tasks: keys.map((key) => ({ key, title: `Add ${key}`, request: `add ${key}.txt`, after: [] })) });
-  if (fixes.length > 0) await appendWaveEvent(WAVE, { kind: "tasks", tasks: fixes.map((key) => ({ key, title: `fix: ${key}`, request: `fix ${key}`, after: [] })), by: "reviewer" });
+  await createWave({ id: WAVE, repo, tag: "factory/fit", plan: null, title: "Fit wave", request: "Check the fit.", branch: BRANCH, target: "main", base, origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
+  await appendWaveEvent(WAVE, { kind: "tasks", tasks: keys.map((key) => ({ key, title: `Add ${key}`, request: `add ${key}.txt`, after: [], id: crypto.randomUUID() })) });
+  if (fixes.length > 0) await appendWaveEvent(WAVE, { kind: "tasks", tasks: fixes.map((key) => ({ key, title: `fix: ${key}`, request: `fix ${key}`, after: [], id: crypto.randomUUID() })), by: "reviewer" });
   for (const [index, key] of [...keys, ...fixes].entries()) {
     const record: TaskRecord = { id: `42000000-${RUN}-4000-8000-00000000000${index}`, repo, worktree: join(caseDir, `task-${key}`), branch: `task-${key}`, title: `Add ${key}`, sessionId: `session-${RUN}-fit-${key}`, sessionDir: join(caseDir, "sessions"), createdAt: `2026-01-01T00:00:0${index}.000Z`, tag: "factory/fit", plan: null, wave: WAVE, origin: null };
     await writeTask(record);
@@ -82,7 +82,7 @@ async function doneWave(keys: string[], fixes: string[] = []): Promise<string> {
   return repo;
 }
 
-describe("the fit pass of a reviewEach wave", () => {
+describe("the fit pass of a wave", () => {
   test("approved: the wave merges; the pass resumes the wave's reviewer session on the wave's whole diff", async () => {
     const repo = await doneWave(["a", "b"]);
     await pokeWave(WAVE);
@@ -141,7 +141,7 @@ describe("the fit pass of a reviewEach wave", () => {
     const before = (await fold()) as StartedWaveFold;
     const event: Parameters<typeof afterFit>[3] = { kind: "review", round: 1, sessionId: null, model: null, verdict: "rejected", status: "ok", findings: [{ severity: "major", file: "a.txt", line: null, text: "x" }], usage: null, wallMs: 0 };
     // A supervisor's task keyed `fix-1` lands before the pass: the reviewer's fix is fix-2.
-    await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "fix-1", title: "fix: by hand", request: "r", after: [] }] });
+    await appendWaveEvent(WAVE, { kind: "tasks", tasks: [{ key: "fix-1", title: "fix: by hand", request: "r", after: [], id: crypto.randomUUID() }] });
     const withSupervisorFix = (await fold()) as StartedWaveFold;
     const choice = afterFit(withSupervisorFix, withSupervisorFix, 1, event);
     expect(choice.detail).toEndWith("task fix-2 fixes it");

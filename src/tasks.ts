@@ -8,17 +8,13 @@
  *   then acts on it (spawns a runner, deletes the task) holds it, and a spawned runner holds it until it exits. The
  *   file holds `<pid> <start time>` of its holder; a holder that no longer runs (`hostLiveness`) leaves a stale lock
  *   the next `lockTask` takes over; a lock a live process holds is a `TaskBusyError`
- * - A record written before `tag`, `plan`, `wave` and `origin` existed reads with their defaults (`systemUser()`, null,
- *   null, null).
- *   Of the `kind` field of older records only `merge_request` is kept (`kind`), so such a task keeps its old limits:
- *   its branch is its source, never the task's own; no coder runs it again
  */
 import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { hostLiveness, procStart } from "./queue.ts";
 import { factoryHome } from "./settings.ts";
-import { errorText, isRecord } from "./util.ts";
+import { errorText } from "./util.ts";
 
 export interface TaskRecord {
   id: string;
@@ -42,11 +38,6 @@ export interface TaskRecord {
   /** The Pi session that started the task (a wave's task: the wave's), notified when it needs attention; null otherwise. */
   origin: string | null;
   /**
-   * Only on a record written while merge requests existed (`kind: "merge_request"`): its `branch` is the source branch
-   * it merged, which it never owned. Internal: no `TaskView` shows it.
-   */
-  kind?: "merge_request";
-  /**
    * A wave's task with contracts (`contracts.ts`): each contract's stamp (its hash and its facts' hashes) as the task
    * last saw it. Absent: no contracts.
    */
@@ -58,18 +49,6 @@ export interface TaskRecord {
 /** A contract as a task saw it: the hash of the whole and of each fact (by its path in the store). */
 export type ContractStamp = { hash: string; facts: Record<string, string> };
 
-function parseStamps(raw: unknown): Record<string, ContractStamp> {
-  const bad = () => new Error("contracts must map names to {hash, facts}");
-  if (!isRecord(raw)) throw bad();
-  const stamps: Record<string, ContractStamp> = {};
-  for (const [name, stamp] of Object.entries(raw)) {
-    if (!isRecord(stamp) || typeof stamp.hash !== "string" || !isRecord(stamp.facts) || !Object.values(stamp.facts).every((hash) => typeof hash === "string")) throw bad();
-    stamps[name] = { hash: stamp.hash, facts: { ...(stamp.facts as Record<string, string>) } };
-  }
-  return stamps;
-}
-
-const RECORD_KEYS = ["id", "repo", "worktree", "branch", "title", "sessionId", "sessionDir", "createdAt"] as const;
 /** The shape of `crypto.randomUUID()`: a task id never holds a path separator. */
 const TASK_ID = /^[0-9a-f-]{36}$/;
 const TAG = /^[A-Za-z0-9._@+-]+(\/[A-Za-z0-9._@+-]+)*$/;
@@ -110,30 +89,6 @@ export function taskLockPath(id: string): string {
   return join(tasksDir(), `${id}.lock`);
 }
 
-export function parseTaskRecord(raw: unknown, id: string): TaskRecord {
-  if (!isRecord(raw)) throw new Error("the record is not an object");
-  for (const key of RECORD_KEYS) {
-    if (typeof raw[key] !== "string" || raw[key] === "") throw new Error(`${key} must be a non-empty string`);
-  }
-  if (raw.id !== id) throw new Error(`id ${String(raw.id)} is not the file's name`);
-  // A defaulted tag is not checked: an odd user name must not hide every old task.
-  const tag = raw.tag ?? systemUser();
-  if (typeof tag !== "string" || (raw.tag != null && !isTaskTag(tag))) throw new Error(`tag ${JSON.stringify(tag)} is not segments of A-Z a-z 0-9 . _ @ + - joined by /`);
-  const plan = raw.plan ?? null;
-  if (plan !== null && (typeof plan !== "string" || plan.trim() === "")) throw new Error("plan must be a non-empty string or null");
-  const wave = raw.wave ?? null;
-  if (wave !== null && (typeof wave !== "string" || wave === "")) throw new Error("wave must be a non-empty string or null");
-  const origin = raw.origin ?? null;
-  if (origin !== null && (typeof origin !== "string" || origin === "")) throw new Error("origin must be a non-empty string or null");
-  const fields = {} as Record<(typeof RECORD_KEYS)[number], string>;
-  for (const key of RECORD_KEYS) fields[key] = raw[key] as string;
-  const contracts = raw.contracts == null ? {} : { contracts: parseStamps(raw.contracts) };
-  const notes = raw.contractNotes;
-  if (notes != null && (!Array.isArray(notes) || !notes.every((note) => typeof note === "string"))) throw new Error("contractNotes must be an array of strings");
-  const contractNotes = notes == null || notes.length === 0 ? {} : { contractNotes: [...(notes as string[])] };
-  return { ...fields, tag, plan, wave, origin, ...(raw.kind === "merge_request" ? { kind: "merge_request" as const } : {}), ...contracts, ...contractNotes };
-}
-
 /** Temp file in the same directory + rename: a reader sees the old record or the new one, never half of one. */
 export async function writeTask(record: TaskRecord): Promise<void> {
   await mkdir(tasksDir(), { recursive: true });
@@ -153,7 +108,9 @@ export async function readTask(id: string): Promise<TaskRecord> {
   const path = taskPath(id);
   if (!TASK_ID.test(id)) throw new Error(`${path}: ${id} is not a task id`);
   try {
-    return parseTaskRecord(JSON.parse(await readFile(path, "utf8")), id);
+    const record = JSON.parse(await readFile(path, "utf8")) as TaskRecord;
+    if (record.id !== id) throw new Error(`id ${String(record.id)} is not the file's name`);
+    return record;
   } catch (error) {
     throw new Error(`${path}: ${errorText(error)}`);
   }
@@ -175,6 +132,11 @@ export async function listTasks(repo?: string): Promise<TaskRecord[]> {
     if (record !== undefined && (repo === undefined || record.repo === repo)) records.push(record);
   }
   return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/** The record of the task whose Pi session is `sessionId`. */
+export async function sessionTask(sessionId: string): Promise<TaskRecord | undefined> {
+  return (await listTasks()).find((task) => task.sessionId === sessionId);
 }
 
 /** Removes the record, its runner log and its lock. The worktree, branch and session file stay. */

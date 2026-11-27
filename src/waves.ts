@@ -17,7 +17,7 @@
  */
 import { link, mkdir, open, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { FactoryError } from "./core-shared.ts";
-import { FACTORY_TURN_STATES, MODEL_SIZES, normalizeModels, parseSettingsFields, RESTING_STATES, type MinorFinding, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
+import { FACTORY_TURN_STATES, MODEL_SIZES, RESTING_STATES, type MinorFinding, type ModelChoice, type ModelSize, type Settings, type State } from "./state.ts";
 import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
 import { errorText, isRecord } from "./util.ts";
 import { isWaveId, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, waveReviewsDir, wavesDir } from "./wave-poke.ts";
@@ -39,23 +39,21 @@ export type Usage = { input: number; output: number; cacheRead: number; cacheWri
 export type WaveTaskSpec = { key: string; title: string; request: string; after?: string[]; model?: ModelSize };
 
 /**
- * A task spec as the `tasks` event stores it; without `model` (old logs too) the task runs with the `big` model. `id`:
- * the task's id, given when it is declared and taken by its launch; absent in logs written before, then the launch makes one.
+ * A task spec as the `tasks` event stores it; without `model` the task runs with the `big` model. `id`: the task's id,
+ * given when it is declared and taken by its launch.
  */
-export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: ModelSize; id?: string };
+export type WaveTaskEntry = { key: string; title: string; request: string; after: string[]; model?: ModelSize; id: string };
 
 export const WAVE_STAGES: readonly WaveStage[] = ["queued", "building", "reviewing", "rejected", "merging", "waiting_approve", "merged", "blocked", "cancelled"];
 /** `queued` too: no runner drives a wave that waits for others, a merge of one of them pokes it (`queuedWaves`). */
 export const RESTING_WAVE_STAGES: readonly WaveStage[] = ["queued", "rejected", "waiting_approve", "merged", "blocked", "cancelled"];
-const WAVE_REASONS: readonly WaveReason[] = ["conflict", "gates", "dirty", "infra", "review_failed"];
 
 /**
  * The settings `waves.start` got, stored with the wave. Its tasks start with `models`, `maxRounds` and `review` from
  * them, `branch` = the wave's branch and `merge: "auto"`; `merge` is the wave's own (`review`: wait for approve), so is
- * `remote` (the wave is shown on the origin's forge, `remote.ts`; absent = off), and `squash` (the wave lands as one
- * commit, `merge.ts`; absent = off, stored only when on).
+ * `squash` (the wave lands as one commit, `merge.ts`; absent = off, stored only when on).
  */
-export type WaveOverrides = { models?: ModelChoice; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; remote?: boolean; squash?: boolean };
+export type WaveOverrides = { models?: ModelChoice; maxRounds?: number; merge?: Settings["merge"]; review?: boolean; squash?: boolean };
 
 /**
  * Line 1 of a wave's file. `base`: the commit the wave branched from; `origin`: the declaring Pi session's id. `after`:
@@ -76,11 +74,9 @@ export interface WaveDeclaration {
   after?: string[];
   /** The contracts (memory-store, the store is `plan`) its tasks work by (absent: none). */
   contracts?: string[];
-  /** Its reviewer judges each task once its gates passed, before it merges (`review-each.ts`). Absent: false. */
-  reviewEach?: boolean;
   origin: string | null;
   createdAt: string;
-  /** Stored only: not part of a `WaveView`. A file without it reads as `{}`. */
+  /** Stored only: not part of a `WaveView`. */
   overrides: WaveOverrides;
 }
 
@@ -97,7 +93,7 @@ export type WaveReview = {
   wallMs: number;
 };
 /**
- * One review of a task of a `reviewEach` wave (`review-each.ts`): `key`/`taskId` the task, `round` the task's round
+ * One review of a task of a wave (`review-each.ts`): `key`/`taskId` the task, `round` the task's round
  * judged, `tree` the worktree's tree it judged on `base` (the next review's diff starts there while the base stays),
  * `contracts` the hash of the contracts' text in its prompt (null: none).
  */
@@ -108,19 +104,15 @@ export type WaveGate = { at: string; phase: "review" | "merge"; passed: boolean;
  * The commit range that reached the target. A `squash` wave's (one commit, `to`) also names `ref`, the ref that keeps
  * its task commits, and `commits`, how many; absent otherwise.
  */
-export type WaveMerge = { at: string; from: string; to: string; queueMs: number; ref?: string; commits?: number };
-/** `merged`: the forge's commit of a `squash` wave it merged (absent until then). */
-export type WaveRemote = { number: number | null; url: string | null; pushed: string | null; error: string | null; merged?: string | null };
-/** A rebase onto the target whose conflicts were all additions on both sides, resolved by the factory (`additions-merge.ts`). */
-export type WaveResolved = { at: string; phase: "review" | "merge"; onto: string; files: string[] };
+export type WaveMerge = { at: string; from: string; to: string; ref?: string; commits?: number };
 /**
- * A rebase onto the target that was not additions-only (`wave-runner.ts`): the wave builds again with the task `key`,
+ * A rebase onto the target that conflicted (`wave-runner.ts`): the wave builds again with the task `key`,
  * whose worktree holds the wave's branch `head` merged onto the target's tip `onto` with the markers left
  * (`core-waves.ts`). `files`: the conflicting paths.
  */
 export type WaveConflict = { at: string; phase: "review" | "merge"; key: string; head: string; onto: string; files: string[] };
 
-/** One line after the declaration. A `remote` event sets only the fields it carries. */
+/** One line after the declaration. */
 export type WaveEvent =
   /** `by: "reviewer"`: added by the wave's reviewer (`start_fix`), counted against `REVIEWER_FIX_CAP`; absent otherwise. */
   | { at: string; kind: "tasks"; tasks: WaveTaskEntry[]; dropped?: string[]; by?: "reviewer" }
@@ -132,7 +124,6 @@ export type WaveEvent =
   | ({ kind: "review" } & WaveReview)
   | ({ kind: "task_review" } & WaveTaskReview)
   | ({ kind: "merge" } & WaveMerge)
-  | ({ at: string; kind: "remote" } & Partial<WaveRemote>)
   /** `contracts.apply` changed the contract `name` (its facts `paths`); `done`: the wave's done tasks, reported to the supervisor. */
   | { at: string; kind: "contract"; name: string; paths: string[]; done: string[] }
   /**
@@ -142,8 +133,6 @@ export type WaveEvent =
   | { at: string; kind: "update"; key?: string; title?: string; request?: string; after?: string[]; model?: ModelSize }
   /** The runner launches the pending task `key` with its spec as folded now (`title`, `request`: the text it launched with); its `task` event follows (or a `stage` event). */
   | { at: string; kind: "launch"; key: string; title?: string; request?: string }
-  /** The rebase onto the target `onto` conflicted only where both sides added lines: resolved ours then theirs. */
-  | ({ kind: "resolved" } & WaveResolved)
   | ({ kind: "conflict" } & WaveConflict)
   /** The wave's reviewer told the supervisor `text` (`notify_supervisor`), while reviewing the task `taskId` (null: none). */
   | { at: string; kind: "note"; text: string; taskId: string | null };
@@ -173,8 +162,8 @@ export type FoldedTask = {
   model: ModelSize;
   taskId: string | null;
   sessionId: string | null;
-  /** The id declared with its spec (absent in old logs): the started task's id too. */
-  id?: string;
+  /** The id declared with its spec: the started task's id too. */
+  id: string;
   dropped?: boolean;
   /** The runner launches it (a `launch` event), its `task` event has not come yet. */
   launching?: boolean;
@@ -193,11 +182,8 @@ export interface WaveFold extends WaveDeclaration {
   reviews: WaveReview[];
   gates: WaveGate[];
   merge: WaveMerge | null;
-  remote: WaveRemote | null;
-  /** The `update` events, oldest first; absent when none (a log without them folds as before). */
+  /** The `update` events, oldest first; absent when none. */
   updates?: WaveUpdate[];
-  /** The `resolved` events, oldest first; absent when none. */
-  resolved?: WaveResolved[];
   /** The `conflict` events, oldest first; absent when none. */
   conflicts?: WaveConflict[];
   /** The `task_review` events, oldest first; absent when none. */
@@ -215,7 +201,7 @@ export function waveStarted(fold: WaveFold): fold is StartedWaveFold {
 }
 
 /** A wave as every client sees it (the contract's shape); the core builds it from the fold and the tasks. */
-export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
+export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after" | "base" | "contracts"> {
   /** The ids of the waves it waits for (`queued` until every one is `merged`), `[]` when none. */
   after: string[];
   stage: WaveStage;
@@ -226,8 +212,8 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   interrupted: boolean;
   /** Its runner waits for a test slot (`test-slots.ts`) to run a merge gate; absent otherwise. */
   waitingForSlot?: true;
-  /** `id`: the task's id, a pending one's too (declared with it); absent for a pending task of an old log. */
-  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null; id?: string }[];
+  /** `id`: the task's id, a pending one's too (declared with it). */
+  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: string; usage: Usage | null; id: string }[];
   counts: { total: number; done: number };
   reviews: WaveReview[];
   /**
@@ -237,18 +223,9 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after"> {
   minors?: MinorFinding[];
   gates: WaveGate[];
   merge: WaveMerge | null;
-  remote: WaveRemote | null;
   /** What `tasks.update` and `waves.update` changed, oldest first; absent when nothing did. */
   updates?: WaveUpdate[];
-  /** The rebases whose additions-only conflicts the factory resolved, oldest first; absent when none. */
-  resolved?: WaveResolved[];
-  /** The conflicts a task was added for (`conflict-<n>`), oldest first; absent when none. */
-  conflicts?: WaveConflict[];
-  /** The reviews of its tasks (`reviewEach`), oldest first; their usage counts in the tasks' own. Absent when none. */
-  taskReviews?: WaveTaskReview[];
   usage: Usage | null;
-  /** The part of `usage.cost` the wave's and its tasks' scouts spent. Always set by the core. */
-  scoutingCost?: number;
   actions: string[];
   /** What the agents reported (`feedback.ts`), oldest first; only `waves.get` reads the store. */
   feedback?: FeedbackEntry[];
@@ -287,229 +264,20 @@ async function withLogLock<T>(id: string, act: () => Promise<T>): Promise<T> {
 
 // ---- parsing ----
 
-function str(raw: Record<string, unknown>, key: string, nonEmpty = true): string {
-  const value = raw[key];
-  if (typeof value !== "string" || (nonEmpty && value === "")) throw new Error(`${key} must be a ${nonEmpty ? "non-empty " : ""}string`);
-  return value;
-}
-
-function strOrNull(raw: Record<string, unknown>, key: string): string | null {
-  const value = raw[key] ?? null;
-  if (value !== null && typeof value !== "string") throw new Error(`${key} must be a string or null`);
-  return value;
-}
-
-function num(raw: Record<string, unknown>, key: string): number {
-  const value = raw[key];
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${key} must be a number`);
-  return value;
-}
-
-function oneOf<T extends string>(raw: Record<string, unknown>, key: string, values: readonly T[]): T {
-  const value = raw[key];
-  if (!values.includes(value as T)) throw new Error(`${key} must be one of ${values.join(", ")}`);
-  return value as T;
-}
-
-function usageOf(raw: unknown): Usage | null {
-  if (raw === null || raw === undefined) return null;
-  if (!isRecord(raw)) throw new Error("usage must be an object or null");
-  // Old log entries predate the cache fields: absent reads as 0.
-  const cache = (key: string) => (raw[key] === undefined ? 0 : num(raw, key));
-  return { input: num(raw, "input"), output: num(raw, "output"), cacheRead: cache("cacheRead"), cacheWrite: cache("cacheWrite"), cost: num(raw, "cost") };
-}
-
-export function parseWaveOverrides(raw: unknown, prefix = "overrides."): WaveOverrides {
-  if (raw === null || raw === undefined) return {};
-  if (!isRecord(raw)) throw new Error(`${prefix.slice(0, -1)} must be an object`);
-  const { branch: _branch, models, ...fields } = parseSettingsFields(raw, prefix);
-  // Old declarations stored `{coder, reviewer}`: read as the contract's compatibility line says.
-  const parsed: WaveOverrides = models === undefined ? fields : { ...fields, models: normalizeModels(models) };
-  for (const key of ["remote", "squash"] as const) {
-    if (raw[key] === undefined) continue;
-    if (typeof raw[key] !== "boolean") throw new Error(`${prefix}${key} must be a boolean`);
-    parsed[key] = raw[key];
-  }
-  return parsed;
-}
-
-/** A string array, or undefined when absent. */
-function strings(raw: Record<string, unknown>, key: string): string[] | undefined {
-  const value = raw[key];
-  if (value === undefined || value === null) return undefined;
-  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) throw new Error(`${key} must be an array of strings`);
-  return [...value];
-}
-
-export function parseWaveDeclaration(raw: unknown, id: string): WaveDeclaration {
-  if (!isRecord(raw)) throw new Error("the declaration is not an object");
-  const after = strings(raw, "after");
-  const contracts = strings(raw, "contracts");
-  const declaration: WaveDeclaration = {
-    id: str(raw, "id"),
-    repo: str(raw, "repo"),
-    tag: str(raw, "tag"),
-    plan: strOrNull(raw, "plan"),
-    title: str(raw, "title"),
-    request: str(raw, "request", false),
-    // A queued wave has neither until its `start` event; every other declaration has both.
-    branch: after === undefined ? str(raw, "branch") : strOrNull(raw, "branch"),
-    target: str(raw, "target"),
-    base: after === undefined ? str(raw, "base") : strOrNull(raw, "base"),
-    ...(after === undefined ? {} : { after }),
-    ...(contracts === undefined ? {} : { contracts }),
-    ...(raw.reviewEach === true ? { reviewEach: true } : {}),
-    origin: strOrNull(raw, "origin"),
-    createdAt: str(raw, "createdAt"),
-    overrides: parseWaveOverrides(raw.overrides),
-  };
-  if (declaration.id !== id) throw new Error(`id ${declaration.id} is not the file's name`);
-  return declaration;
-}
-
-function parseSpec(raw: unknown): WaveTaskEntry {
-  if (!isRecord(raw)) throw new Error("a task is not an object");
-  const after = raw.after ?? [];
-  if (!Array.isArray(after) || !after.every((key) => typeof key === "string")) throw new Error("after must be an array of keys");
-  const model = strOrNull(raw, "model");
-  if (model !== null && !MODEL_SIZES.includes(model as ModelSize)) throw new Error('model must be "small", "big" or null');
-  const id = strOrNull(raw, "id");
-  return { key: str(raw, "key"), title: str(raw, "title"), request: str(raw, "request", false), after: [...after], ...(model === null ? {} : { model: model as ModelSize }), ...(id === null ? {} : { id }) };
-}
-
-function parseFinding(raw: unknown): WaveFinding {
-  if (!isRecord(raw)) throw new Error("a finding is not an object");
-  const line = raw.line ?? null;
-  if (line !== null && typeof line !== "number") throw new Error("line must be a number or null");
-  return { severity: oneOf(raw, "severity", ["blocker", "major", "minor"] as const), file: str(raw, "file", false), line, text: str(raw, "text", false) };
-}
-
-function parseReview(raw: Record<string, unknown>): Omit<WaveReview, "at"> {
-  if (!Array.isArray(raw.findings)) throw new Error("findings must be an array");
-  return {
-    round: num(raw, "round"),
-    sessionId: strOrNull(raw, "sessionId"),
-    model: strOrNull(raw, "model"),
-    verdict: oneOf(raw, "verdict", ["approved", "rejected", "failed"] as const),
-    status: str(raw, "status"),
-    findings: raw.findings.map(parseFinding),
-    usage: usageOf(raw.usage),
-    wallMs: num(raw, "wallMs"),
-  };
-}
-
-export function parseWaveEvent(raw: unknown): WaveEvent {
-  if (!isRecord(raw)) throw new Error("the event is not an object");
-  const at = str(raw, "at");
-  const kind = raw.kind;
-  switch (kind) {
-    case "tasks": {
-      if (!Array.isArray(raw.tasks)) throw new Error("tasks must be an array");
-      const event: WaveEvent = { at, kind, tasks: raw.tasks.map(parseSpec) };
-      if (raw.dropped !== undefined && raw.dropped !== null) {
-        if (!Array.isArray(raw.dropped) || !raw.dropped.every((key) => typeof key === "string")) throw new Error("dropped must be an array of keys");
-        event.dropped = [...raw.dropped];
-      }
-      if (raw.by === "reviewer") event.by = "reviewer";
-      return event;
-    }
-    case "task":
-      return { at, kind, key: str(raw, "key"), taskId: str(raw, "taskId"), sessionId: str(raw, "sessionId") };
-    case "stage": {
-      const stage = oneOf(raw, "stage", WAVE_STAGES);
-      const reason = raw.reason ?? null;
-      if (reason !== null && !WAVE_REASONS.includes(reason as WaveReason)) throw new Error(`reason must be one of ${WAVE_REASONS.join(", ")} or null`);
-      const event: WaveEvent = { at, kind, stage, reason: reason as WaveReason | null };
-      const detail = strOrNull(raw, "detail");
-      if (detail !== null) event.detail = detail;
-      return event;
-    }
-    case "start":
-      return { at, kind, branch: str(raw, "branch"), base: str(raw, "base") };
-    case "gate": {
-      if (typeof raw.passed !== "boolean") throw new Error("passed must be a boolean");
-      const event: WaveEvent = { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), passed: raw.passed, wallMs: num(raw, "wallMs"), log: strOrNull(raw, "log") };
-      const commit = strOrNull(raw, "commit");
-      if (commit !== null) event.commit = commit;
-      if (Array.isArray(raw.flaky)) event.flaky = raw.flaky.filter((name): name is string => typeof name === "string");
-      return event;
-    }
-    case "review":
-      return { at, kind, ...parseReview(raw) };
-    case "task_review":
-      return { at, kind, ...parseReview(raw), key: str(raw, "key"), taskId: str(raw, "taskId"), tree: str(raw, "tree"), base: str(raw, "base"), contracts: strOrNull(raw, "contracts") };
-    case "merge": {
-      const event: WaveEvent = { at, kind, from: str(raw, "from"), to: str(raw, "to"), queueMs: num(raw, "queueMs") };
-      if (raw.ref !== undefined) event.ref = str(raw, "ref");
-      if (raw.commits !== undefined) event.commits = num(raw, "commits");
-      return event;
-    }
-    case "remote": {
-      const event: WaveEvent = { at, kind };
-      if ("number" in raw) {
-        if (raw.number !== null && typeof raw.number !== "number") throw new Error("number must be a number or null");
-        event.number = raw.number;
-      }
-      for (const key of ["url", "pushed", "error", "merged"] as const) if (key in raw) event[key] = strOrNull(raw, key);
-      return event;
-    }
-    case "contract":
-      return { at, kind, name: str(raw, "name"), paths: strings(raw, "paths") ?? [], done: strings(raw, "done") ?? [] };
-    case "update": {
-      const event: WaveEvent = { at, kind };
-      if (raw.key !== undefined && raw.key !== null) event.key = str(raw, "key");
-      if (raw.title !== undefined && raw.title !== null) event.title = str(raw, "title");
-      if (raw.request !== undefined && raw.request !== null) event.request = str(raw, "request");
-      const after = strings(raw, "after");
-      if (after !== undefined) event.after = after;
-      if (raw.model !== undefined && raw.model !== null) event.model = oneOf(raw, "model", MODEL_SIZES);
-      return event;
-    }
-    case "launch":
-      return { at, kind, key: str(raw, "key"), ...(typeof raw.title === "string" && typeof raw.request === "string" ? { title: raw.title, request: raw.request } : {}) };
-    case "resolved":
-      return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), onto: str(raw, "onto"), files: strings(raw, "files") ?? [] };
-    case "conflict":
-      return { at, kind, phase: oneOf(raw, "phase", ["review", "merge"] as const), key: str(raw, "key"), head: str(raw, "head"), onto: str(raw, "onto"), files: strings(raw, "files") ?? [] };
-    case "note":
-      return { at, kind, text: str(raw, "text", false), taskId: strOrNull(raw, "taskId") };
-    default:
-      throw new Error(`kind ${JSON.stringify(kind)} is no wave event`);
-  }
-}
-
-/**
- * The declaration and events of a file's text. A line that is no JSON is a torn append (a writer died mid-line) and is
- * skipped, so is a last line without its newline; a JSON line that is no event makes the file invalid.
- */
-export function parseWaveFile(text: string, id: string): WaveFile {
-  const lines = text.split("\n");
+/** The declaration and events of a file's text; a line that is no JSON is a torn append and is skipped. */
+export function parseWaveFile(text: string): WaveFile {
   // A complete file ends with "\n": the last element is "" then, else it is a torn line.
-  lines.pop();
-  const [head] = lines;
+  const [head, ...rest] = text.split("\n").slice(0, -1);
   if (head === undefined) throw new Error("the file has no declaration");
-  let first: unknown;
-  try {
-    first = JSON.parse(head);
-  } catch (error) {
-    throw new Error(`line 1: ${errorText(error)}`);
-  }
-  const declaration = parseWaveDeclaration(first, id);
   const events: WaveEvent[] = [];
-  for (const [index, line] of lines.slice(1).entries()) {
-    let raw: unknown;
+  for (const line of rest) {
     try {
-      raw = JSON.parse(line);
+      events.push(JSON.parse(line) as WaveEvent);
     } catch {
-      continue;
-    }
-    try {
-      events.push(parseWaveEvent(raw));
-    } catch (error) {
-      throw new Error(`line ${index + 2}: ${errorText(error)}`);
+      // a torn append
     }
   }
-  return { declaration, events };
+  return { declaration: JSON.parse(head) as WaveDeclaration, events };
 }
 
 // ---- the file ----
@@ -517,7 +285,6 @@ export function parseWaveFile(text: string, id: string): WaveFile {
 /** Writes a new wave's file holding its declaration. Throws when the file exists. */
 export async function createWave(declaration: WaveDeclaration): Promise<void> {
   if (!isWaveId(declaration.id)) throw new Error(`${declaration.id} is not a wave id`);
-  parseWaveDeclaration(declaration, declaration.id);
   await mkdir(wavesDir(), { recursive: true });
   const path = wavePath(declaration.id);
   // Written in full first, then linked: `link` fails on an existing file, and no reader sees a half-written one.
@@ -553,7 +320,7 @@ export async function appendWaveEvents(id: string, events: NewWaveEvent[] | ((fo
       chosen = events;
     }
     const at = new Date().toISOString();
-    const written = chosen.map((event) => parseWaveEvent({ ...event, at: event.at ?? at }));
+    const written = chosen.map((event) => ({ ...event, at: event.at ?? at }) as WaveEvent);
     let handle;
     try {
       handle = await open(wavePath(id), "r+");
@@ -587,7 +354,7 @@ export async function readWave(id: string): Promise<WaveFile> {
     throw error;
   }
   try {
-    return parseWaveFile(text, id);
+    return parseWaveFile(text);
   } catch (error) {
     throw new Error(`${path}: ${errorText(error)}`);
   }
@@ -635,7 +402,7 @@ export function gatedCommit(events: readonly WaveEvent[]): string | null {
 export function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): WaveFold {
   const after = declaration.after ?? [];
   const stage: WaveStage = after.length > 0 ? "queued" : "building";
-  const fold: WaveFold = { ...declaration, after: [...after], stage, reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, remote: null };
+  const fold: WaveFold = { ...declaration, after: [...after], stage, reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null };
   for (const event of events) {
     switch (event.kind) {
       case "tasks":
@@ -646,7 +413,7 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         for (const spec of event.tasks) {
           // Validation keeps keys unique; a repeated key in a hand-edited log keeps its first declaration.
           if (fold.tasks.some((task) => task.key === spec.key)) continue;
-          fold.tasks.push({ key: spec.key, title: spec.title, request: spec.request, after: [...spec.after], model: spec.model ?? "big", taskId: null, sessionId: null, ...(spec.id === undefined ? {} : { id: spec.id }) });
+          fold.tasks.push({ key: spec.key, title: spec.title, request: spec.request, after: [...spec.after], model: spec.model ?? "big", taskId: null, sessionId: null, id: spec.id });
         }
         if (event.by === "reviewer") fold.fixes = (fold.fixes ?? 0) + event.tasks.length;
         break;
@@ -696,19 +463,9 @@ export function foldWave(declaration: WaveDeclaration, events: readonly WaveEven
         fold.merge = merge;
         break;
       }
-      case "remote": {
-        const { at: _at, kind: _kind, ...fields } = event;
-        fold.remote = { ...(fold.remote ?? { number: null, url: null, pushed: null, error: null }), ...fields };
-        break;
-      }
       case "contract":
       case "note":
         break;
-      case "resolved": {
-        const { kind: _kind, ...resolved } = event;
-        (fold.resolved ??= []).push({ ...resolved, files: [...resolved.files] });
-        break;
-      }
       case "conflict": {
         const { kind: _kind, ...conflict } = event;
         (fold.conflicts ??= []).push({ ...conflict, files: [...conflict.files] });
@@ -856,7 +613,7 @@ export function waveCounts(fold: WaveFold, states: TaskStates): { total: number;
 /**
  * Checks task specs a wave adds against the keys it has: an object each, unique key of `[A-Za-z0-9._-]+`, non-empty
  * title and request, `after` naming keys of the wave (existing or added), no cycle, `model` `"small"` or `"big"` when
- * given (never a concrete model: the wave's settings name those). Throws a `FactoryError` `invalid`.
+ * given (never a concrete model: the wave's settings name those). Gives each a new task id. Throws a `FactoryError` `invalid`.
  */
 export function validateTaskSpecs(raw: unknown, existing: readonly { key: string }[] = []): WaveTaskEntry[] {
   const invalid = (message: string) => new FactoryError("invalid", message);
@@ -875,7 +632,7 @@ export function validateTaskSpecs(raw: unknown, existing: readonly { key: string
       throw invalid(`tasks[${index}].model must be "small" or "big" (the wave's settings name the models), not ${JSON.stringify(model)}`);
     }
     keys.add(key);
-    specs.push({ key, title, request, after: [...new Set(after as string[])], ...(model === null ? {} : { model: model as ModelSize }) });
+    specs.push({ key, title, request, after: [...new Set(after as string[])], ...(model === null ? {} : { model: model as ModelSize }), id: crypto.randomUUID() });
   }
   for (const spec of specs) {
     for (const name of spec.after) {
