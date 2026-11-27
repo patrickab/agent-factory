@@ -55,6 +55,20 @@ What the factory is and how it works: `README.md`. Its views: `VIEWS.md`. Open w
 - A fallback exists only for a failure that really happens. Tests cover the behaviour someone relies on, not every clause
 - The codebase must stay small enough to keep in one's head: a change that removes code is as welcome as one that adds a feature
 
+## Tests
+
+Tests are code every later change pays for. Write few, and only ones that would catch a real break.
+
+1. Test what someone relies on, through the surface they use: the state they read, the commit that lands. A test of
+   an internal shape or a call order breaks on every refactor and never on a real regression
+2. Fake only the boundary you do not own (the model, the network, a CLI), never your own code. A test against your
+   own stand-in only proves that you agree with yourself
+3. One fact, one test, at the lowest layer that can show it; a table for its cases, not a test per clause
+4. Never assert wording, the order of logs or argv. Assert the state, and that a secret or path is absent
+5. Each test owns its world (dir, ids, processes) and waits on events, not on time
+
+A test that pins behaviour nobody relies on is deleted, not adapted. Tests of deleted code go in the same change.
+
 ## Working on this repository
 - The `factory` command on this machine runs from the checkout `~/git/agent-factory`. Work in a worktree on a
   development branch; merge into the default branch only while no wave of any repository is running
