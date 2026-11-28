@@ -8,7 +8,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { cardsToRule, sessionWidget } from "../session-widget.ts";
+import { cardsToRule, HEADER_ROW, rowLine, SPINNER_FRAME_MS, widgetRows, type WidgetDepth, type WidgetRow, type WidgetTone } from "../session-widget.ts";
 import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
@@ -178,7 +178,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand("factory", {
-    description: "Agent factory: init (draft factory.yaml) | models [add|remove|set ...] | waves (show/hide finished waves) | task: start <json> | approve | retry | cancel",
+    description: "Agent factory: init (draft factory.yaml) | models [add|remove|set ...] | waves (open all rows of the waves widget, close all, back to the default) | task: start <json> | approve | retry | cancel",
     handler: async (args, ctx) => {
       const [verb = ""] = args.trim().split(/\s+/, 1);
       if (verb === "models") {
@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (verb === "waves") {
-        widget.showFinished = !widget.showFinished;
+        nextDepth();
         showWidget();
         return;
       }
@@ -196,19 +196,61 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  /** The session's waves widget: the views of the notifier's last look, the context of the session it shows in. */
-  const widget: { waves: WaveView[]; showFinished: boolean; ctx: ExtensionContext | undefined } = { waves: [], showFinished: false, ctx: undefined };
+  /**
+   * The session's waves widget: the views of the notifier's last look, the context of the session it shows in, which
+   * rows the user opened or closed, and the timer that turns the marks of what is working.
+   */
+  const widget: { waves: WaveView[]; depth: WidgetDepth; toggled: Set<string>; ctx: ExtensionContext | undefined; spin: ReturnType<typeof setInterval> | undefined } = {
+    waves: [],
+    depth: "default",
+    toggled: new Set(),
+    ctx: undefined,
+    spin: undefined,
+  };
+  const hideWidget = () => {
+    clearInterval(widget.spin);
+    widget.spin = undefined;
+    widget.ctx?.ui.setWidget(WAVES_WIDGET, undefined);
+  };
   const showWidget = () => {
-    const { ctx, waves, showFinished } = widget;
+    const { ctx } = widget;
     if (ctx === undefined) return;
     const rulings = cardsToRule(ctx.sessionManager.getBranch());
-    if (sessionWidget(waves, { showFinished, width: 80, rulings }).length === 0) {
-      ctx.ui.setWidget(WAVES_WIDGET, undefined);
-      return;
-    }
-    // sessionWidget counts code points; a wide character takes two columns, so pi-tui cuts every line to the width.
-    const render = (width: number) => sessionWidget(waves, { showFinished, width, rulings }).map((line) => truncateToWidth(line, width));
-    ctx.ui.setWidget(WAVES_WIDGET, () => ({ render, invalidate: () => undefined }));
+    const rows = () => widgetRows(widget.waves, { rulings, depth: widget.depth, toggled: widget.toggled, now: Date.now() });
+    if (rows().length === 0) return hideWidget();
+    clearInterval(widget.spin);
+    widget.spin = undefined;
+    ctx.ui.setWidget(WAVES_WIDGET, (tui, theme) => {
+      const paint = (tone: WidgetTone, text: string) => (tone === "title" ? theme.fg("accent", theme.bold(text)) : theme.fg(tone, text));
+      let shown: WidgetRow[] = [];
+      // One timer, of the newest component: it redraws only while a row shows the mark of something working.
+      clearInterval(widget.spin);
+      widget.spin = setInterval(() => {
+        if (shown.some((row) => row.mark === "working")) tui.requestRender();
+      }, SPINNER_FRAME_MS);
+      widget.spin.unref?.();
+      return {
+        render(width: number) {
+          shown = rows();
+          const frame = Math.floor(Date.now() / SPINNER_FRAME_MS);
+          // rowLine counts code points; a wide character takes two columns, so pi-tui cuts every line to the width.
+          return shown.map((row) => truncateToWidth(rowLine(row, width, paint, frame), width));
+        },
+        // A click opens or closes its row; one on the header goes through the depths (fullscreen mode only).
+        handleMouse(event: { type: string; button: string; y: number }) {
+          const id = event.type === "click" && event.button === "left" ? shown[event.y]?.id : undefined;
+          if (id === undefined || id === null) return undefined;
+          if (id === HEADER_ROW) nextDepth();
+          else if (!widget.toggled.delete(id)) widget.toggled.add(id);
+          return { handled: true, render: true };
+        },
+        invalidate: () => undefined,
+      };
+    });
+  };
+  const nextDepth = () => {
+    widget.depth = widget.depth === "default" ? "all" : widget.depth === "all" ? "none" : "default";
+    widget.toggled.clear();
   };
   // A decision taken in a turn settles a card: the count follows without waiting for the notifier's next look.
   pi.on("turn_end", () => showWidget());
@@ -217,9 +259,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     notifier?.stop();
     notifier = undefined;
-    widget.ctx?.ui.setWidget(WAVES_WIDGET, undefined);
+    hideWidget();
     widget.ctx = undefined;
     widget.waves = [];
+    widget.depth = "default";
+    widget.toggled.clear();
     // A runner's Pi is a task's own session from the start; a session that gets its task later is checked per look.
     if (process.env[TASK_SESSION_ENV] !== "1") {
       const taskSession = () => session.snapshot !== undefined || isTaskSession(ctx.sessionManager.getBranch());
@@ -232,7 +276,7 @@ export default function (pi: ExtensionAPI) {
         isTaskSession: () => {
           const task = taskSession();
           if (task && widget.ctx !== undefined) {
-            widget.ctx.ui.setWidget(WAVES_WIDGET, undefined);
+            hideWidget();
             widget.ctx = undefined;
           }
           return task;
@@ -259,6 +303,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     notifier?.stop();
     notifier = undefined;
+    clearInterval(widget.spin);
     widget.ctx = undefined;
     session.disposed = true;
     session.runner.cancel();

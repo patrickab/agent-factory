@@ -75,5 +75,9 @@ No field is undefined and no list empty: a card survives JSON unchanged. A notic
 Notices (`factory-notice`) and the `factory` tool's calls and results are drawn as cards (`src/pi/cards-tui.ts`):
 icon `◆`, title (toned when it needs a ruling), tag, state, cost, progress, rows, findings by severity (collapsed to
 counts), text. Readable is the default; **Alt+V** toggles every factory card of the session to the agent's text. In
-a session that declared waves, a widget above the editor (`src/session-widget.ts`) shows the active waves and counts
-the cards to rule on: the latest attention notice per task, wave, scout or proof that no decision answered.
+a session that declared waves, a widget above the editor (`src/session-widget.ts`) shows them as a tree: the header
+(the cost of all of them, the workers running, the active ones, the cards to rule on: the latest attention notice per
+task, wave, scout or proof that no decision answered), then the tags nested (`plugin/m1/w1`: track, milestone, wave)
+down to each wave's tasks, every row with its mark and facts. What is finished stands under one closed row per group.
+A click opens or closes a row (fullscreen mode); one on the header, or `/factory waves`, opens all, closes all, then
+returns to the default.

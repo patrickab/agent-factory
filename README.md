@@ -98,7 +98,7 @@ The supervisor's loop:
   and in task sessions `feedback` and `factory_ask_supervisor`. In a task's own session the
   `factory` tool (and the MCP server a runner starts) offers only the actions with `mutates: false`. Notices arrive
   in the origin session as `factory-notice` messages with `details {key, card}`. Commands: `/factory init` (a draft
-  `factory.yaml`), `/factory models [add|remove|set ...]`, `/factory waves` (the widget's finished waves), and in a
+  `factory.yaml`), `/factory models [add|remove|set ...]`, `/factory waves` (the widget's rows: all open, all closed, the default), and in a
   task's session `/factory start|approve|retry|cancel`
 - **Session entries** a task's Pi session holds (`src/state.ts`): `factory-task`, `-round`, `-gate`, `-review`,
   `-merge-intent`, `-merge`, `-state`, `-commit-message`, `-question`
