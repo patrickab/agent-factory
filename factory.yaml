@@ -4,7 +4,6 @@ hooks:
   # A worktree the factory adds itself (a merge request) has no node_modules.
   after_create:
     - [bun, install, --frozen-lockfile]
-  after_code: []
   after_merge:
     - [bun, install, --frozen-lockfile]
 # After every coder turn: types only.
