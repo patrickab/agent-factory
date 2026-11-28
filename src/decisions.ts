@@ -14,7 +14,7 @@ import { findWave, lookWave } from "./core-waves.ts";
 import { taskNotice, waveNotice } from "./notify.ts";
 import { factoryHome } from "./settings.ts";
 import type { TaskRecord } from "./tasks.ts";
-import { foldWave, listWaves, type WaveFile, type WaveStage } from "./waves.ts";
+import { listWaves, type WaveFile, type WaveStage } from "./waves.ts";
 import { FactoryError, readJsonl } from "./util.ts";
 
 /** What a decision answers: the notice key it settles, absent when it settles nothing open. */
@@ -37,7 +37,7 @@ async function waveKey(file: WaveFile, stages?: readonly WaveStage[]): Promise<s
 async function taskKey(view: TaskView): Promise<string | undefined> {
   if (view.wave !== null) {
     const file = await findWave(view.wave).catch(() => undefined);
-    if (file !== undefined && foldWave(file.declaration, file.events).stage !== "building") return waveKey(file);
+    if (file !== undefined && file.fold.stage !== "building") return waveKey(file);
   }
   const notice = taskNotice(view, "");
   return notice !== null && notice.card.tone === "attention" ? notice.key : undefined;
@@ -74,7 +74,7 @@ export async function waveCause(id: unknown, stages?: readonly WaveStage[]): Pro
 export async function contractCause(store: unknown, name: unknown): Promise<Cause> {
   let latest: { at: string; key: string } | undefined;
   for (const file of await listWaves()) {
-    const fold = foldWave(file.declaration, file.events);
+    const fold = file.fold;
     if (fold.plan !== store || !(fold.contracts ?? []).includes(String(name))) continue;
     if (fold.stage !== "rejected" && fold.stage !== "blocked") continue;
     const key = await waveKey(file);

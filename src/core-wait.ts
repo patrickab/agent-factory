@@ -9,7 +9,7 @@ import { stringsParam, tagParam, WAIT_TIMEOUT_MS, type Handler } from "./core-sh
 import { findTask, needsAttention, rests, tasksIn, taskView, type TaskView } from "./core-tasks.ts";
 import { findProof, proofNeedsAttention, proofRests, proofView, type ProofView } from "./gates-prove.ts";
 import { findWave, lookWave, type WaveLook } from "./core-waves.ts";
-import { listTasks, tagInGroup, type TaskRecord } from "./tasks.ts";
+import { listTasks, tagInGroup, tasksById, type TaskRecord } from "./tasks.ts";
 import { listWaves, readWave, waveRests, type WaveFile, type WaveView } from "./waves.ts";
 import { FactoryError } from "./util.ts";
 
@@ -51,7 +51,7 @@ async function waitForTasks(watched: Watched, timeoutMs: number, signal: AbortSi
     const waveIds = new Set(files.map((file) => file.declaration.id));
     // One read of the task records and the waves for every watched wave, as `waves.list` does.
     const all = files.length === 0 ? [] : await listWaves();
-    const read = { records: new Map((files.length === 0 ? [] : await listTasks()).map((record) => [record.id, record])) };
+    const read = { records: files.length === 0 ? new Map() : await tasksById() };
     const [tasks, looks, proofs] = await Promise.all([Promise.all(records.map((record) => taskView(record))), Promise.all(files.map((file) => lookWave(file.declaration.id, all, read))), Promise.all(proofIds.map(proofView))]);
     const attention = [
       ...tasks.filter((view) => needsAttention(view) && !(view.state === "cancelled" && view.wave !== null && waveIds.has(view.wave))).map((view) => view.id),

@@ -8,7 +8,7 @@ import { callAction } from "./core.ts";
 import { caseDir, expectError, fakeRecord, makeRepo, RUN, scratch, testPath, until, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { readStore, writeFakeMemoryStore, writeStore } from "./fake-memory-store.ts";
 import { readTask, writeTask, type TaskRecord } from "./tasks.ts";
-import { appendWaveEvent, createWave, type WaveView } from "./waves.ts";
+import { appendWaveEvent, createWave, readWave, type WaveView } from "./waves.ts";
 
 useCoreFixture();
 
@@ -114,7 +114,7 @@ describe("contracts.apply", () => {
       record.sessionDir = join(caseDir, "sessions", key);
       await writeTask(record);
     }
-    writeSession(await readTask(asked), [TASK_ENTRY, { type: "custom", customType: "factory-state", data: { state: "waiting_answer", round: 1, reason: "start" } }]);
+    writeSession(await readTask(asked), [TASK_ENTRY, { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: "waiting_answer", round: 1, reason: "start" } }]);
 
     const answer = (await callAction("contracts.apply", { store: STORE, name: "api", op: { op: "update", path: "answer", id: "f0", text: "{ok, raced}" } })) as { kept: { key: string }[] };
     expect(answer.kept.map((task) => task.key)).toEqual(["ask"]);
@@ -125,6 +125,21 @@ describe("contracts.apply", () => {
     expect(await contractCheck((await readTask(starting)).sessionId)).toBeNull();
   });
 
+  test("a merged wave listing the contract is neither listed nor given an event", async () => {
+    const repo = await registeredRepo();
+    const wave = `cafe0000-${RUN}-4000-8000-00000000000d`;
+    const id = `abc70000-${RUN}-4000-8000-000000000007`;
+    await createWave({ id: wave, repo, tag: "team/old", plan: STORE, title: "w", request: "r", branch: "main-team-old", target: "main", base: "abc", origin: "session-0", createdAt: "2026-01-01T00:00:00.000Z", overrides: {}, contracts: ["api"] });
+    await appendWaveEvent(wave, { kind: "tasks", tasks: [{ key: "a", title: "Task a", request: "do a", after: [], id }] });
+    await appendWaveEvent(wave, { kind: "task", key: "a", taskId: id, sessionId: `session-${id}` });
+    const record: TaskRecord = { ...fakeRecord(id, repo), plan: STORE, wave };
+    await writeTask(record);
+    writeSession(record, [TASK_ENTRY, { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: "done", round: 1, reason: "r" } }]);
+    await appendWaveEvent(wave, { kind: "stage", stage: "merged", reason: null });
+    const answer = (await callAction("contracts.apply", { store: STORE, name: "api", op: { op: "update", path: "answer", id: "f0", text: "{changed}" } })) as { done: unknown[] };
+    expect(answer.done).toEqual([]);
+    expect((await readWave(wave)).events.some((event) => event.kind === "contract")).toBe(false);
+  });
 });
 
 describe("the runner's check", () => {
@@ -135,7 +150,7 @@ describe("the runner's check", () => {
     writeSession(record, [
       { type: "session", version: 3, id: record.sessionId, cwd: record.worktree },
       { type: "custom", customType: "factory-task", data: { mainBranch: "main" } },
-      { type: "custom", customType: "factory-state", data: { state: "blocked", round: 1, reason: "gates" } },
+      { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: "blocked", round: 1, reason: "gates" } },
     ]);
     return record;
   }

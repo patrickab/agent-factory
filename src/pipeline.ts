@@ -92,13 +92,15 @@ export function messageRoundDrafts(round: number): Draft[] {
 }
 
 /**
- * A problem found in the snapshot's round: the next coder round and the feedback, or only the feedback when the run
- * used up its `maxRounds` (the caller ends it `blocked`, `max_rounds: <trigger>`).
+ * A problem found in the snapshot's round: the next coder round, its feedback and `running` (a round in progress is
+ * `running` already), or the feedback and `blocked`, `max_rounds: <trigger>`, when the run used up its `maxRounds`.
  */
 function nextRound(snapshot: Snapshot, trigger: Trigger, text: string): RoundResult {
-  const feedback = feedbackDraft(snapshot.round, trigger, text);
-  if (roundsUsed(snapshot) >= snapshot.task.settings.maxRounds) return { entries: [feedback], continue: false };
-  return { entries: [customDraft("factory-round", { round: snapshot.round + 1, trigger }), feedback], continue: true };
+  const { round } = snapshot;
+  const feedback = feedbackDraft(round, trigger, text);
+  if (roundsUsed(snapshot) >= snapshot.task.settings.maxRounds) return { entries: [feedback, stateDraft("blocked", round, `max_rounds: ${trigger}`)], continue: false };
+  const running = snapshot.state === "running" ? [] : [stateDraft("running", round + 1, trigger)];
+  return { entries: [customDraft("factory-round", { round: round + 1, trigger }), feedback, ...running], continue: true };
 }
 
 /** The entries after `merging`: the merge gates, the merge and the state it ends in. */
@@ -108,11 +110,7 @@ export async function runMerge(snapshot: Snapshot, config: FactoryConfig, steps:
   const { gates, result } = await steps.merge(config);
   const drafts: Draft[] = gates.map((gate) => customDraft("factory-gate", gate));
   // Nothing was merged: the coder resolves the conflict or the failed gate in a round of its own, unless cancelled.
-  const problem = (trigger: Trigger, text: string): Draft[] => {
-    const next = nextRound(snapshot, trigger, text);
-    const state = next.continue ? stateDraft("running", round + 1, trigger) : stateDraft("blocked", round, `max_rounds: ${trigger}`);
-    return [...drafts, ...next.entries, state];
-  };
+  const problem = (trigger: Trigger, text: string): Draft[] => [...drafts, ...nextRound(snapshot, trigger, text).entries];
   switch (result.kind) {
     case "conflict":
       if (steps.cancelled()) return [...drafts, stateDraft("cancelled", round, "cancelled")];
@@ -152,7 +150,7 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
   const problem = (trigger: Trigger, text: string): RoundResult => {
     const next = nextRound(snapshot, trigger, text);
     drafts.push(...next.entries);
-    return next.continue ? { entries: drafts, continue: true } : end("blocked", `max_rounds: ${trigger}`);
+    return next.continue || !steps.pendingMessages() ? { entries: drafts, continue: next.continue } : messageRound();
   };
 
   try {
@@ -210,8 +208,6 @@ export function reviewedDrafts(snapshot: Snapshot, review: ReviewData): RoundRes
   const entries: Draft[] = [customDraft("factory-review", review)];
   if (review.status !== "ok") return { entries: [...entries, stateDraft("blocked", round, `review_${review.status}`)], continue: false };
   if (review.approved) return { entries: [...entries, stateDraft("merging", round, "approved")], continue: false };
-  const rejecting = review.findings.filter((finding) => finding.severity !== "minor");
-  const next = nextRound(snapshot, "review", reviewFeedback(round, rejecting));
-  const state = next.continue ? stateDraft("running", round + 1, "review") : stateDraft("blocked", round, "max_rounds: review");
-  return { entries: [...entries, ...next.entries, state], continue: next.continue };
+  const next = nextRound(snapshot, "review", reviewFeedback(round, review.findings.filter((finding) => finding.severity !== "minor")));
+  return { entries: [...entries, ...next.entries], continue: next.continue };
 }

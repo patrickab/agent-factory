@@ -66,9 +66,18 @@ describe("task actions", () => {
     await expectError(callAction("tasks.start", { title: " ", request: "r" }, { cwd: repo }), "invalid", "needs a title");
     await expectError(callAction("tasks.start", { title: "t", request: "r" }, { cwd: caseDir }), "not_found", "is not inside a git repository");
     await expectError(callAction("tasks.start", { title: "t", request: "r" }, { cwd: repo }), "refused", "branch main has no factory.yaml");
-    await expectError(callAction("tasks.start", { title: "t", request: "r", overrides: { branch: "nope" } }, { cwd: repo }), "refused", "branch nope does not exist locally");
+    await expectError(callAction("tasks.start", { title: "t", request: "r", overrides: { branch: "nope" } }, { cwd: repo }), "not_found", "has no local branch nope");
     await expectError(callAction("tasks.start", { title: "t", request: "r", overrides: { maxRounds: 21 } }, { cwd: repo }), "invalid", "overrides.maxRounds must be an integer from 1 to 20");
     expect(await listTasks()).toEqual([]);
+  });
+
+  test("tasks.start whose pi exits before it answers fails naming the runner's last log line, and leaves no record, worktree or branch", async () => {
+    process.env.FAKE_PI_EXIT = "1";
+    const repo = makeRepo();
+    await expectError(callAction("tasks.start", { title: "Add b", request: "add b.txt" }, { cwd: repo }), "failed", "pi exited (1)");
+    expect(await listTasks()).toEqual([]);
+    expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
+    expect(git(repo, "branch", "--list", "add-b-*")).toBe("");
   });
 
   test("start returns once the runner is spawned; get, approve, then remove", async () => {
@@ -194,21 +203,33 @@ describe("tasks.message", () => {
     expect(existsSync(taskInboxPath(record.id))).toBe(false);
   }, 30_000);
 
-  test("a message sent as the runner ends, after its last look at the inbox: the coder gets it once", async () => {
-    const record = await restingTask(makeRepo(), "blocked");
-    const end = join(caseDir, "runner-end");
-    // A runner that closed Pi's stdin: it holds the task lock and ends without reading the inbox again.
-    const runner = await runnerHolding(taskLockPath(record.id), record.sessionId, { ...process.env, FAKE_RUNNER_END: end });
-    await until(async () => !(await runnerEnded(record)));
-    const sent = callAction("tasks.message", { id: record.id, text: "late note" });
-    await until(() => existsSync(taskInboxPath(record.id)));
-    writeFileSync(end, "");
-    await runner.exited;
-    await sent;
-    await until(() => prompts().includes("prompt late note"));
-    expect(prompts().filter((prompt) => prompt === "prompt late note")).toHaveLength(1);
-    // Marked sent: no runner sends it again.
-    expect(Number(readFileSync(`${taskInboxPath(record.id)}.read`, "utf8"))).toBe(readFileSync(taskInboxPath(record.id)).length);
+  test("a message sent as the runner ends, after its last look at the inbox: the coder gets it once, a final task refuses it", async () => {
+    for (const final of [false, true]) {
+      const record = await restingTask(makeRepo(true, `repo-${final}`), "blocked");
+      const end = join(caseDir, `runner-end-${final}`);
+      // A runner that closed Pi's stdin: it holds the task lock and ends without reading the inbox again.
+      const runner = await runnerHolding(taskLockPath(record.id), record.sessionId, { ...process.env, FAKE_RUNNER_END: end });
+      await until(async () => !(await runnerEnded(record)));
+      const sent = callAction("tasks.message", { id: record.id, text: "late note" });
+      const outcome = sent.then(() => undefined, (error: unknown) => error);
+      await until(() => existsSync(taskInboxPath(record.id)));
+      // The task ends `cancelled` while the line waits.
+      if (final) writeSession(record, [TASK_ENTRY, { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: "cancelled", round: 1, reason: "cancelled" } }]);
+      writeFileSync(end, "");
+      await runner.exited;
+      const error = await outcome;
+      if (final) {
+        expect((error as { code: string }).code).toBe("refused");
+        expect(Number(readFileSync(`${taskInboxPath(record.id)}.read`, "utf8"))).toBe(readFileSync(taskInboxPath(record.id)).length);
+        expect(await runnerEnded(record)).toBe(true);
+        continue;
+      }
+      expect(error).toBeUndefined();
+      await until(() => prompts().includes("prompt late note"));
+      expect(prompts().filter((prompt) => prompt === "prompt late note")).toHaveLength(1);
+      // Marked sent: no runner sends it again.
+      expect(Number(readFileSync(`${taskInboxPath(record.id)}.read`, "utf8"))).toBe(readFileSync(taskInboxPath(record.id)).length);
+    }
   }, 30_000);
 
   test("a running task's live runner gets an inbox line; no state, merging and done are refused", async () => {
@@ -226,7 +247,7 @@ describe("tasks.message", () => {
     for (const [state, why] of [["merging", "is merging"], ["done", "waves.add"]]) {
       const resting = fakeRecord(ID_2, "/r");
       await writeTask(resting);
-      writeSession(resting, [TASK_ENTRY, { type: "custom", customType: "factory-state", data: { state, round: 1, reason: "approved" } }]);
+      writeSession(resting, [TASK_ENTRY, { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state, round: 1, reason: "approved" } }]);
       await expectError(callAction("tasks.message", { id: ID_2, text: "hi" }), "refused", why);
     }
   }, 30_000);

@@ -7,6 +7,7 @@
 import { oneLine, type Handler, type Params } from "./core-shared.ts";
 import type { ActionSpec, Feature } from "./feature.ts";
 import { FEATURES } from "./features.ts";
+import { checkValue } from "./settings.ts";
 import { errorText, FactoryError, isRecord } from "./util.ts";
 
 export { oneLine } from "./core-shared.ts";
@@ -45,15 +46,7 @@ function isActionName(name: string): name is ActionName {
   return Object.hasOwn(ACTIONS, name);
 }
 
-const TYPE_CHECKS: Record<string, (value: unknown) => boolean> = {
-  string: (value) => typeof value === "string",
-  boolean: (value) => typeof value === "boolean",
-  integer: (value) => typeof value === "number" && Number.isInteger(value),
-  object: (value) => isRecord(value),
-  array: (value) => Array.isArray(value),
-};
-
-/** The params checked against the action's schema: top-level keys, an `enum`, an array's item type; unknown keys dropped. */
+/** The params checked against the action's schema: required keys and the default `repo`, each value by `checkValue`; unknown keys dropped. */
 function checkParams(name: ActionName, raw: unknown, cwd: string | undefined): Params {
   if (raw !== undefined && raw !== null && !isRecord(raw)) throw new FactoryError("invalid", `${name} needs its params as an object`);
   const { required, properties } = ACTIONS[name].params as ActionSpec["params"];
@@ -66,14 +59,7 @@ function checkParams(name: ActionName, raw: unknown, cwd: string | undefined): P
       if (required.includes(key)) throw new FactoryError("invalid", `${name} needs ${key}`);
       continue;
     }
-    const type = String(schema.type);
-    if (!TYPE_CHECKS[type](value)) throw new FactoryError("invalid", `${name}: ${key} must be ${type === "integer" || type === "array" ? `an ${type}` : `a ${type}`}`);
-    if (typeof schema.minimum === "number" && (value as number) < schema.minimum) throw new FactoryError("invalid", `${name}: ${key} must be at least ${schema.minimum}`);
-    if (typeof schema.maximum === "number" && (value as number) > schema.maximum) throw new FactoryError("invalid", `${name}: ${key} must be at most ${schema.maximum}`);
-    if (Array.isArray(schema.enum) && !schema.enum.includes(value)) throw new FactoryError("invalid", `${name}: ${key} must be one of ${schema.enum.join(", ")}`);
-    const items = isRecord(schema.items) ? String(schema.items.type) : undefined;
-    if (items !== undefined && !(value as unknown[]).every(TYPE_CHECKS[items])) throw new FactoryError("invalid", `${name}: ${key} must hold ${items}s`);
-    params[key] = value;
+    params[key] = checkValue(schema, value, `${name}: ${key}`);
   }
   return params;
 }

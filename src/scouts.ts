@@ -10,7 +10,7 @@
  */
 import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { lockFile, lockHeld, lockRunner, startRunner } from "./lock.ts";
+import { lockFile, lockHeld, lockRunner, startRunner, unlockFile } from "./lock.ts";
 import { factoryHome } from "./settings.ts";
 import { stopProcesses, type RunnerEnv } from "./spawn.ts";
 import { messageText } from "./state.ts";
@@ -203,8 +203,10 @@ export async function cancelScouts(caller: ScoutCaller): Promise<void> {
 export async function startScout(declaration: ScoutDeclaration, env: RunnerEnv = process.env): Promise<string> {
   const dir = scoutDir(declaration.caller, declaration.id);
   await lockFile(scoutLockPath(dir), `scout ${declaration.id.slice(0, 8)} is busy`);
-  await writeScoutDeclaration(dir, declaration);
-  await appendScoutEvent(dir, { kind: "state", state: "queued" });
+  await writeScoutDeclaration(dir, declaration).then(() => appendScoutEvent(dir, { kind: "state", state: "queued" })).catch(async (error: unknown) => {
+    await unlockFile(scoutLockPath(dir));
+    throw error;
+  });
   await startRunner({ lock: scoutLockPath(dir), argv: [SCOUT_RUNNER_PATH, dir], env: { ...env, [SCOUT_ID_ENV]: declaration.id }, log: join(dir, "runner.log"), cwd: import.meta.dirname }).catch(
     async (error: unknown) => {
       await appendScoutEvent(dir, { kind: "state", state: "failed", error: "its runner did not start" });

@@ -14,7 +14,7 @@ import { rebuild, isResting, type StateData } from "./state.ts";
 import { unlockFile } from "./lock.ts";
 import { errorText, ifMissing, isRecord, jsonLines, writeAtomic } from "./util.ts";
 import { pokeWave, TASK_WAVE_ENV } from "./wave-poke.ts";
-import { foldWave, readWave, waveFinal } from "./waves.ts";
+import { readWave, waveFinal } from "./waves.ts";
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 const CHECK_INTERVAL_MS = 2000;
@@ -116,12 +116,12 @@ const START_PREFIX = "/factory start ";
  * `--model` with it, so the session starts on the coder's model and the plugin need not switch to it (`setModel` fires
  * `model_select`, which an extension such as `@xynogen/pix-models` answers by writing `defaultProvider`/`defaultModel`
  * into `<worktree>/.pi/settings.json`, and the factory's commit of the worktree then took that file). With
- * `CODER_EXTENSIONS_ENV`: `-ne`, the factory's plugin and one `-e` per listed source.
+ * `CODER_EXTENSIONS_ENV`: `-ne`, the factory's plugin, one `-e` per listed source, and no skills, prompt templates or themes.
  */
 function piArgs(sessionDir: string, sessionId: string, message: string): string[] {
   const args = ["--mode", "rpc", "--session-dir", sessionDir, "--session-id", sessionId];
   const extensions = process.env[CODER_EXTENSIONS_ENV];
-  if (extensions) args.push("-ne", ...[PLUGIN_PATH, ...(JSON.parse(extensions) as string[])].flatMap((source) => ["-e", source]));
+  if (extensions) args.push("-ne", ...[PLUGIN_PATH, ...(JSON.parse(extensions) as string[])].flatMap((source) => ["-e", source]), "--no-skills", "--no-prompt-templates", "--no-themes");
   const model = process.env[CODER_MODEL_ENV];
   return model && message.trimStart().startsWith(START_PREFIX) ? [...args, "--model", model] : args;
 }
@@ -387,8 +387,7 @@ async function pokeTaskWave(sessionDir: string, sessionId: string): Promise<void
   if (wave === undefined || wave === "") return;
   const state = await lastFactoryState(sessionDir, sessionId);
   if (state === undefined || !isResting(state.state)) return;
-  const file = await readWave(wave);
-  if (waveFinal(foldWave(file.declaration, file.events).stage)) return;
+  if (waveFinal((await readWave(wave)).fold.stage)) return;
   await pokeWave(wave);
 }
 

@@ -102,7 +102,7 @@ The supervisor's loop:
   `-merge-intent`, `-merge`, `-state`, `-commit-message`, `-question`
 - **Settings** (`settings.get`/`settings.set`, the table `SETTINGS` in `src/settings.ts`): `branch`, `merge`
   (`auto` | `review`), `maxRounds`, `review`, `models` (`big`, `small`, `reviewer`), `preview` (stored for clients),
-  `squash`, `extensions`. Tasks and waves take some as `overrides`. A model must be on the factory models list
+  `squash`, `extensions` (a coder's Pi loads only the factory's plugin and the listed sources, no skills, prompt templates or themes; MCP, codemode and tool search only as `builtin:<name>`). Tasks and waves take some as `overrides`. A model must be on the factory models list
   (`models.get`/`models.set`); `defaults.yaml` names the default `small` and `big`
 - **Environment**: `PI_CODING_AGENT_DIR` (the agent dir, default `~/.pi/agent`), `MEMORY_STORE_ROOT` (default
   `~/.pi/memory_store`), `FACTORY_SLOTS` (test slots, default cores / 4), `FACTORY_TEST_JOBS`

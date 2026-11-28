@@ -10,22 +10,17 @@ import { parseFactoryYaml } from "./config.ts";
 import { primaryOf, type Handler } from "./core-shared.ts";
 import { initDraft } from "./draft.ts";
 import { git } from "./git.ts";
-import { defaultBranch } from "./launch.ts";
+import { defaultBranch, targetOf } from "./launch.ts";
 import { loadModels, requireModels, saveModels } from "./models.ts";
 import { runCommand } from "./run.ts";
 import { checkSettings, defaultModels, loadSettings, registeredRepos, resolveSettings, saveSettings, type ResolvedSettings, type SizeModels, type StoredSettings } from "./settings.ts";
 import { errorText, FactoryError, ifMissing } from "./util.ts";
 import type { WaveTaskEntry } from "./waves.ts";
 
-export async function branchHasConfig(repo: string, branch: string): Promise<boolean> {
-  return (await runCommand(["git", "cat-file", "-e", `refs/heads/${branch}:factory.yaml`], { cwd: repo })).exitCode === 0;
-}
-
 async function settingsOf(repo: string): Promise<{ stored: StoredSettings; resolved: ResolvedSettings; defaults: ResolvedSettings }> {
   const stored = await loadSettings(repo);
   const fallback = await defaultBranch(repo).catch(() => undefined);
-  const branch = stored.branch ?? fallback;
-  if (branch === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
+  const branch = await targetOf(repo, undefined, { config: false });
   return { stored, resolved: resolveSettings([stored], branch), defaults: resolveSettings([], fallback ?? branch) };
 }
 

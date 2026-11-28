@@ -13,7 +13,7 @@ import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
 import { sessionWave } from "../core.ts";
-import { DONE_REFUSAL } from "../core-tasks.ts";
+import { DONE_REFUSAL } from "../launch.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
 import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "../pipeline.ts";
@@ -42,7 +42,7 @@ import {
 } from "../ops.ts";
 import { applyEntry, followUpMessages, messageText, rebuild, isResting, stateDraft, type Draft, type State } from "../state.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
-import { createScoutTracker, registerScoutTool, type ScoutCore } from "./scout-tool.ts";
+import { createScoutTracker, registerScoutTool } from "./scout-tool.ts";
 import { isTaskSession, registerFactoryTool, toolError, toolText } from "./tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { errorText, isRecord } from "../util.ts";
@@ -74,11 +74,10 @@ function lastAssistantToolCalls(entries: Iterable<{ type: string }>): number {
   return calls;
 }
 
-/** `scoutCore`: how the `scout` tool reaches the core, for tests; Pi passes nothing. */
-export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; scoutPollMs?: number } = {}) {
+export default function (pi: ExtensionAPI) {
   const session = newTaskSession();
   // A turn end with the commit message ask open waits for no scout (`agent_before_settle`): a scout then is not owed.
-  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, holds: () => session.snapshot?.state === "running" && commitAsk === undefined, core: testing.scoutCore, pollMs: testing.scoutPollMs });
+  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, holds: () => session.snapshot?.state === "running" && commitAsk === undefined });
   const cards = registerCardRenderers(pi);
   registerFactoryTool(pi, scouts, cards);
   registerScoutTool(pi, scouts);

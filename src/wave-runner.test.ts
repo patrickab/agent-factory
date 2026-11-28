@@ -210,7 +210,9 @@ describe("a wave never waits silently (invariant 8)", () => {
     expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.running, wave.tasks.map((task) => task.state)]).toEqual(["blocked", "infra", false, ["done", "done", "pending"]]);
-    expect((await timeline()).at(-1)).toMatchObject({ kind: "stage", stage: "blocked", reason: "infra", detail: expect.stringContaining(`starting its task c failed: ${repo}: branch ${BRANCH} does not exist locally`) });
+    const last = (await timeline()).at(-1);
+    expect(last).toMatchObject({ kind: "stage", stage: "blocked", reason: "infra", detail: expect.stringContaining("task c") });
+    expect(JSON.stringify(last)).not.toContain(repo);
     const waited = await waitWave(10_000);
     expect([waited.timedOut, waited.attention]).toEqual([false, [WAVE()]]);
     // Fixed: a retry with a task not started builds again (not a review).

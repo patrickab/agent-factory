@@ -4,7 +4,7 @@
  * - A store without the directory `run` gets it declared and the apply once more
  * - `memory-store` missing, no plan or no such store: nothing is stored, the entry stays in the task's session
  */
-import { memoryStore } from "./contracts.ts";
+import { apply, create, facts } from "./store.ts";
 
 export const FEEDBACK_KINDS = ["runtime", "context", "request", "contract", "tools", "environment", "communication"] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
@@ -26,23 +26,30 @@ export const FEEDBACK_PATH = "run/feedback";
 /** Stores the entry as a fact of `store`: true when it landed, false when there is no store to keep it in. */
 export async function storeFeedback(storeName: string | null, entry: FeedbackEntry): Promise<boolean> {
   if (storeName === null) return false;
-  const ops = JSON.stringify([{ op: "add", path: FEEDBACK_PATH, text: JSON.stringify(entry), description: "what cost the agents runtime or context" }]);
-  const applied = await memoryStore(["apply", storeName, "--ops", ops]);
-  if (applied.ok) return true;
-  // A store that exists without the directory `run`: declared once, then the entry goes in.
-  if (!applied.output.includes("undeclared_directory")) return false;
-  return (await memoryStore(["create", storeName, "run"])).ok && (await memoryStore(["apply", storeName, "--ops", ops])).ok;
+  const ops = [{ op: "add", path: FEEDBACK_PATH, text: JSON.stringify(entry), description: "what cost the agents runtime or context" }];
+  try {
+    await apply(storeName, ops);
+    return true;
+  } catch (error) {
+    // A store that exists without the directory `run`: declared once, then the entry goes in.
+    if (!(error as Error).message.includes("undeclared_directory")) return false;
+  }
+  try {
+    await create(storeName, "run");
+    await apply(storeName, ops);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The entries of the wave `wave` in the store `storeName`, oldest first; none without a store. */
 export async function waveFeedback(storeName: string | null, wave: string): Promise<FeedbackEntry[]> {
   if (storeName === null) return [];
-  const read = await memoryStore(["read", storeName, FEEDBACK_PATH]);
-  if (!read.ok) return [];
   const entries: FeedbackEntry[] = [];
-  for (const line of read.stdout.split("\n")) {
+  for (const { text } of await facts(storeName, FEEDBACK_PATH)) {
     try {
-      const entry = JSON.parse(/^- \[[^\]]+\] (.*)$/.exec(line)?.[1] ?? "") as FeedbackEntry;
+      const entry = JSON.parse(text) as FeedbackEntry;
       if (entry.wave === wave) entries.push(entry);
     } catch {
       // no entry

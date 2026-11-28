@@ -25,7 +25,7 @@ const ALL: Scope[] = ["repo", "task", "wave"];
 
 /** Every setting, once: its schema, its default (none: resolved elsewhere), the scopes that take it. */
 export const SETTINGS: Record<string, { schema: Schema; default?: unknown; scopes: Scope[] }> = {
-  branch: { schema: { type: "string", description: "The branch the task starts from and merges into" }, scopes: ALL },
+  branch: { schema: { type: "string", minLength: 1, description: "The branch the task starts from and merges into" }, scopes: ALL },
   merge: { schema: { type: "string", enum: ["auto", "review"], description: "auto: merge a passed round. review: wait for approve" }, default: "auto", scopes: ALL },
   maxRounds: { schema: { type: "integer", minimum: 1, maximum: MAX_ROUNDS_LIMIT }, default: 2, scopes: ALL },
   review: { schema: { type: "boolean", description: "Run the reviewer on every round" }, default: false, scopes: ALL },
@@ -43,9 +43,9 @@ export const SETTINGS: Record<string, { schema: Schema; default?: unknown; scope
   extensions: {
     schema: {
       type: "array",
-      items: { type: "string" },
+      items: { type: "string", minLength: 1 },
       description:
-        "Extension sources the coder's Pi loads, as Pi's -e takes them (npm:pi-lens, a path, builtin:codemode). Absent: every user extension. Set, an empty list too: Pi starts with -ne, the factory's plugin and these; -ne also turns off Pi's built-in extensions (mcp, llama.cpp, codemode, tool-search) unless listed as builtin:<name>",
+        "Extension sources the coder's Pi loads, as Pi's -e takes them (npm:pi-lens, a path, builtin:codemode). Absent: every user extension. Set, an empty list too: Pi starts with the factory's plugin and these only, and without skills, prompt templates and themes; the built-in extensions (mcp, llama.cpp, codemode, tool-search) are off unless listed as builtin:<name>",
     },
     scopes: ["repo"],
   },
@@ -61,28 +61,36 @@ export function schemaOf(scope: Scope): Record<string, Schema> {
   return Object.fromEntries(Object.entries(SETTINGS).flatMap(([key, row]) => (row.scopes.includes(scope) ? [[key, row.schema]] : [])));
 }
 
-/** `value` checked against `schema` (the kinds the table uses); an object loses unknown and absent keys. Throws `invalid` naming `name`. */
+/**
+ * `value` checked against `schema` (type, integer bounds, enum, pattern, `minLength`, items, an object's `properties`);
+ * an object with `properties` loses unknown and absent keys. Throws `invalid` as `<name> must be ...`.
+ */
 export function checkValue(schema: Schema, value: unknown, name: string): unknown {
   const fail = (what: string): never => {
     throw new FactoryError("invalid", `${name} must be ${what}`);
   };
   if (schema.type === "boolean" && typeof value !== "boolean") fail("a boolean");
-  if (schema.type === "integer" && (typeof value !== "number" || !Number.isInteger(value) || value < (schema.minimum as number) || value > (schema.maximum as number))) {
-    fail(`an integer from ${schema.minimum} to ${schema.maximum}`);
+  if (schema.type === "integer") {
+    const { minimum: min, maximum: max } = schema as { minimum?: number; maximum?: number };
+    if (typeof value !== "number" || !Number.isInteger(value) || (min !== undefined && value < min) || (max !== undefined && value > max)) {
+      fail(`an integer${min !== undefined && max !== undefined ? ` from ${min} to ${max}` : min !== undefined ? ` of at least ${min}` : max !== undefined ? ` of at most ${max}` : ""}`);
+    }
   }
   if (schema.type === "string") {
     const allowed = schema.enum as string[] | undefined;
     if (allowed !== undefined && !allowed.includes(value as string)) fail(allowed.map((one) => JSON.stringify(one)).join(" or "));
-    if (typeof value !== "string" || value.trim() === "") fail("a non-empty string");
+    if (typeof value !== "string") fail("a string");
+    if (schema.minLength === 1 && (value as string).trim() === "") fail("a non-empty string");
     // The table's only pattern is a model's.
     if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value as string)) fail('"provider/model"');
   }
   if (schema.type === "array") {
-    if (!Array.isArray(value)) fail("a list");
-    return (value as unknown[]).map((item, index) => checkValue(schema.items as Schema, item, `${name}[${index}]`));
+    if (!Array.isArray(value)) fail("an array");
+    return isRecord(schema.items) ? (value as unknown[]).map((item, index) => checkValue(schema.items as Schema, item, `${name}[${index}]`)) : value;
   }
   if (schema.type !== "object") return value;
-  if (!isRecord(value)) return fail("a mapping");
+  if (!isRecord(value)) return fail("an object");
+  if (schema.properties === undefined) return value;
   const checked: Record<string, unknown> = {};
   for (const [key, inner] of Object.entries(schema.properties as Record<string, Schema>)) {
     if (value[key] !== undefined) checked[key] = checkValue(inner, value[key], `${name}.${key}`);

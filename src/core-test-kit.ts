@@ -40,13 +40,17 @@ export function useCoreFixture(): void {
   piLog = join(scratch, "fake-pi.log");
   caseCount = 0;
 
-  /** The fake `pi`: notes each prompt in `$FAKE_PI_LOG`, appends the `factory-state` entries of the command, ends on stdin EOF. */
+  /**
+   * The fake `pi`: notes each prompt in `$FAKE_PI_LOG`, appends the `factory-state` entries of the command, ends on
+   * stdin EOF. `FAKE_PI_EXIT=1`: it exits before it answers, as a broken or missing Pi does.
+   */
   mkdirSync(fakeBin);
   writeFileSync(
     join(fakeBin, "pi"),
     `#!/usr/bin/env bun
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+if (process.env.FAKE_PI_EXIT === "1") process.exit(1);
 const args = process.argv.slice(2);
 const dir = args[args.indexOf("--session-dir") + 1];
 const id = args[args.indexOf("--session-id") + 1];
@@ -54,7 +58,7 @@ mkdirSync(dir, { recursive: true });
 const file = join(dir, "2026-01-01T00-00-00-000Z_" + id + ".jsonl");
 if (!existsSync(file)) writeFileSync(file, JSON.stringify({ type: "session", version: 3, id, cwd: process.cwd() }) + "\\n");
 const state = (name, reason) =>
-  appendFileSync(file, JSON.stringify({ type: "custom", customType: "factory-state", data: { state: name, round: 1, reason } }) + "\\n");
+  appendFileSync(file, JSON.stringify({ type: "custom", customType: "factory-state", timestamp: new Date().toISOString(), data: { state: name, round: 1, reason } }) + "\\n");
 const lastState = () => readFileSync(file, "utf8").trim().split("\\n").map((line) => JSON.parse(line)).filter((e) => e.customType === "factory-state").at(-1)?.data.state;
 const emit = (record) => process.stdout.write(JSON.stringify(record) + "\\n");
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -135,6 +139,7 @@ process.exit(0);
     });
     delete process.env.FAKE_PI_HOLD;
     delete process.env.FAKE_PI_START_END;
+    delete process.env.FAKE_PI_EXIT;
     rmSync(piLog, { force: true });
     // Starting a task needs a factory models list; a test that wants none removes it.
     mkdirSync(join(caseDir, "agent", "factory"), { recursive: true });
@@ -256,7 +261,7 @@ export function fakeRecord(id: string, repo: string): TaskRecord {
 }
 
 /** A session's first entry, as the plugin writes it: a state needs a task. */
-export const TASK_ENTRY = { type: "custom", customType: "factory-task", data: { mainBranch: "main", settings: { branch: "main", merge: "auto", maxRounds: 2, review: true, models: {} } } };
+export const TASK_ENTRY = { type: "custom", customType: "factory-task", timestamp: "2026-01-01T00:00:00.000Z", data: { mainBranch: "main", settings: { branch: "main", merge: "auto", maxRounds: 2, review: true, models: {} } } };
 
 export function writeSession(record: TaskRecord, entries: object[]): string {
   mkdirSync(record.sessionDir, { recursive: true });

@@ -6,8 +6,7 @@
  */
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
-import { runCommand, type Exec } from "./run.ts";
-import { outputTail } from "./util.ts";
+import { apply, create, facts } from "./store.ts";
 
 export const SCOUT_DIR_ENV = "FACTORY_SCOUT_DIR";
 export const SCOUT_STORE_ENV = "FACTORY_SCOUT_STORE";
@@ -31,18 +30,6 @@ export function stampedText(text: string, commit: string): string {
   return `${text.trimEnd()}\n(explored at ${commit})`;
 }
 
-/** The fact ids of `memory-store read` output, newest first; none when the memory does not exist. */
-export function factIds(readOutput: string): string[] {
-  if (/^## \S+ — not_found:/m.test(readOutput)) return [];
-  return [...readOutput.matchAll(/^- \[([A-Za-z0-9]+)\] /gm)].map((match) => match[1]);
-}
-
-async function memoryStore(exec: Exec, cwd: string, args: string[]): Promise<string> {
-  const result = await exec(["memory-store", ...args], { cwd, maxStdoutChars: 1_000_000 });
-  if (result.exitCode !== 0) throw new Error(`memory-store ${args[0]} failed (exit ${String(result.exitCode)}): ${outputTail(result.output, 500)}`);
-  return result.stdout;
-}
-
 export interface MapWrite {
   store: string;
   commit: string;
@@ -51,25 +38,21 @@ export interface MapWrite {
   text: string;
   /** The scout's directory: the write is appended to its `written.jsonl`. */
   scoutDir?: string;
-  exec?: Exec;
-  cwd?: string;
 }
 
 /** Adds the fact, or updates the path's newest one; resolves with what it did. */
 export async function mapWrite(write: MapWrite): Promise<{ op: "add" | "update"; path: string }> {
-  const exec = write.exec ?? runCommand;
-  const cwd = write.cwd ?? process.cwd();
   const path = mapPath(write.path);
   const description = write.description.trim();
   if (description === "") throw new Error("map_write: description must not be empty");
   if (write.text.trim() === "") throw new Error("map_write: text must not be empty");
   const text = stampedText(write.text, write.commit);
   // Idempotent: declares `map` in a store that lacks it, keeps the store's other directories.
-  await memoryStore(exec, cwd, ["create", write.store, "map"]);
-  const [newest] = factIds(await memoryStore(exec, cwd, ["read", write.store, path]));
+  await create(write.store, "map");
+  const newest = (await facts(write.store, path))[0]?.id;
   const op = newest === undefined ? "add" : "update";
   const ops = newest === undefined ? [{ op: "add", path, description, text }] : [{ op: "update", path, id: newest, text }, { op: "describe", path, description }];
-  await memoryStore(exec, cwd, ["apply", write.store, "--ops", JSON.stringify(ops)]);
+  await apply(write.store, ops);
   if (write.scoutDir !== undefined) await appendFile(join(write.scoutDir, "written.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), op, path })}\n`);
   return { op, path };
 }

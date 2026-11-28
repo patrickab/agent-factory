@@ -58,7 +58,7 @@ scenario("S6 a cancelled conflict task restores the wave's branch, the wave bloc
     async (call) => {
       if (call.role === "coder" && call.prompt.includes("WRITE r.txt")) await held;
       if (call.role === "coder" && call.prompt.includes("WRITE w.txt")) return [{ name: "factory_ask_supervisor", args: { question: "w?" } }];
-      if (call.prompt.includes("ANSWER-W")) return [write("w.txt", "w\n")];
+      if (call.role === "coder" && call.prompt.includes("ANSWER-W")) return [write("w.txt", "w\n")];
       return writesNamed(call);
     },
     async (c) => {

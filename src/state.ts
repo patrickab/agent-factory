@@ -16,11 +16,7 @@ import type { Usage } from "./util.ts";
  * verdict comes as `/factory reviewed`.
  */
 export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked" | "merging" | "done" | "cancelled" | "reviewing";
-/**
- * One row per state: `rests`: nothing happens until someone sends a command or a message; `factoryTurn`: a resting
- * state whose next step is the factory's, not someone's (no attention, a watcher does not count it as rest); `final`:
- * nothing leaves it.
- */
+/** `factoryTurn`: resting, but the next step is the factory's (a watcher does not count it as rest). */
 const STATES: Record<State, { rests: boolean; factoryTurn?: true; final?: true }> = {
   running: { rests: false },
   waiting_approve: { rests: true },
@@ -247,7 +243,7 @@ const REDUCERS: { [K in EntryType]: Reducer<K> } = {
     snapshot && { ...snapshot, review: { round, status, approved, findings }, minors: [...snapshot.minors, ...minorFindings(round, findings)] },
   "factory-merge-intent": (snapshot, mergeIntent) => snapshot && { ...snapshot, mergeIntent },
   "factory-merge": (snapshot, { ok, error, commit }) =>
-    snapshot && { ...snapshot, mergeIntent: null, failure: ok ? null : error, mergedCommit: ok && commit ? commit : snapshot.mergedCommit },
+    snapshot && { ...snapshot, mergeIntent: null, failure: ok ? null : (snapshot.failure ?? error), mergedCommit: ok && commit ? commit : snapshot.mergedCommit },
   "factory-state": (snapshot, { state, round, reason }, at) =>
     snapshot && { ...snapshot, state, round, reason, at, mergeIntent: null, question: state === "waiting_answer" ? snapshot.question : undefined },
   "factory-commit-message": (snapshot, commitMessage) => snapshot && { ...snapshot, commitMessage },
@@ -269,7 +265,7 @@ export function rebuild(entries: Iterable<{ type?: unknown }>): Snapshot | undef
   for (const entry of entries) {
     if (entry.type !== "custom") continue;
     const { customType, data, timestamp } = entry as { customType?: unknown; data?: unknown; timestamp?: string };
-    if (typeof customType === "string" && isEntryType(customType)) snapshot = applyEntry(snapshot, customType, data as EntryData[EntryType], timestamp);
+    if (typeof customType === "string" && isEntryType(customType)) snapshot = applyEntry(snapshot, customType, data as EntryData[EntryType], timestamp ?? "");
   }
   return snapshot;
 }

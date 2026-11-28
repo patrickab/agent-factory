@@ -24,7 +24,7 @@ import {
 } from "./scouts.ts";
 import { unlockFile, withLock } from "./lock.ts";
 import { errorText } from "./util.ts";
-import { memoryStoreRoot } from "./wave-poke.ts";
+import { ls, memoryStoreRoot } from "./store.ts";
 
 const POLL_MS = Number(process.env.FACTORY_SCOUT_POLL_MS) || 1_000;
 
@@ -100,10 +100,10 @@ async function main(dir: string): Promise<void> {
   });
   if (!(await takeSlot(dir, declaration))) return;
 
-  const listing = await runCommand(["memory-store", "ls", declaration.store, "map"], { cwd: declaration.cwd, maxStdoutChars: 200_000 });
+  const listing = await ls(declaration.store, "map", declaration.cwd);
   const mapDir = join(memoryStoreRoot(), declaration.store, "map");
   const promptFile = join(dir, "prompt.md");
-  await writeFile(promptFile, scoutPrompt(declaration, listing.exitCode === 0 ? listing.stdout : "", mapDir));
+  await writeFile(promptFile, scoutPrompt(declaration, listing?.text ?? "", mapDir));
   const argv = ["pi", "--mode", "json", "-p", "--tools", "read,grep,find,ls,map_write", "-ne", "-e", SCOUT_EXTENSION_PATH];
   argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", join(dir, "session"));
   if (declaration.model !== null) argv.push("--model", declaration.model);

@@ -4,7 +4,7 @@
  * - Only a pending task changes; a started one (or one being launched) gets its change with `tasks.message`
  */
 import { nonEmpty, type Handler, type Params } from "./core-shared.ts";
-import { findTask, pendingWaveTask } from "./core-tasks.ts";
+import { findTask, pendingWaveTask, taskView } from "./core-tasks.ts";
 import { findWave, lookWave } from "./core-waves.ts";
 import type { RunnerEnv } from "./launch.ts";
 import { requireModels } from "./models.ts";
@@ -12,7 +12,7 @@ import type { ModelSize } from "./settings.ts";
 import { readTask } from "./tasks.ts";
 import { FactoryError, short } from "./util.ts";
 import { liveWaveRunners, pokeWave } from "./wave-poke.ts";
-import { appendWaveEvents, checkTaskGraph, foldWave, readWave, waveFinal, type FoldedTask, type NewWaveEvent } from "./waves.ts";
+import { appendWaveEvents, checkTaskGraph, readWave, waveFinal, type FoldedTask, type NewWaveEvent } from "./waves.ts";
 
 /**
  * The runner is about to launch the pending task `key`: records a `launch` event and resolves with its spec as folded
@@ -39,7 +39,8 @@ function textParam(action: string, params: Params, key: "title" | "request"): st
   return value;
 }
 
-const started = (key: string, wave: string) => new FactoryError("refused", `task ${key} of wave ${short(wave)} has started: send it the change with tasks.message, or add a task with waves.add`);
+const started = (key: string, wave: string, done = false) =>
+  new FactoryError("refused", `task ${key} of wave ${short(wave)} has started: ${done ? "" : "send it the change with tasks.message, or "}add a task with waves.add`);
 
 async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   const wanted = nonEmpty(params.id)?.trim();
@@ -53,10 +54,10 @@ async function updateTask(params: Params, env?: RunnerEnv): Promise<unknown> {
   // A pending task has only its declared id in its wave's log; a started one has its record.
   const pending = await pendingWaveTask(wanted);
   if (pending === undefined) {
-    const { id, wave } = await findTask(wanted);
+    const record = await findTask(wanted);
+    const { id, wave } = record;
     if (wave === null) throw new FactoryError("refused", `task ${short(id)} belongs to no wave; send it a message with tasks.message`);
-    const file = await readWave(wave);
-    throw started(foldWave(file.declaration, file.events).tasks.find((task) => task.taskId === id)?.key ?? short(id), wave);
+    throw started((await readWave(wave)).fold.tasks.find((task) => task.taskId === id)?.key ?? short(id), wave, (await taskView(record)).state === "done");
   }
   const { wave: waveId, key } = pending;
   const shown = short(waveId);

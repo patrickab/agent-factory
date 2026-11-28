@@ -48,7 +48,7 @@ if (!existsSync(file)) writeFileSync(file, JSON.stringify({ type: "session", ver
 let current = "none";
 const state = (name) => {
   current = name;
-  appendFileSync(file, JSON.stringify({ type: "custom", customType: "factory-state", data: { state: name, round: 1, reason: "r" } }) + "\\n");
+  appendFileSync(file, JSON.stringify({ type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: name, round: 1, reason: "r" } }) + "\\n");
   note("state " + name);
 };
 let agentRunning = false;
@@ -185,7 +185,7 @@ function startRunner(c: ReturnType<typeof newCase>, mode: string, message = "/fa
 function restingIn(c: ReturnType<typeof newCase>, state: string) {
   mkdirSync(c.sessionDir, { recursive: true });
   const header = JSON.stringify({ type: "session", version: 3, id: c.sessionId, cwd: c.worktree });
-  const entry = JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "earlier" } });
+  const entry = JSON.stringify({ type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state, round: 1, reason: "earlier" } });
   writeFileSync(join(c.sessionDir, `2026-01-01T00-00-00-000Z_${c.sessionId}.jsonl`), `${header}\n${entry}\n`);
 }
 
@@ -329,6 +329,7 @@ describe("sendCommand", () => {
       await until(() => noted(c).includes("eof done"));
       const args: string[] = JSON.parse(noted(c)[0].slice("argv ".length));
       expect(args.includes("-ne") ? args.filter((_, index) => args[index - 1] === "-e") : null, JSON.stringify(extensions)).toEqual(sources === null ? null : [...sources]);
+      for (const flag of ["--no-skills", "--no-prompt-templates", "--no-themes"]) expect(args.includes(flag), `${flag} ${JSON.stringify(extensions)}`).toBe(sources !== null);
       await until(() => !existsSync(taskLockPath(record.id)));
     }
     expect(existsSync(plugin)).toBe(true);

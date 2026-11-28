@@ -7,11 +7,11 @@
  */
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { factoryHome } from "./settings.ts";
 import { lockFile, lockRunner, startRunner } from "./lock.ts";
 import { stopProcesses, type RunnerEnv } from "./spawn.ts";
+import { memoryStoreRoot } from "./store.ts";
 import { isBusy } from "./util.ts";
 
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory.
@@ -28,11 +28,6 @@ export function isWaveId(id: string): boolean {
 
 export function wavesDir(): string {
   return join(factoryHome(), "waves");
-}
-
-/** Where memory-store keeps its stores: `MEMORY_STORE_ROOT`, else `~/.pi/memory_store`. */
-export function memoryStoreRoot(): string {
-  return process.env.MEMORY_STORE_ROOT || join(homedir(), ".pi", "memory_store");
 }
 
 /** A new wave's home: `<store>/run/waves/<tag>/<id 8>` when its plan's store exists, else `<factory home>/homes/<tag>/<id 8>`. */

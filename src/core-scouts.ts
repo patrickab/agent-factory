@@ -7,7 +7,7 @@
  */
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import { memoryStore } from "./contracts.ts";
+import { ls, memoryStoreOnPath } from "./store.ts";
 import { byId, nonEmpty, primaryOf, repoPath, stringsParam, type Handler } from "./core-shared.ts";
 import { defaultSmallModel } from "./core-settings.ts";
 import { waveReviewWorktree } from "./core-waves.ts";
@@ -57,9 +57,8 @@ async function smallModel(repo: string, waveId: string | null): Promise<string |
 }
 
 async function requireStore(store: string, cwd: string): Promise<void> {
-  const result = await memoryStore(["ls", store], cwd);
-  if (result.exitCode === null) throw new FactoryError("failed", "memory-store could not run: a scout needs it on PATH");
-  if (result.exitCode !== 0) throw new FactoryError("refused", `memory store ${store} does not exist: a scout writes the map of an existing store`);
+  if (!memoryStoreOnPath()) throw new FactoryError("failed", "memory-store could not run: a scout needs it on PATH");
+  if ((await ls(store, undefined, cwd)) === null) throw new FactoryError("refused", `memory store ${store} does not exist: a scout writes the map of an existing store`);
 }
 
 async function waitForScout(dir: string, signal: AbortSignal | undefined): Promise<{ scout: ScoutView; timedOut: boolean }> {

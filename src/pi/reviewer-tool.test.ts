@@ -12,7 +12,7 @@ import { writeFakeMemoryStore, writeStore } from "../fake-memory-store.ts";
 import { pendingNotices } from "../notify.ts";
 import { lockFile, unlockFile } from "../lock.ts";
 import { waveLockPath } from "../wave-poke.ts";
-import { createWave, foldWave, readWave, type WaveView } from "../waves.ts";
+import { createWave, readWave, type WaveView } from "../waves.ts";
 import defaultExtension, { FIX_TOOL, NOTIFY_TOOL, registerReviewerTools, type ReviewerIds } from "./reviewer-tool.ts";
 
 useCoreFixture();
@@ -104,8 +104,7 @@ describe("reviewer tools", () => {
       }
       const refused = await call(fix, { title: "one more", request: "do 4" });
       expect(refused.isError).toBe(true);
-      const { declaration, events } = await readWave(id);
-      const fold = foldWave(declaration, events);
+      const { fold } = await readWave(id);
       expect(fold.fixes).toBe(REVIEWER_FIX_CAP);
       expect(fold.tasks.map((task) => task.key)).toEqual(["fix-1", "fix-2", "fix-3"]);
       // Each started fix reaches the supervisor as information.

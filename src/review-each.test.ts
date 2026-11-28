@@ -9,11 +9,17 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { callAction } from "./core.ts";
+import { liveRunners } from "./launch.ts";
+import { reviewNext } from "./review-each.ts";
+import { lockTask, tasksById } from "./tasks.ts";
+import { unlockFile } from "./lock.ts";
+import { taskLockPath } from "./tasks.ts";
 import { readDiffText } from "./review.ts";
 import { writeTask, type TaskRecord } from "./tasks.ts";
 import { stopWaveRunners, waveReviewsDir } from "./wave-poke.ts";
 import { reviewEachDeps, runWave } from "./wave-runner.ts";
-import { appendWaveEvent, createWave, foldWave, listWaves, readWave } from "./waves.ts";
+import { appendWaveEvent, createWave, listWaves, readWave } from "./waves.ts";
 import { NO_USAGE } from "./util.ts";
 import { TASK_ENTRY } from "./core-test-kit.ts";
 
@@ -30,6 +36,19 @@ writeFileSync(
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const args = process.argv.slice(2);
+if (process.env.FAKE_TASK === "die") process.exit(1);
+if (process.env.FAKE_TASK === "apply") {
+  // The task's coder: takes the command, applies the verdict (done), notes the command.
+  const first = await new Promise((done) => { let text = ""; process.stdin.on("data", (chunk) => { text += chunk; if (text.includes("\\n")) done(text.split("\\n")[0]); }); });
+  writeFileSync(process.env.FAKE_TASK_PROMPT, first);
+  const sessionDir = args[args.indexOf("--session-dir") + 1];
+  const sessionId = args[args.indexOf("--session-id") + 1];
+  const file = join(sessionDir, "2026-01-01T00-00-00-000Z_" + sessionId + ".jsonl");
+  console.log(JSON.stringify({ id: "1", type: "response", command: "prompt", success: true, data: { disposition: "handled" } }));
+  appendFileSync(file, JSON.stringify({ type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: "done", round: 1, reason: "r" } }) + "\\n");
+  console.log(JSON.stringify({ type: "entry_appended" }));
+  await new Promise(() => {});
+}
 const dir = args[args.indexOf("--session-dir") + 1];
 const given = args.includes("--session-id") ? args[args.indexOf("--session-id") + 1] : null;
 const id = given ?? "11111111-2222-4333-8444-555555555555";
@@ -99,7 +118,7 @@ const taskCalls = () => calls().filter((call) => call.key !== "wave");
 /** The task `key`'s session file (one per task). */
 const sessionPath = (key: string) => join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseCount}-${key}.jsonl`);
 /** Appends a `factory-state` entry to the task's session. */
-const setState = (key: string, state: string, round: number) => appendFileSync(sessionPath(key), `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round, reason: "r" } })}\n`);
+const setState = (key: string, state: string, round: number) => appendFileSync(sessionPath(key), `${JSON.stringify({ type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state, round, reason: "r" } })}\n`);
 
 /**
  * A repo on `main` with a wave whose tasks `keys` each have a worktree off the
@@ -154,7 +173,7 @@ function playTasks(act: (key: string, command: { round: number; review: { approv
   return handed;
 }
 
-const taskReviews = async () => foldWave((await readWave(WAVE)).declaration, (await readWave(WAVE)).events).taskReviews ?? [];
+const taskReviews = async () => (await readWave(WAVE)).fold.taskReviews ?? [];
 
 describe("review per task", () => {
   test("approve: the verdict goes to the task, which merges; the reviewer gets the diff only through read_diff", async () => {
@@ -167,7 +186,16 @@ describe("review per task", () => {
     expect(call!.args.at(-1)).not.toContain("a one");
     expect((await taskReviews()).map((review) => [review.key, review.round, review.verdict])).toEqual([["a", 1, "approved"]]);
     // Every task done: the wave then reviews and merges as before.
-    expect(foldWave((await readWave(WAVE)).declaration, (await readWave(WAVE)).events).stage).toBe("merged");
+    expect((await readWave(WAVE)).fold.stage).toBe("merged");
+  });
+
+  test("the supervisor's messages to the task are in its review prompt", async () => {
+    await eachWave(["a"]);
+    appendFileSync(sessionPath("a"), `${JSON.stringify({ type: "message", message: { role: "user", content: "add a.txt" } })}\n${JSON.stringify({ type: "message", message: { role: "user", content: "also name it loudly" } })}\n`);
+    playTasks((key) => setState(key, "done", 1));
+    expect(await runWave(WAVE)).toBe(0);
+    expect(taskCalls()[0]!.args.at(-1)).toContain("also name it loudly");
+    expect(taskCalls()[0]!.args.at(-1)).not.toContain("### Message 2");
   });
 
   test("a major finding goes to the task's next round; its second review reads only what changed since", async () => {
@@ -238,4 +266,32 @@ describe("read_diff", () => {
     expect(only).not.toContain("+y");
     expect(readDiffText(json, ["z.ts"])).toContain("None of z.ts changed");
   });
+
+  test("a verdict whose hand-overs all fail blocks the wave (infra) once; waves.retry hands the recorded verdict over again", async () => {
+    await eachWave(["a"]);
+    const taskId = (await tasksById()).values().next().value!.id;
+    await appendWaveEvent(WAVE, { kind: "task_review", key: "a", taskId, round: 1, tree: "t", base: "b", contracts: null, sessionId: "s", model: null, verdict: "approved", status: "ok", findings: [], usage: NO_USAGE, wallMs: 0 });
+    process.env.FAKE_TASK = "die";
+    // A runner that has not released the task's lock: `busy` is no try used up, however often it comes.
+    await lockTask(taskId);
+    const { fold } = await readWave(WAVE);
+    const deps = { ...reviewEachDeps, env: process.env, log: () => {} };
+    for (let look = 0; look < 5; look++) expect(await reviewNext(fold, new Map([["a", "reviewing"]]), deps)).toBe(true);
+    await unlockFile(taskLockPath(taskId));
+    await runWave(WAVE);
+    const blocked = (await readWave(WAVE)).fold;
+    expect([blocked.stage, blocked.reason]).toEqual(["blocked", "infra"]);
+    expect(blocked.detail).toContain("task a");
+    expect(blocked.detail).not.toContain(caseDir);
+    expect(calls()).toEqual([]);
+    // The runner starts anew with a working task: the verdict is handed over, not reviewed again.
+    process.env.FAKE_TASK = "apply";
+    process.env.FAKE_TASK_PROMPT = join(caseDir, "prompt.txt");
+    reviewEachDeps.delivered.clear();
+    await callAction("waves.retry", { id: WAVE });
+    const deadline = Date.now() + 20_000;
+    while ((await readWave(WAVE)).fold.stage !== "merged" && Date.now() < deadline) await Bun.sleep(50);
+    expect(readFileSync(process.env.FAKE_TASK_PROMPT, "utf8")).toContain("/factory reviewed");
+    expect(taskCalls()).toEqual([]);
+  }, 40_000);
 });

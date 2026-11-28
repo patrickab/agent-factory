@@ -234,11 +234,12 @@ test("a rebase the coder left open goes back to the coder before any hook or gat
 });
 
 describe("runMerge", () => {
+  const merging = (...args: Parameters<typeof snapshotOf>): Snapshot => ({ ...snapshotOf(...args), state: "merging" });
   const gate = { round: 2, phase: "merge_gates" as const, argv: ["lint"], exitCode: 0, killed: false, durationMs: 1, outputTail: "" };
 
   test("records the merge gates before the merge and reports the merge as merged", async () => {
     const steps = fakeSteps({ merge: async () => ({ gates: [gate], result: { kind: "merged", merge: { ...merged, tree: null } } }) });
-    const entries = await runMerge(snapshotOf({}, 2), config, steps);
+    const entries = await runMerge(merging({}, 2), config, steps);
     expect(kinds(entries)).toEqual(["factory-gate", "factory-merge", "factory-state"]);
     expect(lastState(entries)).toEqual({ state: "done", round: 2, reason: "merged" });
   });
@@ -246,7 +247,7 @@ describe("runMerge", () => {
   test("a failed after_merge hook is recorded and leaves the task done with a reason that says so", async () => {
     const hook = { ...gate, phase: "after_merge" as const, argv: ["uv", "sync"], exitCode: 1, outputTail: "no network" };
     const data: MergeData = { ok: true, commit: "def", error: "after_merge failed: uv sync: no network", depsSynced: false };
-    const entries = await runMerge(snapshotOf({}, 2), config, fakeSteps({ merge: async () => ({ gates: [hook], result: { kind: "merged", merge: data } }) }));
+    const entries = await runMerge(merging({}, 2), config, fakeSteps({ merge: async () => ({ gates: [hook], result: { kind: "merged", merge: data } }) }));
     expect(entries[0]).toMatchObject({ customType: "factory-gate", data: { phase: "after_merge", exitCode: 1 } });
     expect(entries[1]).toMatchObject({ customType: "factory-merge", data: { ok: true, error: "after_merge failed: uv sync: no network" } });
     expect(lastState(entries)).toEqual({ state: "done", round: 2, reason: "merged, after_merge failed" });
@@ -255,28 +256,28 @@ describe("runMerge", () => {
   const failed: MergeData = { ok: false, commit: null, error: "fast-forward of main refused", depsSynced: false };
 
   test("a failed merge blocks the task", async () => {
-    const entries = await runMerge(snapshotOf(), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "failed", merge: failed } }) }));
+    const entries = await runMerge(merging(), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "failed", merge: failed } }) }));
     expect(entries.at(-2)).toMatchObject({ customType: "factory-merge", data: failed });
     expect(lastState(entries)).toEqual({ state: "blocked", round: 1, reason: "merge_failed" });
   });
 
   test("a rebase conflict merges nothing and opens a conflict round within the budget, then blocks with max_rounds: conflict", async () => {
     const conflicting = fakeSteps({ merge: async () => ({ gates: [], result: { kind: "conflict", files: ["notes.txt"] } }) });
-    const entries = await runMerge(snapshotOf({ maxRounds: 3 }, 2, 1), config, conflicting);
+    const entries = await runMerge(merging({ maxRounds: 3 }, 2, 1), config, conflicting);
     expect(kinds(entries)).toEqual(["factory-round", "custom_message", "factory-state"]);
     expect(entries[0]).toMatchObject({ data: { round: 3, trigger: "conflict" } });
     expect(entries[1]).toMatchObject({ details: { round: 2, trigger: "conflict" } });
     expect((entries[1] as { content: string }).content).toContain("- notes.txt\nRun `git rebase refs/heads/main`, resolve the conflicts");
     expect(lastState(entries)).toEqual({ state: "running", round: 3, reason: "conflict" });
 
-    const last = await runMerge(snapshotOf({ maxRounds: 3 }, 3, 1), config, conflicting);
+    const last = await runMerge(merging({ maxRounds: 3 }, 3, 1), config, conflicting);
     expect(kinds(last)).toEqual(["custom_message", "factory-state"]);
     expect(lastState(last)).toEqual({ state: "blocked", round: 3, reason: "max_rounds: conflict" });
   });
 
   test("a merge gate that fails on the rebased branch goes back to the coder as a gates round, nothing merged", async () => {
     const failedGate = { argv: ["test"], result: commandResult(1, "FAILED test_new_thing") };
-    const entries = await runMerge(snapshotOf({ maxRounds: 3 }, 2, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
+    const entries = await runMerge(merging({ maxRounds: 3 }, 2, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
     expect(kinds(entries)).toEqual(["factory-round", "custom_message", "factory-state"]);
     expect((entries[1] as { content: string }).content).toContain("After the rebase onto main");
     expect((entries[1] as { content: string }).content).toContain("FAILED test_new_thing");
@@ -285,7 +286,7 @@ describe("runMerge", () => {
 
   test("a merge gate that exits 75 blocks the task as infra", async () => {
     const failedGate = { argv: ["test"], result: commandResult(75, "pi-host/node_modules is missing") };
-    const entries = await runMerge(snapshotOf({}, 1, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
+    const entries = await runMerge(merging({}, 1, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
     expect(lastState(entries)).toEqual({ state: "blocked", round: 1, reason: "infra: pi-host/node_modules is missing" });
   });
 

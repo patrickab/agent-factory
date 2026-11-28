@@ -18,12 +18,19 @@ process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
 process.env.HOME = scratch;
 
 /**
- * `launchTask` starts a runner: a fake `pi` that exits before it answers stands first on every PATH of these tests, so
- * no real Pi ever runs.
+ * `launchTask` starts a runner: a fake `pi` that writes a first state and exits before it answers stands first on every
+ * PATH of these tests, so no real Pi ever runs.
  */
 const piBin = join(scratch, "pi-bin");
 mkdirSync(piBin);
-writeFileSync(join(piBin, "pi"), "#!/bin/sh\nexit 0\n");
+writeFileSync(
+  join(piBin, "pi"),
+  `#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in --session-dir) dir="$2";; --session-id) id="$2";; esac; shift; done
+mkdir -p "$dir"
+echo '{"type":"custom","customType":"factory-state","data":{"state":"running"}}' >> "$dir/s_$id.jsonl"
+`,
+);
 chmodSync(join(piBin, "pi"), 0o755);
 
 /** A PATH without any directory that holds `agent-worktree`: the plain `git worktree add` path. */
@@ -152,7 +159,7 @@ describe("launchTask", () => {
   test("a target branch that does not exist locally: refused before any worktree", async () => {
     const repo = makeRepo("repo", "main");
     await expect(launchTask({ repo, title: "t", request: "r", overrides: { branch: "nope" } })).rejects.toThrow(
-      "branch nope does not exist locally",
+      "has no local branch nope",
     );
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
   });

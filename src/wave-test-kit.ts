@@ -144,7 +144,7 @@ export async function waveRepo(config = 'gates:\n  - ["true"]\n', state = "done"
 /** Overwrites the session of the wave's task `key` with one state. */
 export function setState(key: string, state: string): void {
   mkdirSync(join(caseDir, "sessions"), { recursive: true });
-  writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseSerial()}-${key}.jsonl`), `${JSON.stringify(TASK_ENTRY)}\n${JSON.stringify({ type: "custom", customType: "factory-state", data: { state, round: 1, reason: "r" } })}\n`);
+  writeFileSync(join(caseDir, "sessions", `2026-01-01T00-00-00-000Z_session-${RUN}-${caseSerial()}-${key}.jsonl`), `${JSON.stringify(TASK_ENTRY)}\n${JSON.stringify({ type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state, round: 1, reason: "r" } })}\n`);
 }
 
 export const getWave = async (): Promise<WaveView> => ((await callAction("waves.get", { id: WAVE() })) as { wave: WaveView }).wave;

@@ -11,10 +11,9 @@ import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadTaskFiles } from "./config.ts";
 import { byId, nonEmpty, primaryOf, type Handler } from "./core-shared.ts";
-import { branchHasConfig } from "./core-settings.ts";
 import { runGateStep } from "./flaky-rerun.ts";
 import { git } from "./git.ts";
-import { defaultBranch, localBranchExists, runAfterCreate, worktreePath } from "./launch.ts";
+import { localBranchExists, runAfterCreate, targetOf, worktreePath } from "./launch.ts";
 import { CommandRunner, runCommand, type CommandResult, type Exec } from "./run.ts";
 import { factoryHome, loadSettings } from "./settings.ts";
 import { lockFile, lockHeld, startRunner, unlockFile } from "./lock.ts";
@@ -137,12 +136,9 @@ async function removeLeftovers(repo: string): Promise<void> {
 export const PROOF_HANDLERS = {
   "gates.prove": async (params, { cwd, env, origin }) => {
     const repo = await primaryOf(params.repo as string, cwd);
-    let branch = params.branch === undefined ? undefined : nonEmpty(params.branch)?.trim();
-    if (params.branch !== undefined && branch === undefined) throw new FactoryError("invalid", "gates.prove: branch must not be empty");
-    branch ??= (await loadSettings(repo)).branch ?? (await defaultBranch(repo).catch(() => undefined));
-    if (branch === undefined) throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
-    if (!(await localBranchExists(repo, branch))) throw new FactoryError("not_found", `${repo} has no local branch ${branch}`);
-    if (!(await branchHasConfig(repo, branch))) throw new FactoryError("refused", `${repo}: branch ${branch} has no factory.yaml (write one with /factory init or the config.write action, and commit it)`);
+    const given = params.branch === undefined ? undefined : nonEmpty(params.branch)?.trim();
+    if (params.branch !== undefined && given === undefined) throw new FactoryError("invalid", "gates.prove: branch must not be empty");
+    const branch = await targetOf(repo, given);
     await removeLeftovers(repo);
     const declaration: ProofDeclaration = {
       id: crypto.randomUUID(),
@@ -155,7 +151,10 @@ export const PROOF_HANDLERS = {
     const { id } = declaration;
     // Held by this process until the runner has it.
     await lockFile(proofLockPath(id), `proof ${id.slice(0, 8)} is busy`);
-    await writeProof(declaration);
+    await writeProof(declaration).catch(async (error: unknown) => {
+      await unlockFile(proofLockPath(id));
+      throw error;
+    });
     await startRunner({ lock: proofLockPath(id), argv: [PROOF_RUNNER_PATH, id], env: env ?? process.env, log: proofLogPath(id), cwd: import.meta.dirname }).catch(async (error: unknown) => {
       await rm(proofPath(id), { force: true });
       throw new FactoryError("failed", `the runner of proof ${id.slice(0, 8)} did not start (${errorText(error)})`);

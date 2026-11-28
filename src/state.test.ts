@@ -30,6 +30,8 @@ describe("rebuild", () => {
       custom("factory-merge", { ok: false, commit: null, error: "x", depsSynced: false }),
     ]);
     expect(snapshot).toMatchObject({ state: "running", round: 2, mergeIntent: null, failure: "x" });
+    const gated = applyEntry(applyEntry(snapshot, "factory-round", { round: 3, trigger: "gates" }), "factory-gate", { round: 3, phase: "merge_gates", argv: ["t"], exitCode: 1, killed: false, durationMs: 1, outputTail: "" });
+    expect(applyEntry(gated, "factory-merge", { ok: false, commit: null, error: "x", depsSynced: false })?.failure).toBe("t (exit 1)");
     const done = rebuild([
       custom("factory-task", task),
       custom("factory-round", { round: 1, trigger: "start" }),

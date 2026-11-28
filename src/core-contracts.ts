@@ -4,13 +4,14 @@
  *   contract gets the follow-up at once, another started one on its record for its next turn; its stamp is stored
  *   either way, so `contractCheck` says it once. Pending tasks read the contract at their launch
  */
-import { contractKind, contractNote, CONTRACT_DIR, factChanges, isContractName, memoryStore, memoryStoreOnPath, readContract, stampOf, withContractsLock } from "./contracts.ts";
-import { nonEmpty, oneLine, type Handler, type Params } from "./core-shared.ts";
+import { contractKind, contractNote, CONTRACT_DIR, factChanges, isContractName, readContract, stampOf, withContractsLock } from "./contracts.ts";
+import { apply, memoryStoreOnPath } from "./store.ts";
+import { nonEmpty, type Handler, type Params } from "./core-shared.ts";
 import { messageTask } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
-import { listTasks, readTask, writeTask, type TaskRecord } from "./tasks.ts";
-import { FactoryError, isRecord, outputTail } from "./util.ts";
-import { appendWaveEvent, foldWave, listWaves } from "./waves.ts";
+import { readTask, tasksById, writeTask, type TaskRecord } from "./tasks.ts";
+import { FactoryError, isRecord } from "./util.ts";
+import { appendWaveEvent, listWaves } from "./waves.ts";
 
 const OPS = ["add", "update", "retire", "write_doc"];
 
@@ -69,18 +70,17 @@ async function applyContract(params: Params): Promise<unknown> {
   return withContractsLock(async () => {
     const op = await storeOp(store, name, params.op);
     const before = await readContract(store, name);
-    const applied = await memoryStore(["apply", store, "--ops", JSON.stringify([op])]);
-    if (!applied.ok) throw new FactoryError("failed", `memory-store apply: ${oneLine(outputTail(applied.output, 500))}`);
+    await apply(store, [op]);
     const after = await readContract(store, name);
     const changes = factChanges(before, after);
     const answer = { store, name, changed: changes.map((change) => change.path), notified: [] as Listed[], kept: [] as Listed[], done: [] as Listed[] };
     if (changes.length === 0) return answer;
     const note = contractNote(name, changes);
     const stamp = stampOf(after);
-    const records = new Map((await listTasks()).map((record) => [record.id, record]));
+    const records = await tasksById();
     for (const file of await listWaves()) {
-      const fold = foldWave(file.declaration, file.events);
-      if (fold.plan !== store || !(fold.contracts ?? []).includes(name) || fold.stage === "cancelled") continue;
+      const fold = file.fold;
+      if (fold.plan !== store || !(fold.contracts ?? []).includes(name) || fold.stage === "merged" || fold.stage === "cancelled") continue;
       const done: string[] = [];
       for (const task of fold.tasks) {
         // A task launched before its `task` event (its runner writes it next, or adopts the record) has its record under its declared id.

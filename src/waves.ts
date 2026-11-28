@@ -154,6 +154,7 @@ export type NewWaveEvent = DistributiveOmit<WaveEvent, "at"> & { at?: string };
 export interface WaveFile {
   declaration: WaveDeclaration;
   events: WaveEvent[];
+  fold: WaveFold;
 }
 
 /**
@@ -281,8 +282,7 @@ export async function appendWaveEvents(id: string, events: NewWaveEvent[] | ((fo
   return withLock(waveLogLockPath(id), `wave ${id.slice(0, 8)} is busy: another process writes its log, try again`, LOG_LOCK_WAIT_MS, async () => {
     let chosen: NewWaveEvent[] | null;
     if (typeof events === "function") {
-      const file = await readWave(id);
-      chosen = await events(foldWave(file.declaration, file.events));
+      chosen = await events((await readWave(id)).fold);
       if (chosen === null) return null;
     } else {
       chosen = events;
@@ -319,7 +319,8 @@ export async function readWave(id: string): Promise<WaveFile> {
   } catch (error) {
     throw new Error(`${path}: the declaration is no JSON (${errorText(error)})`);
   }
-  return { declaration, events: jsonLines<WaveEvent>(newline === -1 ? "" : text.slice(newline + 1)) };
+  const events = jsonLines<WaveEvent>(newline === -1 ? "" : text.slice(newline + 1));
+  return { declaration, events, fold: foldWave(declaration, events) };
 }
 
 /** Every wave, oldest first; only those of `repo` when given. Entries that are no valid wave (a home deleted by hand) are skipped. */
@@ -341,10 +342,8 @@ export async function removeWave(id: string): Promise<void> {
 
 // ---- the fold ----
 
-/** Stages that keep what came before them: a wave blocked or cancelled is as far as it was when that happened. */
-
 /** The wave's state from its declaration and events: a declared wave is `building`, `queued` with `after`. */
-export function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): WaveFold {
+function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): WaveFold {
   const after = declaration.after ?? [];
   const stage: WaveStage = after.length > 0 ? "queued" : "building";
   const fold: WaveFold = { ...declaration, after: [...after], started: after.length === 0, stage, reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, updates: [], conflicts: [], taskReviews: [], fixes: 0, reviewBegan: false, gatedCommit: null };

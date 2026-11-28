@@ -12,26 +12,29 @@ import { basename, join } from "node:path";
 import { byId, nonEmpty, primaryOf, tagParam, type Handler } from "./core-shared.ts";
 import { diffFileCounts, git, snapshotTree, treeDiff, type FileCounts } from "./git.ts";
 import {
-  defaultBranch,
   deleteTask,
   launchTask,
+  DONE_REFUSAL,
   liveRunners,
+  MERGING_REFUSAL,
   messageTask,
+  requireRunnerStarted,
   sendCommand,
   stopRunners,
   unmergedWork,
   type RunnerEnv,
   type UnmergedWork,
+  targetOf,
 } from "./launch.ts";
 import { readFactoryStates, sessionEntries, sessionFilePath, taskMainBranch } from "./runner.ts";
 import { runCommand } from "./run.ts";
 import { requireModels } from "./models.ts";
 import { checkSettings, factoryHome, loadSettings, resolveSettings } from "./settings.ts";
 import { COMMIT_ASK_TYPE, isFactoryTurn, isFinal, isFactoryPrompt, messageText, rebuild, isResting, type Finding, type MinorFinding, type ReviewData, type Settings, type Snapshot, type State } from "./state.ts";
-import { listTasks, lockTask, tagInGroup, taskLockPath, taskLogPath, type TaskRecord } from "./tasks.ts";
+import { listTasks, lockTask, tagInGroup, taskLockPath, type TaskRecord } from "./tasks.ts";
 import { unlockFile } from "./lock.ts";
 import { addUsage, cents, FactoryError, isRecord, jsonLines, piUsage, short, writeAtomic, type Usage } from "./util.ts";
-import { foldWave, listWaves, readWave, waveFinal, type WaveStage } from "./waves.ts";
+import { listWaves, readWave, waveFinal, type WaveStage } from "./waves.ts";
 import { pokeWave } from "./wave-poke.ts";
 import { cancelScouts, scoutUsage } from "./scouts.ts";
 import { slotWaiting } from "./test-slots.ts";
@@ -115,7 +118,7 @@ export async function findTask(id: unknown): Promise<TaskRecord> {
 /** The pending task of a wave whose declared id is `wanted` or starts with it (the first such), else undefined. */
 export async function pendingWaveTask(wanted: string): Promise<{ id: string; key: string; wave: string } | undefined> {
   for (const file of await listWaves()) {
-    for (const task of foldWave(file.declaration, file.events).tasks) {
+    for (const task of file.fold.tasks) {
       if (task.taskId === null && task.id?.startsWith(wanted)) return { id: task.id, key: task.key, wave: file.declaration.id };
     }
   }
@@ -130,8 +133,7 @@ async function taskWaveStage(record: TaskRecord, known?: WaveStage): Promise<Wav
   if (record.wave === null) return null;
   if (known !== undefined) return known;
   try {
-    const file = await readWave(record.wave);
-    return foldWave(file.declaration, file.events).stage;
+    return (await readWave(record.wave)).fold.stage;
   } catch (error) {
     if (error instanceof FactoryError && error.code === "not_found") return "removed";
     throw error;
@@ -256,9 +258,6 @@ export async function taskView(record: TaskRecord): Promise<TaskView> {
  * counts on (neither merged, cancelled nor removed) is not removed: removed, it would count as cancelled and strand the
  * tasks waiting for it; `waves.remove` removes it with its wave (`waveStage` null).
  */
-/** A done task takes no message: its work is merged, more work is a new task. */
-export const DONE_REFUSAL = "is done: give the work to its wave with waves.add, or start a new task";
-
 export function refusal(view: Omit<TaskView, "actions">, action: TaskActionName, waveStage: WaveStage | "removed" | null): FactoryError | null {
   const task = `task ${short(view.id)}`;
   const refused = (why: string) => new FactoryError("refused", `${task} ${why}`);
@@ -286,7 +285,7 @@ export function refusal(view: Omit<TaskView, "actions">, action: TaskActionName,
       );
     case "tasks.message":
       if (view.state === null) return refused("has not started yet, send the message once it runs");
-      if (view.state === "merging") return refused("is merging, send the message when the merge has ended");
+      if (view.state === "merging") return refused(MERGING_REFUSAL);
       if (view.state === "done") return refused(DONE_REFUSAL);
       return view.state === "waiting_answer" ? null : leftBuilding("a message");
   }
@@ -402,29 +401,6 @@ export async function tasksIn(repo: string | undefined, tag: string | undefined)
   return tag === undefined ? records : records.filter((record) => tagInGroup(record.tag, tag));
 }
 
-/** How long a cancel or retry of an interrupted task waits for its runner to write a state or end. */
-const RUNNER_START_WAIT_MS = 15_000;
-
-/**
- * For a command to an interrupted task: waits until the session has more than `statesBefore` `factory-state` entries
- * (the runner runs) or the runner ended without one (`failed`, naming the last line of its log). A runner still
- * alive after `RUNNER_START_WAIT_MS` counts as started.
- */
-async function requireRunnerStarted(record: TaskRecord, statesBefore: number): Promise<void> {
-  const deadline = Date.now() + RUNNER_START_WAIT_MS;
-  const wroteState = async () => (await readFactoryStates(record.sessionDir, record.sessionId)).count > statesBefore;
-  while (Date.now() < deadline) {
-    if (await wroteState()) return;
-    if ((await liveRunners(record)).length === 0) {
-      if (await wroteState()) return;
-      const log = await readFile(taskLogPath(record.id), "utf8").catch(() => "");
-      const last = log.trim().split("\n").at(-1)?.trim().slice(0, 300) ?? "";
-      throw new FactoryError("failed", `the runner of task ${short(record.id)} ended before it ran${last === "" ? "" : ` (${last})`}`);
-    }
-    await Bun.sleep(100);
-  }
-}
-
 /**
  * Cancels a task (`tasks.cancel` after its state check): the runner holds the task lock until it exits, so stop it,
  * then take the lock and send `/factory cancel`.
@@ -469,7 +445,7 @@ export async function droppedWork(record: TaskRecord, force: boolean, landed = f
 async function requireNoOpenWaveBranch(repo: string, target: string): Promise<void> {
   for (const file of await listWaves()) {
     if (file.declaration.repo !== repo) continue;
-    const { stage, id, branch } = foldWave(file.declaration, file.events);
+    const { stage, id, branch } = file.fold;
     if (branch !== target) continue;
     if (waveFinal(stage)) continue;
     throw new FactoryError(
@@ -536,9 +512,8 @@ export const TASK_HANDLERS = {
     const stored = await loadSettings(repo);
     const { big, reviewer } = resolveSettings([stored, overrides], "").models;
     await requireModels({ big, reviewer });
-    // The target as `launchTask` resolves it; a missing default branch is its refusal.
-    const target = overrides.branch ?? stored.branch ?? (await defaultBranch(repo).catch(() => undefined));
-    if (target !== undefined) await requireNoOpenWaveBranch(repo, target);
+    // The target as `launchTask` resolves it; it refuses a missing or unconfigured one.
+    await requireNoOpenWaveBranch(repo, await targetOf(repo, overrides.branch ?? stored.branch, { config: false }));
     // Again once the worktree exists: a wave declared on the branch meanwhile (a racing `waves.start`) wins.
     const beforeRecord = (branch: string) => requireNoOpenWaveBranch(repo, branch);
     return taskView(await launchTask({ repo, title, request, overrides, tag, origin: origin ?? null, signal, env, beforeRecord }));

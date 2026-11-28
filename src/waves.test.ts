@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FactoryError } from "./core.ts";
-import { allCancelled, appendWaveEvent, createWave, foldWave, readWave, readyForReview, startableKeys, stuckKeys, unreachableKeys, validateTaskSpecs, waveCounts, waveTaskState, type WaveDeclaration, type WaveEvent, type WaveFold } from "./waves.ts";
+import { allCancelled, appendWaveEvent, appendWaveEvents, createWave, readWave, readyForReview, startableKeys, stuckKeys, unreachableKeys, validateTaskSpecs, waveCounts, waveTaskState, type WaveDeclaration, type WaveEvent, type WaveFold } from "./waves.ts";
 import type { State } from "./state.ts";
 import { wavePath } from "./wave-poke.ts";
 
@@ -47,10 +47,19 @@ function declaration(id: string, overrides: Partial<WaveDeclaration> = {}): Wave
 const spec = (key: string, after: string[] = []) => ({ key, title: `Task ${key}`, request: `do ${key}`, after, id: `id-${key}` });
 const states = (entries: Record<string, State | null>) => new Map(Object.entries(entries));
 
-function folded(tasks: ReturnType<typeof spec>[], started: string[] = []): WaveFold {
+let waves = 100;
+/** The fold `readWave` answers for a new wave with `events` (its own home: the id's first 8 characters name it). */
+async function read(events: WaveEvent[]): Promise<WaveFold> {
+  const id = `${String(waves++).padStart(8, "0")}-0000-4000-8000-000000000000`;
+  await createWave(declaration(id));
+  await appendWaveEvents(id, events);
+  return (await readWave(id)).fold;
+}
+
+function folded(tasks: ReturnType<typeof spec>[], started: string[] = []): Promise<WaveFold> {
   const events: WaveEvent[] = [{ at: "t1", kind: "tasks", tasks }];
   for (const key of started) events.push({ at: "t2", kind: "task", key, taskId: `id-${key}`, sessionId: `s-${key}` });
-  return foldWave(declaration(ONE), events);
+  return read(events);
 }
 
 describe("wave records", () => {
@@ -78,8 +87,8 @@ describe("wave records", () => {
 
 describe("foldWave", () => {
 
-  test("tasks and task: specs in order, ids once started; unknown keys and repeated keys change nothing", () => {
-    const fold = foldWave(declaration(ONE), [
+  test("tasks and task: specs in order, ids once started; unknown keys and repeated keys change nothing", async () => {
+    const fold = await read([
       { at: "t1", kind: "tasks", tasks: [spec("a"), spec("b", ["a"])] },
       { at: "t2", kind: "task", key: "a", taskId: "id-a", sessionId: "s-a" },
       { at: "t3", kind: "task", key: "zz", taskId: "id-z", sessionId: "s-z" },
@@ -92,17 +101,17 @@ describe("foldWave", () => {
     ]);
   });
 
-  test("stage: the last one wins, the reason only while blocked", () => {
-    const blocked = foldWave(declaration(ONE), [
+  test("stage: the last one wins, the reason only while blocked", async () => {
+    const blocked = await read([
       { at: "t1", kind: "stage", stage: "reviewing", reason: null },
       { at: "t2", kind: "stage", stage: "blocked", reason: "conflict" },
     ]);
     expect([blocked.stage, blocked.reason]).toEqual(["blocked", "conflict"]);
-    const rejected = foldWave(declaration(ONE), [{ at: "t1", kind: "stage", stage: "rejected", reason: "gates" }]);
+    const rejected = await read([{ at: "t1", kind: "stage", stage: "rejected", reason: "gates" }]);
     expect([rejected.stage, rejected.reason]).toEqual(["rejected", null]);
   });
 
-  test("gate, review and merge collect in order; merge keeps the last", () => {
+  test("gate, review and merge collect in order; merge keeps the last", async () => {
     const review = {
       round: 1,
       sessionId: "r-1",
@@ -113,7 +122,7 @@ describe("foldWave", () => {
       usage: { input: 10, output: 5, cacheRead: 40, cacheWrite: 2, cost: 0.1 },
       wallMs: 900,
     };
-    const fold = foldWave(declaration(ONE), [
+    const fold = await read([
       { at: "t1", kind: "gate", phase: "review", passed: true, wallMs: 100, log: "/logs/g1" },
       { at: "t2", kind: "review", ...review },
       { at: "t3", kind: "gate", phase: "merge", passed: false, wallMs: 50, log: null },
@@ -133,43 +142,43 @@ describe("foldWave", () => {
 describe("scheduling", () => {
   const fold = () => folded([spec("a"), spec("b"), spec("c", ["a", "b"]), spec("d", ["c"])], ["a", "b"]);
 
-  test("waveTaskState: pending before start, running before the first state", () => {
-    const f = fold();
+  test("waveTaskState: pending before start, running before the first state", async () => {
+    const f = await fold();
     expect(f.tasks.map((task) => waveTaskState(task, states({ a: "blocked", d: "done" })))).toEqual(["blocked", "running", "pending", "pending"]);
   });
 
-  test("startableKeys: unstarted tasks whose after tasks are all done", () => {
-    expect(startableKeys(fold(), states({ a: "done", b: "running" }))).toEqual([]);
-    expect(startableKeys(fold(), states({ a: "done", b: "done" }))).toEqual(["c"]);
-    expect(startableKeys(folded([spec("a"), spec("b", ["a"]), spec("c")]), states({}))).toEqual(["a", "c"]);
+  test("startableKeys: unstarted tasks whose after tasks are all done", async () => {
+    expect(startableKeys(await fold(), states({ a: "done", b: "running" }))).toEqual([]);
+    expect(startableKeys(await fold(), states({ a: "done", b: "done" }))).toEqual(["c"]);
+    expect(startableKeys(await folded([spec("a"), spec("b", ["a"]), spec("c")]), states({}))).toEqual(["a", "c"]);
   });
 
-  test("unreachableKeys: unstarted tasks behind a cancelled one, directly or not", () => {
-    expect(unreachableKeys(fold(), states({ a: "done", b: "running" }))).toEqual([]);
-    expect(unreachableKeys(fold(), states({ a: "cancelled", b: "done" }))).toEqual(["c", "d"]);
+  test("unreachableKeys: unstarted tasks behind a cancelled one, directly or not", async () => {
+    expect(unreachableKeys(await fold(), states({ a: "done", b: "running" }))).toEqual([]);
+    expect(unreachableKeys(await fold(), states({ a: "cancelled", b: "done" }))).toEqual(["c", "d"]);
   });
 
-  test("stuckKeys: unreachable tasks once nothing can start and no started task is active", () => {
+  test("stuckKeys: unreachable tasks once nothing can start and no started task is active", async () => {
     // c and d wait behind the cancelled a; b still runs (or has no state yet): it may poke the wave, nothing is stuck yet.
-    expect(stuckKeys(fold(), states({ a: "cancelled", b: "running" }))).toEqual([]);
-    expect(stuckKeys(fold(), states({ a: "cancelled" }))).toEqual([]);
-    expect(stuckKeys(fold(), states({ a: "cancelled", b: null }))).toEqual([]);
+    expect(stuckKeys(await fold(), states({ a: "cancelled", b: "running" }))).toEqual([]);
+    expect(stuckKeys(await fold(), states({ a: "cancelled" }))).toEqual([]);
+    expect(stuckKeys(await fold(), states({ a: "cancelled", b: null }))).toEqual([]);
     // Every started task rests: nothing will ever move the wave without the supervisor.
-    expect(stuckKeys(fold(), states({ a: "cancelled", b: "done" }))).toEqual(["c", "d"]);
-    expect(stuckKeys(fold(), states({ a: "cancelled", b: "blocked" }))).toEqual(["c", "d"]);
+    expect(stuckKeys(await fold(), states({ a: "cancelled", b: "done" }))).toEqual(["c", "d"]);
+    expect(stuckKeys(await fold(), states({ a: "cancelled", b: "blocked" }))).toEqual(["c", "d"]);
     // A task that can still start is no stuck wave: the runner starts it.
-    const startable = folded([spec("a"), spec("b", ["a"]), spec("c")], ["a"]);
+    const startable = await folded([spec("a"), spec("b", ["a"]), spec("c")], ["a"]);
     expect(stuckKeys(startable, states({ a: "cancelled" }))).toEqual([]);
-    expect(stuckKeys(fold(), states({ a: "done", b: "done" }))).toEqual([]);
+    expect(stuckKeys(await fold(), states({ a: "done", b: "done" }))).toEqual([]);
   });
 
-  test("a tasks event's dropped keys: pending tasks that count as cancelled from then on; started ones stay", () => {
+  test("a tasks event's dropped keys: pending tasks that count as cancelled from then on; started ones stay", async () => {
     const events: WaveEvent[] = [
       { at: "t1", kind: "tasks", tasks: [spec("a"), spec("b", ["a"]), spec("c", ["b"])] },
       { at: "t2", kind: "task", key: "a", taskId: "id-a", sessionId: "s-a" },
       { at: "t3", kind: "tasks", tasks: [spec("d", ["a"])], dropped: ["a", "b", "c", "nope"] },
     ];
-    const f = foldWave(declaration(ONE), events);
+    const f = await read(events);
     const done = states({ a: "cancelled" });
     expect(f.tasks.map((task) => [task.key, waveTaskState(task, done)])).toEqual([
       ["a", "cancelled"],
@@ -181,26 +190,26 @@ describe("scheduling", () => {
     expect(f.tasks[0]?.dropped).toBeUndefined();
   });
 
-  test("readyForReview: every task done or cancelled, at least one done", () => {
-    const all = folded([spec("a"), spec("b"), spec("c", ["a"])], ["a", "b", "c"]);
+  test("readyForReview: every task done or cancelled, at least one done", async () => {
+    const all = await folded([spec("a"), spec("b"), spec("c", ["a"])], ["a", "b", "c"]);
     expect(readyForReview(all, states({ a: "done", b: "cancelled", c: "done" }))).toBe(true);
     expect(readyForReview(all, states({ a: "done", b: "blocked", c: "done" }))).toBe(false);
     expect(readyForReview(all, states({ a: "cancelled", b: "cancelled", c: "cancelled" }))).toBe(false);
-    expect(readyForReview(fold(), states({ a: "done", b: "done" }))).toBe(false);
-    expect(readyForReview(folded([]), states({}))).toBe(false);
+    expect(readyForReview(await fold(), states({ a: "done", b: "done" }))).toBe(false);
+    expect(readyForReview(await folded([]), states({}))).toBe(false);
   });
 
-  test("allCancelled: tasks, all cancelled", () => {
-    const all = folded([spec("a"), spec("b")], ["a", "b"]);
+  test("allCancelled: tasks, all cancelled", async () => {
+    const all = await folded([spec("a"), spec("b")], ["a", "b"]);
     expect(allCancelled(all, states({ a: "cancelled", b: "cancelled" }))).toBe(true);
     expect(allCancelled(all, states({ a: "cancelled", b: "done" }))).toBe(false);
-    expect(allCancelled(folded([spec("a"), spec("b")], ["a"]), states({ a: "cancelled" }))).toBe(false);
-    expect(allCancelled(folded([]), states({}))).toBe(false);
+    expect(allCancelled(await folded([spec("a"), spec("b")], ["a"]), states({ a: "cancelled" }))).toBe(false);
+    expect(allCancelled(await folded([]), states({}))).toBe(false);
   });
 
-  test("waveCounts: cancelled tasks are in neither", () => {
-    expect(waveCounts(fold(), states({ a: "done", b: "cancelled" }))).toEqual({ total: 3, done: 1 });
-    expect(waveCounts(fold(), states({}))).toEqual({ total: 4, done: 0 });
+  test("waveCounts: cancelled tasks are in neither", async () => {
+    expect(waveCounts(await fold(), states({ a: "done", b: "cancelled" }))).toEqual({ total: 3, done: 1 });
+    expect(waveCounts(await fold(), states({}))).toEqual({ total: 4, done: 0 });
   });
 });
 
@@ -217,7 +226,7 @@ describe("validateTaskSpecs", () => {
     throw new Error("validateTaskSpecs accepted the specs");
   };
 
-  test("refuses a repeated key, an unknown or own after, and a cycle", () => {
+  test("refuses a repeated key, an unknown or own after, and a cycle", async () => {
     invalid([spec("a"), spec("a")], [], "task key a is not unique");
     invalid([spec("a")], [{ key: "a" }], "task key a is not unique");
     invalid([spec("a", ["x"])], [{ key: "b" }], "task a waits for x, no task of the wave");

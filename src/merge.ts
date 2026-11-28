@@ -212,12 +212,6 @@ export async function squashCommit(exec: Exec, root: string, head: string, onto:
   return commit;
 }
 
-/** `name`: what the target merges, named in its reflog (the task branch; a squash commit's id). */
-function tryMoveTarget(cleanup: Exec, lock: string, root: string, primary: string, task: Task, head: string, before: string, name = task.branch) {
-  const argv = ["flock", "-n", "-E", String(LOCK_BUSY_EXIT), lock, "sh", "-c", MOVE_TARGET_SCRIPT, "sh", primary, task.mainBranch, name, head, before];
-  return cleanup(argv, { cwd: root, maxStdoutChars: 100 });
-}
-
 async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<MergeResult> {
   const { exec, cleanup, root, round, task, config, intent } = input;
   const asIs = input.asIs === true;
@@ -252,6 +246,22 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
   const conflicts = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
   if (conflicts) return { kind: "conflict", files: conflicts };
 
+  /**
+   * Moves the target to `landing` under the merge lock, `name` in its reflog (the task branch; a squash commit's id).
+   * Each try takes the lock or gives up at once. The update is not killed by a cancel: a fast-forward cut in half
+   * leaves the target's checkout partly updated. The wait between tries is, and a lock that stays taken ends in a timeout.
+   */
+  const moveTarget = async (landing: string, before: string, name: string): Promise<CommandResult> => {
+    const argv = ["flock", "-n", "-E", String(LOCK_BUSY_EXIT), lock, "sh", "-c", MOVE_TARGET_SCRIPT, "sh", primary, task.mainBranch, name, landing, before];
+    for (const deadline = Date.now() + LOCK_WAIT_MS; ; ) {
+      const result = await cleanup(argv, { cwd: root, maxStdoutChars: 100 });
+      if (result.exitCode !== LOCK_BUSY_EXIT) return result;
+      if (Date.now() > deadline) throw new Error(`the merge lock ${lock} stayed taken for ${LOCK_WAIT_MS / 1000} s`);
+      status("wait for the merge lock");
+      if ((await exec(["sleep", "1"], { cwd: root })).killed) throw new Error("cancelled while waiting for the merge lock");
+    }
+  };
+
   /** The ticket's turn: rebase, merge gates, move the target. Again from the rebase when the target moved anyway. */
   const turn = async (): Promise<MergeResult> => {
     // Rebase, gates, move: again from the rebase while another merge lands on the main branch during the gates.
@@ -259,9 +269,12 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
     let head: string;
     let landing: string;
     for (let attempt = 1; ; attempt++) {
-      status(attempt === 1 ? `rebase onto ${task.mainBranch}` : `rebase onto ${task.mainBranch} again, it moved (attempt ${attempt})`);
-      const conflicts = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
-      if (conflicts) return { kind: "conflict", files: conflicts };
+      // The first attempt rebases only when the target moved since the rebase before the queue.
+      if (attempt > 1 || (await targetMoved(exec, root, task))) {
+        status(attempt === 1 ? `rebase onto ${task.mainBranch}` : `rebase onto ${task.mainBranch} again, it moved (attempt ${attempt})`);
+        const conflicts = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
+        if (conflicts) return { kind: "conflict", files: conflicts };
+      }
       // The rebase brings the target's .gitignore: a file it stopped ignoring is somebody's work, not merge gate output.
       if (asIs && (await worktreeChanges(exec, root, true))) return { kind: "dirty" };
       head = await git(exec, root, ["rev-parse", "HEAD"]);
@@ -290,18 +303,8 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       const target = await git(exec, primary, ["rev-parse", `refs/heads/${task.mainBranch}`]);
       landing = input.squash === undefined ? head : await squashCommit(exec, root, head, onto, input.squash);
       // A squash commit is no branch tip: the move fast-forwards to the commit itself.
-      const name = landing === head ? task.branch : landing;
       intent({ commit: landing, before: target });
-      // Each try takes the lock or gives up at once. The update is not killed by a cancel: a fast-forward cut in half
-      // leaves the target's checkout partly updated. The wait between tries is, and a lock holder that hangs ends in a timeout.
-      const deadline = Date.now() + LOCK_WAIT_MS;
-      moveResult = await tryMoveTarget(cleanup, lock, root, primary, task, landing, target, name);
-      while (moveResult.exitCode === LOCK_BUSY_EXIT) {
-        if (Date.now() > deadline) return fail(`the merge lock ${lock} stayed taken for ${LOCK_WAIT_MS / 1000} s`);
-        status("wait for the merge lock");
-        if ((await exec(["sleep", "1"], { cwd: root })).killed) return fail("cancelled while waiting for the merge lock");
-        moveResult = await tryMoveTarget(cleanup, lock, root, primary, task, landing, target, name);
-      }
+      moveResult = await moveTarget(landing, target, landing === head ? task.branch : landing);
       if (moveResult.exitCode === TARGET_MOVED_EXIT && attempt < MERGE_ATTEMPTS) continue;
       if (!passed(moveResult)) return fail(`update of ${task.mainBranch} refused: ${tail(moveResult.output)}`);
       break;

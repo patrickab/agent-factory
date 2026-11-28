@@ -11,7 +11,7 @@ import { stopRunners } from "./launch.ts";
 import { lastFactoryState } from "./runner.ts";
 import { listTasks, writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, waveLockPath, wavePokePath } from "./wave-poke.ts";
-import { appendWaveEvent, createWave, foldWave, listWaves, readWave, type WaveView } from "./waves.ts";
+import { appendWaveEvent, createWave, listWaves, readWave, type WaveView } from "./waves.ts";
 
 useCoreFixture();
 
@@ -65,6 +65,21 @@ describe("waves", () => {
     const done = await getWave(wave.id);
     expect([done.counts, done.merge, done.running, done.interrupted]).toEqual([{ total: 2, done: 2 }, null, false, false]);
     expect((await readWave(wave.id)).events.map((event) => event.kind)).toEqual(["tasks", "launch", "task", "launch", "task", "stage", "stage"]);
+  }, 30_000);
+
+  test("a task whose pi exits before it answers blocks the wave (infra) and stays pending; waves.retry with a working pi starts it", async () => {
+    process.env.FACTORY_WAVE_POLL_MS = "600000";
+    process.env.FAKE_PI_EXIT = "1";
+    const repo = await registeredRepo();
+    const wave = await startWave(repo, [spec("a")]);
+    await until(async () => (await getWave(wave.id)).stage === "blocked", 20_000);
+    await until(async () => (await liveWaveRunners(wave.id)).length === 0);
+    const blocked = await getWave(wave.id);
+    expect([blocked.reason, taskOf(blocked, "a").state, taskOf(blocked, "a").taskId, await listTasks()]).toEqual(["infra", "pending", null, []]);
+    delete process.env.FAKE_PI_EXIT;
+    await callAction("waves.retry", { id: wave.id });
+    await until(async () => taskOf(await getWave(wave.id), "a").taskId !== null, 20_000);
+    expect(await stateOf(await recordById(taskOf(await getWave(wave.id), "a").taskId))).toBeDefined();
   }, 30_000);
 
   test("waves.add to a rejected wave returns it to building; after may name existing keys", async () => {
@@ -327,7 +342,7 @@ describe("waves", () => {
       const started = await getWave(queued.id);
       const main = git(repo, "rev-parse", "main");
       const file = await readWave(queued.id);
-      expect([started.stage, started.branch, foldWave(file.declaration, file.events).base]).toEqual(["building", "main-factory-w3", main]);
+      expect([started.stage, started.branch, file.fold.base]).toEqual(["building", "main-factory-w3", main]);
       expect(git(repo, "rev-parse", "refs/heads/main-factory-w3")).toBe(main);
       expect(git(repo, "show", "main-factory-w3:1.txt")).toBe("1");
       const record = await recordById(taskOf(started, "a").taskId);

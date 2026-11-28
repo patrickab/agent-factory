@@ -111,6 +111,11 @@ export async function listTasks(repo?: string): Promise<TaskRecord[]> {
   return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+/** Every task record by its id. */
+export async function tasksById(): Promise<Map<string, TaskRecord>> {
+  return new Map((await listTasks()).map((record) => [record.id, record]));
+}
+
 /** The record of the task whose Pi session is `sessionId`. */
 export async function sessionTask(sessionId: string): Promise<TaskRecord | undefined> {
   return (await listTasks()).find((task) => task.sessionId === sessionId);

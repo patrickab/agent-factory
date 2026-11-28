@@ -7,21 +7,24 @@
  *   resume, so the cached prefix holds. A review the runner's stop cut short records nothing
  */
 import { join } from "node:path";
+import { oneLine } from "./core-shared.ts";
 import { loadTaskFiles } from "./config.ts";
+import { readFile } from "node:fs/promises";
 import { readContract, stampOf, type ContractFacts } from "./contracts.ts";
 import { git, snapshotTree, treeDiff, type TaskDiff } from "./git.ts";
 import { liveRunners, messageTask, type RunnerEnv } from "./launch.ts";
 import { reviewerSession, runReviewer, STUB_PREFIX, VERDICT_TOOL, type ReviewerRun } from "./review.ts";
 import type { Exec } from "./run.ts";
-import { lastFactoryState } from "./runner.ts";
-import { approvedFrom, rejectingLines, type Finding, type ReviewData, type ReviewStatus } from "./state.ts";
-import { listTasks, type TaskRecord } from "./tasks.ts";
-import { errorText } from "./util.ts";
+import { lastFactoryState, sessionEntries, sessionFilePath } from "./runner.ts";
+import { approvedFrom, followUpMessages, rejectingLines, type Finding, type ReviewData, type ReviewStatus } from "./state.ts";
+import { tasksById, taskLogPath, type TaskRecord } from "./tasks.ts";
+import { errorText, isBusy } from "./util.ts";
 import { waveReviewsDir } from "./wave-poke.ts";
 import { appendWaveEvents, type NewWaveEvent, type WaveFold, type TaskStates, type WaveTaskReview } from "./waves.ts";
 
-/** How often one runner process hands one verdict to its task before it leaves it to a restart. */
+/** How often one runner process hands one verdict to its task before the wave blocks (`waves.retry` starts a new process). */
 const DELIVERIES = 3;
+const BUSY_WAIT_MS = 200;
 
 export interface ReviewEachDeps {
   exec: Exec;
@@ -29,8 +32,8 @@ export interface ReviewEachDeps {
   cancelled: () => boolean;
   env?: RunnerEnv;
   log: (text: string) => void;
-  /** The verdicts handed over by this process, `<task id>:<round>` -> how often. */
-  delivered: Map<string, number>;
+  /** The hand-overs of this process that did not end in `busy`, `<task id>:<round>` -> how often and why the last one failed. */
+  delivered: Map<string, { tries: number; why: string | null }>;
   /** Hands the command to the task; default `messageTask`. Tests replace it. */
   deliver?: (record: TaskRecord, text: string, env?: RunnerEnv) => Promise<void>;
 }
@@ -95,6 +98,7 @@ async function reviewTask(fold: WaveFold, key: string, record: TaskRecord, round
   const since = previous !== undefined && previous.base === base ? previous : null;
   const diff = await treeDiff(exec, worktree, since?.tree ?? base, tree);
   const contracts = await contractsSection(fold);
+  const followUps = followUpMessages((await sessionEntries(await sessionFilePath(record.sessionDir, record.sessionId))) as { type: string }[]);
   const prompt = [
     `Review task ${key} "${spec.title}", round ${round}, of the wave "${fold.title}" (it merges into ${fold.branch}).`,
     `Its worktree is ${worktree}: read its files there by absolute path. read_diff shows ${since === null ? "its whole change against its base" : `what changed since the tree you judged in its round ${since.round}`}; it is the only diff you get.`,
@@ -104,6 +108,7 @@ async function reviewTask(fold: WaveFold, key: string, record: TaskRecord, round
     "## The task's request",
     "",
     spec.request,
+    ...(followUps.length === 0 ? [] : ["", "## The supervisor's messages to the task (part of the task: they win over the request where they differ)", "", ...followUps.flatMap((text, index) => [`### Message ${index + 1}`, "", text, ""])]),
     ...contracts.lines,
   ].join("\n");
   deps.log(`review of task ${key}, round ${round}`);
@@ -163,12 +168,13 @@ export function reviewedCommand(review: WaveTaskReview, sessionFilePath: string 
 
 /**
  * One step of the wave's review queue: reviews (or hands over again) the first task resting `reviewing`. True when it
- * did something (look again), false when nothing waits or the review was cut short.
+ * did something (look again), false when nothing waits or the review was cut short, else the detail that blocks the
+ * wave: a verdict whose hand-overs ran out of tries.
  */
-export async function reviewNext(fold: WaveFold, states: TaskStates, deps: ReviewEachDeps): Promise<boolean> {
+export async function reviewNext(fold: WaveFold, states: TaskStates, deps: ReviewEachDeps): Promise<boolean | string> {
   const waiting = fold.tasks.filter((task) => task.taskId !== null && states.get(task.key) === "reviewing");
   if (waiting.length === 0) return false;
-  const records = new Map((await listTasks()).map((record) => [record.id, record]));
+  const records = await tasksById();
   for (const task of waiting) {
     const record = records.get(task.taskId as string);
     if (record === undefined) continue;
@@ -185,15 +191,24 @@ export async function reviewNext(fold: WaveFold, states: TaskStates, deps: Revie
       if (written === null) return true;
       review = written[0] as WaveTaskReview & { kind: "task_review" };
     }
-    const count = deps.delivered.get(handled) ?? 0;
-    if (count >= DELIVERIES) {
-      deps.log(`task ${task.key} stays reviewing round ${state.round} after ${count} hand-overs of its verdict; a restart tries again`);
-      continue;
+    const sent = deps.delivered.get(handled) ?? { tries: 0, why: null };
+    if (sent.tries >= DELIVERIES) {
+      const why = sent.why ?? (await readFile(taskLogPath(record.id), "utf8").catch(() => "")).trim().split("\n").at(-1) ?? "";
+      return `the verdict for task ${task.key} (round ${state.round}) could not be handed over after ${DELIVERIES} tries (${oneLine(why) || "no reason"}); waves.retry tries again`;
     }
-    deps.delivered.set(handled, count + 1);
     const file = await reviewerSession(waveReviewsDir(fold.id), fold.id);
     const deliver = deps.deliver ?? messageTask;
-    await deliver(record, reviewedCommand(review, file), deps.env).catch((error: unknown) => deps.log(`handing task ${task.key} its verdict: ${errorText(error)}`));
+    // `busy`: the task's last runner has not released its lock yet; no try used up. A runner that started and ended
+    // with the task still reviewing is one, found at the next look.
+    let why: string | null = null;
+    let busy = false;
+    await deliver(record, reviewedCommand(review, file), deps.env).catch((error: unknown) => {
+      busy = isBusy(error);
+      why = oneLine(errorText(error));
+      deps.log(`handing task ${task.key} its verdict: ${why}`);
+    });
+    if (busy) await Bun.sleep(BUSY_WAIT_MS);
+    else deps.delivered.set(handled, { tries: sent.tries + 1, why });
     deps.log(`task ${task.key} round ${state.round}: ${review.verdict}`);
     return true;
   }
