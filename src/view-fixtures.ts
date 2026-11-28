@@ -5,7 +5,6 @@ import type { ProofView } from "./gates-prove.ts";
 
 export const TASK_ID = "4ae7325b-1111-4222-8333-944445555666";
 export const WAVE_ID = "3f2a91c0-aaaa-4bbb-8ccc-dddddddddddd";
-export const OTHER_WAVE = "77b0c2e1-0000-4000-8000-000000000000";
 export const SESSION = "0197c0de-5555-7666-8777-888899990000";
 
 export function task(over: Partial<TaskView> = {}): TaskView {
@@ -42,7 +41,7 @@ export function task(over: Partial<TaskView> = {}): TaskView {
   };
 }
 
-export type WaveTask = WaveView["tasks"][number];
+type WaveTask = WaveView["tasks"][number];
 export const waveTask = (key: string, state: WaveTask["state"], after: string[] = [], taskId: string | null = `${key.padEnd(8, "0").slice(0, 8)}-1111-4222-8333-944445555666`): WaveTask => ({
   key,
   title: `the ${key}`,
@@ -105,7 +104,7 @@ export const FINDINGS: WaveView["reviews"][number]["findings"] = [
   { severity: "minor", file: "src/tasks.ts", line: null, text: "tasks.start can put a task onto a wave's branch." },
 ];
 
-export const PROOF_ID = "9c1d2e3f-aaaa-4bbb-8ccc-dddddddddddd";
+const PROOF_ID = "9c1d2e3f-aaaa-4bbb-8ccc-dddddddddddd";
 
 export function proof(over: Partial<ProofView> = {}): ProofView {
   return {

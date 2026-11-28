@@ -34,8 +34,6 @@ export interface ReviewEachDeps {
   log: (text: string) => void;
   /** The hand-overs of this process that did not end in `busy`, `<task id>:<round>` -> how often and why the last one failed. */
   delivered: Map<string, { tries: number; why: string | null }>;
-  /** Hands the command to the task; default `messageTask`. Tests replace it. */
-  deliver?: (record: TaskRecord, text: string, env?: RunnerEnv) => Promise<void>;
 }
 
 /**
@@ -197,12 +195,11 @@ export async function reviewNext(fold: WaveFold, states: TaskStates, deps: Revie
       return `the verdict for task ${task.key} (round ${state.round}) could not be handed over after ${DELIVERIES} tries (${oneLine(why) || "no reason"}); waves.retry tries again`;
     }
     const file = await reviewerSession(waveReviewsDir(fold.id), fold.id);
-    const deliver = deps.deliver ?? messageTask;
     // `busy`: the task's last runner has not released its lock yet; no try used up. A runner that started and ended
     // with the task still reviewing is one, found at the next look.
     let why: string | null = null;
     let busy = false;
-    await deliver(record, reviewedCommand(review, file), deps.env).catch((error: unknown) => {
+    await messageTask(record, reviewedCommand(review, file), deps.env).catch((error: unknown) => {
       busy = isBusy(error);
       why = oneLine(errorText(error));
       deps.log(`handing task ${task.key} its verdict: ${why}`);

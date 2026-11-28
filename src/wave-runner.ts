@@ -551,7 +551,7 @@ async function build(fold: WaveFold): Promise<Next> {
   return "rest";
 }
 
-/** The review queue's process-wide part (`review-each.ts`); `deliver` stays `messageTask` but in tests. */
+/** The review queue's process-wide part (`review-each.ts`). */
 export const reviewEachDeps: Omit<ReviewEachDeps, "log" | "env"> = {
   exec: (argv, options) => runner.run(argv, options),
   cancelled: () => stopping || runner.cancelled,

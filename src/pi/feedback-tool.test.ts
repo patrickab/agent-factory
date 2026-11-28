@@ -7,12 +7,15 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readStore, writeFakeMemoryStore, writeStore } from "../fake-memory-store.ts";
 import { type FeedbackEntry, FEEDBACK_PATH, waveFeedback } from "../feedback.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
+import { restoreEnv } from "../core-test-kit.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-feedback-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 const bin = join(scratch, "bin");
 const root = join(scratch, "store");
 writeFakeMemoryStore(bin);
+const savedEnv = { ...process.env };
+afterAll(() => restoreEnv(savedEnv));
 process.env.PATH = `${bin}:${process.env.PATH}`;
 process.env.FAKE_STORE_ROOT = root;
 

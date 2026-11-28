@@ -1,6 +1,6 @@
 /**
  * Delivery of notifications into the Pi session that started a task or declared a wave (`notify.ts` decides what).
- * - Looks whenever the watched files change; a slow look (`fallbackMs`) catches a runner that died, which changes no file
+ * - Looks whenever the watched files change; a slow look (`FALLBACK_MS`) catches a runner that died, which changes no file
  * - A look claims its notices (`claimNotices`) before it sends them: each reaches one session once, also after a
  *   restart and when two sessions race. Looks never overlap
  */
@@ -23,8 +23,6 @@ export interface NotifierOptions {
   send: (text: string, notice: Notice) => void;
   /** Checked on every look: a session that became a task's own delivers nothing. */
   isTaskSession: () => boolean;
-  debounceMs?: number;
-  fallbackMs?: number;
   onError?: (error: unknown) => void;
   /** After every look: the views of all of this origin's waves, the finished ones not read again included. */
   onWaves?: (waves: WaveView[]) => void;
@@ -54,7 +52,6 @@ function fileStamp(path: string): string | null {
 
 export function startNotifier(options: NotifierOptions): Notifier {
   const { origin, send } = options;
-  const debounceMs = options.debounceMs ?? DEBOUNCE_MS;
   let stopped = false;
   let running: Promise<void> | undefined;
   let again = false;
@@ -172,7 +169,7 @@ export function startNotifier(options: NotifierOptions): Notifier {
   function schedule() {
     if (stopped) return;
     clearTimeout(timer);
-    timer = setTimeout(() => void look(), debounceMs);
+    timer = setTimeout(() => void look(), DEBOUNCE_MS);
     timer.unref?.();
   }
 
@@ -182,7 +179,7 @@ export function startNotifier(options: NotifierOptions): Notifier {
   watchDir(wavesDir(), relevant);
   watchDir(join(scoutsDir(), callerKey(scoutCaller)), relevant);
   watchDir(proofsDir(), relevant);
-  const fallback = setInterval(() => void look(), options.fallbackMs ?? FALLBACK_MS);
+  const fallback = setInterval(() => void look(), FALLBACK_MS);
   fallback.unref?.();
   void look();
 

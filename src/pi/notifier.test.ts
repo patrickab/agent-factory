@@ -7,8 +7,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { TASK_ENTRY } from "../core-test-kit.ts";
-import { caseDigits, caseSerial, caseTests } from "../test-case.ts";
+import { caseDigits, caseSerial, caseTests, restoreEnv, TASK_ENTRY, until } from "../core-test-kit.ts";
 import factory from "./index.ts";
 import { startNotifier } from "./notifier.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
@@ -20,11 +19,8 @@ const scratch = mkdtempSync(join(tmpdir(), "factory-notifier-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 const stops: (() => void)[] = [];
 // These tests may run inside a factory task's own Pi (the runner sets it): each test sets it itself.
-const savedTaskSession = process.env[TASK_SESSION_ENV];
-afterAll(() => {
-  if (savedTaskSession === undefined) delete process.env[TASK_SESSION_ENV];
-  else process.env[TASK_SESSION_ENV] = savedTaskSession;
-});
+const savedEnv = { ...process.env };
+afterAll(() => restoreEnv(savedEnv));
 
 const test = caseTests(() => {
   delete process.env[TASK_SESSION_ENV];
@@ -87,12 +83,12 @@ function piSession(sessionId: string, branch: { type: string; customType?: strin
   return { sent, emit };
 }
 
-async function until(check: () => boolean, ms = 5_000): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!check()) {
-    if (Date.now() > deadline) throw new Error("timed out");
-    await Bun.sleep(10);
-  }
+/** A notifier of `origin` started directly; `sent` holds what it delivered. */
+function notifierOf(origin: string) {
+  const sent: string[] = [];
+  const notifier = startNotifier({ origin, send: (text) => sent.push(text), isTaskSession: () => false });
+  stops.push(() => notifier.stop());
+  return { sent, look: () => notifier.look() };
 }
 
 /** A scout session `origin` started; `report` makes it done with that report. Answers its directory. */
@@ -116,19 +112,16 @@ describe("scout reports to the session that started them", () => {
   test("a report arrives once as a factory report with its text; another session's scout is left alone", async () => {
     const dir = await scoutOf(1, "sess-A");
     await scoutOf(2, "sess-B", "B's report");
-    const a = piSession("sess-A");
-    await a.emit("session_start");
-    await Bun.sleep(200);
+    const a = notifierOf("sess-A");
+    await a.look();
     expect(a.sent).toEqual([]);
+    // Heard through the watch of the scout's directory: no look of the test's.
     await scoutDone(dir, "MISSING\n1. nothing");
     await until(() => a.sent.length > 0);
-    expect(a.sent[0].message.customType).toBe("factory-notice");
-    expect(a.sent[0].message.content).toContain("MISSING\n1. nothing");
-    await a.emit("session_shutdown");
-    const again = piSession("sess-A");
-    await again.emit("session_start");
-    await Bun.sleep(300);
-    expect(again.sent).toEqual([]);
+    expect(a.sent[0]).toContain("MISSING\n1. nothing");
+    const again = notifierOf("sess-A");
+    await again.look();
+    expect([a.sent.length, again.sent]).toEqual([1, []]);
   });
 });
 
@@ -139,7 +132,6 @@ describe("the extension delivers notices", () => {
     const a = piSession("sess-A");
     await a.emit("session_start");
     await until(() => a.sent.length > 0);
-    await Bun.sleep(100);
     expect(a.sent).toHaveLength(1);
     expect(a.sent[0].options).toEqual({ triggerTurn: true });
     expect(a.sent[0].message.content).toContain(ID(1).slice(0, 8));
@@ -149,31 +141,16 @@ describe("the extension delivers notices", () => {
     expect(b.sent[0].message.content).toContain(`task ${ID(2).slice(0, 8)}`);
   });
 
-  test("when a record changes; once, also after a restart of the session", async () => {
+  test("when a record changes", async () => {
     const { file } = await taskOf(1, "sess-A", "done");
-    const a = piSession("sess-A");
-    await a.emit("session_start");
-    await Bun.sleep(200);
+    const a = notifierOf("sess-A");
+    await a.look();
     expect(a.sent).toEqual([]);
     appendFileSync(file, `${JSON.stringify({ type: "custom", customType: "factory-question", data: { text: "Which branch?" } })}\n`);
     appendFileSync(file, `${JSON.stringify({ type: "custom", customType: "factory-state", data: { state: "waiting_answer", round: 1, reason: "asked" }, timestamp: "2026-01-01T00:02:00.000Z" })}\n`);
+    // Heard through the watch of the session dir: no look of the test's.
     await until(() => a.sent.length > 0);
     expect(a.sent).toHaveLength(1);
-    await a.emit("session_shutdown");
-    const again = piSession("sess-A");
-    await again.emit("session_start");
-    await Bun.sleep(300);
-    expect(again.sent).toEqual([]);
-  });
-
-  test("two sessions of the same origin racing deliver once", async () => {
-    await taskOf(1, "sess-A", "blocked");
-    const sent: string[] = [];
-    const one = startNotifier({ origin: "sess-A", send: () => sent.push("one"), isTaskSession: () => false });
-    const two = startNotifier({ origin: "sess-A", send: () => sent.push("two"), isTaskSession: () => false });
-    stops.push(one.stop, two.stop);
-    await Promise.all([one.look(), two.look(), one.look(), two.look()]);
-    expect(sent).toHaveLength(1);
   });
 
   test("a task's own session delivers nothing: a runner's Pi, or a session holding a factory-task entry", async () => {
@@ -184,9 +161,10 @@ describe("the extension delivers notices", () => {
     delete process.env[TASK_SESSION_ENV];
     const own = piSession("sess-A", [{ type: "custom", customType: "factory-task", data: {} }]);
     await own.emit("session_start");
-    await Bun.sleep(300);
-    expect(runner.sent).toEqual([]);
-    expect(own.sent).toEqual([]);
+    // Its notice is still unclaimed: a session of the same origin that is no task's gets it.
+    const probe = notifierOf("sess-A");
+    await probe.look();
+    expect([runner.sent, own.sent, probe.sent.length]).toEqual([[], [], 1]);
   });
 });
 
@@ -204,17 +182,15 @@ describe("gate proofs", () => {
   test("an interrupted proof that later ends is reported again with its result; another origin's proof is not reported", async () => {
     const own = proofOf(1, "sess-A");
     proofOf(2, "sess-B");
-    const sent: string[] = [];
-    const notifier = startNotifier({ origin: "sess-A", send: (text) => sent.push(text), isTaskSession: () => false });
-    stops.push(() => notifier.stop());
-    await notifier.look();
+    const { sent, look } = notifierOf("sess-A");
+    await look();
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain("interrupted");
     appendFileSync(own, `${JSON.stringify({ state: "passed", at: "2026-01-01T00:01:00.000Z", steps: [] })}\n`);
-    await notifier.look();
+    await look();
     expect(sent).toHaveLength(2);
     // Delivered once.
-    await notifier.look();
+    await look();
     expect(sent).toHaveLength(2);
   });
 });

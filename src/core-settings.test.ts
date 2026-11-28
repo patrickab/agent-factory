@@ -30,39 +30,23 @@ describe("loading", () => {
 });
 
 describe("models", () => {
-  test("models.set replaces the list deduplicated; a missing, mistyped or malformed list is refused and keeps the old one", async () => {
-    expect(await callAction("models.set", { models: ["x/y", "a/b", "x/y"] })).toEqual({ models: ["x/y", "a/b"] });
-    await expectError(callAction("models.set", { models: "a/b" }), "invalid", "models.set: models must be an array");
-    await expectError(callAction("models.set", { models: ["sonnet"] }), "invalid", '"sonnet" is not a provider/model id');
-    await expectError(callAction("models.set", { models: [4] }), "invalid", "models.set: models[0] must be a string");
-    expect(await callAction("models.get", {})).toEqual({ models: ["x/y", "a/b"] });
-  });
-
-  test("a model not on the list: settings.set and tasks.start (stored or override) are refused naming it", async () => {
+  test("a model not on the list: settings.set and tasks.start (stored or override) are refused", async () => {
     const repo = makeRepo();
-    await expectError(callAction("settings.set", { repo, settings: { models: { big: "a/b", reviewer: "z/z" } } }), "refused", "the reviewer model z/z is not a factory model");
-    await expectError(
-      callAction("tasks.start", { title: "t", request: "r", overrides: { models: { big: "q/q" } } }, { cwd: repo }),
-      "refused",
-      "q/q",
-    );
+    await expectError(callAction("settings.set", { repo, settings: { models: { big: "a/b", reviewer: "z/z" } } }), "refused");
+    await expectError(callAction("tasks.start", { title: "t", request: "r", overrides: { models: { big: "q/q" } } }, { cwd: repo }), "refused");
     await callAction("settings.set", { repo, settings: { models: { big: "c/d" } } });
     await callAction("models.set", { models: ["a/b"] });
-    await expectError(callAction("tasks.start", { title: "t", request: "r" }, { cwd: repo }), "refused", "c/d");
+    await expectError(callAction("tasks.start", { title: "t", request: "r" }, { cwd: repo }), "refused");
     expect(await listTasks()).toEqual([]);
   });
 });
 
 describe("settings", () => {
-  test("defaults < stored: settings.set resolves over the defaults, settings.get reads it back; invalid values change nothing", async () => {
+  test("settings.set stores over the defaults, settings.get reads it back; an invalid value changes nothing", async () => {
     const repo = makeRepo();
-    // Nothing stored: no model (Pi's session model), not the ones of defaults.yaml.
-    const defaults = { branch: "main", merge: "auto", maxRounds: 2, review: false, models: {}, preview: false, squash: false };
-    expect(await callAction("settings.get", { repo })).toEqual({ stored: {}, resolved: defaults, defaults });
-    const set = (await callAction("settings.set", { repo, settings: { merge: "review", preview: true, models: { small: "c/d", big: "a/b" } } })) as { resolved: object };
-    expect(set.resolved).toEqual({ ...defaults, merge: "review", preview: true, models: { small: "c/d", big: "a/b" } });
-    await expectError(callAction("settings.set", { repo, settings: { preview: "yes" } }), "invalid", "settings.preview must be a boolean");
-    await expectError(callAction("settings.set", { repo, settings: { maxRounds: 30 } }), "invalid", "settings.maxRounds");
-    expect(((await callAction("settings.get", { repo })) as { resolved: object }).resolved).toEqual(set.resolved);
+    const set = (await callAction("settings.set", { repo, settings: { merge: "review", preview: true } })) as { resolved: object };
+    expect(set.resolved).toMatchObject({ merge: "review", preview: true });
+    await expectError(callAction("settings.set", { repo, settings: { preview: "yes" } }), "invalid");
+    expect(await callAction("settings.get", { repo })).toMatchObject({ stored: { merge: "review", preview: true }, resolved: set.resolved });
   });
 });

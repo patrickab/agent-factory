@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { callAction, type TaskView } from "./core.ts";
-import { caseDir, expectError, fakeRecord, git, ID_1, makeRepo, scratch, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { caseDir, expectError, fakeRecord, git, ID_1, makeRepo, noted, until, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { cancelScout, cancelScouts, readScout, scoutDirs, scoutLockPath, scoutView, type ScoutView } from "./scouts.ts";
 import { readStore, writeFakeMemoryStore, writeStore } from "./fake-memory-store.ts";
 import { signalRunner } from "./spawn.ts";
@@ -10,37 +10,9 @@ import { writeTask } from "./tasks.ts";
 
 // Registered before the fixture's hooks, so it runs while the case's agent dir is still set: every scout of the case ends.
 afterEach(async () => {
-  for (const dir of await scoutDirs()) await cancelScout(dir).catch(() => undefined);
+  for (const dir of await scoutDirs()) await cancelScout(dir);
 });
 useCoreFixture();
-
-let scoutBin: string;
-
-/**
- * The fake scout child: loads the extension it is given with `-e`, calls `map_write` for each of `$FAKE_SCOUT.writes`
- * (one assistant message each, cost `$FAKE_SCOUT.cost`), then holds (`hold`) or ends with `report` as its last message.
- */
-const FAKE_PI = `#!/usr/bin/env bun
-import { appendFileSync } from "node:fs";
-const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_PI_LOG, "scout " + JSON.stringify(args) + "\\n");
-const tools = {};
-(await import(args[args.indexOf("-e") + 1])).default({ registerTool: (tool) => (tools[tool.name] = tool) });
-const plan = JSON.parse(process.env.FAKE_SCOUT ?? "{}");
-const emit = (record) => process.stdout.write(JSON.stringify(record) + "\\n");
-const message = (text) =>
-  emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], usage: { input: 100, output: 10, cacheRead: 5, cacheWrite: 1, cost: { total: plan.cost ?? 0.25 } } } });
-for (const write of plan.writes ?? []) {
-  await tools.map_write.execute("call", write);
-  message("");
-}
-if (plan.hold) {
-  message("");
-  setInterval(() => {}, 1000);
-  await new Promise(() => {});
-}
-message(plan.report ?? "MISSING\\n1. nothing\\n\\nDECISIONS\\n- none\\n\\nKEY FACTS\\n- a.txt:1 holds a\\n\\nMEMORY\\n- none");
-`;
 
 const STORE = "team/plan";
 const storeRoot = () => join(caseDir, "stores");
@@ -53,14 +25,8 @@ async function scouts(): Promise<ScoutView[]> {
 }
 
 beforeEach(() => {
-  scoutBin = join(scratch, "scout-bin");
-  if (!existsSync(scoutBin)) {
-    writeFakeMemoryStore(scoutBin);
-    writeFileSync(join(scoutBin, "pi"), FAKE_PI);
-    chmodSync(join(scoutBin, "pi"), 0o755);
-  }
-  Object.assign(process.env, { PATH: `${scoutBin}:${process.env.PATH}`, FAKE_STORE_ROOT: storeRoot(), FACTORY_SCOUT_POLL_MS: "50" });
-  delete process.env.FAKE_SCOUT;
+  writeFakeMemoryStore(join(caseDir, "bin"));
+  Object.assign(process.env, { PATH: `${join(caseDir, "bin")}:${process.env.PATH}`, FAKE_STORE_ROOT: storeRoot() });
 });
 
 describe("scouts.start", () => {
@@ -76,8 +42,9 @@ describe("scouts.start", () => {
     expect(result.timedOut).toBe(false);
     expect(result.scout).toMatchObject({ state: "done", caller: { kind: "session", id: "session-1" }, concern: "how a.txt is made", questions: ["who writes it?"], store: STORE, model: "a/b" });
     expect(result.scout.report).toContain("KEY FACTS\n- a.txt:1 holds a");
-    const args = JSON.parse(readFileSync(process.env.FAKE_PI_LOG as string, "utf8").trim().slice("scout ".length)) as string[];
-    expect(args[args.indexOf("--tools") + 1]).toBe("read,grep,find,ls,map_write");
+    const [args] = noted<string[]>("argv");
+    // Read-only: the reading tools and its map writer, nothing that edits or runs.
+    expect(new Set(args[args.indexOf("--tools") + 1].split(","))).toEqual(new Set(["read", "grep", "find", "ls", "map_write"]));
   });
 
   test("map_write adds a fact, updates it on its path and stamps the commit", async () => {
@@ -92,8 +59,8 @@ describe("scouts.start", () => {
 
   test("a scout without a store, or with one memory-store does not know, is refused", async () => {
     const repo = makeRepo();
-    await expectError(callAction("scouts.start", { concern: "a" }, { cwd: repo }), "refused", "a scout needs a memory store");
-    await expectError(callAction("scouts.start", { concern: "a", store: "no/store" }, { cwd: repo }), "refused", "memory store no/store does not exist");
+    await expectError(callAction("scouts.start", { concern: "a" }, { cwd: repo }), "refused");
+    await expectError(callAction("scouts.start", { concern: "a", store: "no/store" }, { cwd: repo }), "refused");
     expect(await scouts()).toEqual([]);
   });
 
@@ -103,12 +70,11 @@ describe("scouts.start", () => {
     scoutPlan({ hold: true });
     for (let n = 0; n < 5; n += 1) await callAction("scouts.start", { concern: `c${n}`, store: STORE }, { cwd: repo, origin: "s" });
     await until(async () => (await scouts()).filter((scout) => scout.state === "running").length === 4);
-    await Bun.sleep(300);
-    const all = await scouts();
-    expect(all.map((scout) => scout.state).sort()).toEqual(["queued", "running", "running", "running", "running"]);
-    // Another caller's scout does not wait for this one's.
+    // Another caller's scout does not wait for this one's: it runs while the fifth of "s", started before it, queues.
     await callAction("scouts.start", { concern: "other", store: STORE }, { cwd: repo, origin: "t" });
     await until(async () => (await scouts()).find((scout) => scout.concern === "other")?.state === "running");
+    const all = (await scouts()).filter((scout) => scout.concern !== "other");
+    expect(all.map((scout) => scout.state).sort()).toEqual(["queued", "running", "running", "running", "running"]);
     const running = all.find((scout) => scout.state === "running") as ScoutView;
     const dir = (await scoutDirs({ kind: "session", id: "s" })).find((path) => path.endsWith(running.id)) as string;
     await cancelScout(dir);

@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listTasks, lockTask, removeTask, taskLockPath, taskLogPath, tasksDir, writeTask, type TaskRecord } from "./tasks.ts";
 import { unlockFile } from "./lock.ts";
+import { restoreEnv } from "./core-test-kit.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tasks-test-")));
-const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+const savedEnv = { ...process.env };
 process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
 
 afterAll(() => {
-  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-  else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+  restoreEnv(savedEnv);
   rmSync(scratch, { recursive: true, force: true });
 });
 

@@ -28,25 +28,15 @@ export const SCOUT_TOOL_DESCRIPTION = [
   "At most four of yours run at once, more queue. A task's or wave's plan is the store; elsewhere pass store.",
 ].join(" ");
 
-/** How the tool reaches the core: tests replace it. */
-export interface ScoutCore {
-  start(params: Record<string, unknown>, options: { cwd: string; signal?: AbortSignal; origin: string }): Promise<ScoutView>;
-  get(id: string): Promise<ScoutView>;
-}
-
-const CORE: ScoutCore = {
-  start: async (params, options) => ((await callAction("scouts.start", { ...params, wait: false }, options)) as { scout: ScoutView }).scout,
-  get: async (id) => ((await callAction("scouts.get", { id })) as { scout: ScoutView }).scout,
-};
+const POLL_MS = 1_000;
+const WAIT_MS = 15 * 60_000;
+const getScout = async (id: string) => ((await callAction("scouts.get", { id })) as { scout: ScoutView }).scout;
 
 export interface ScoutToolOptions {
   /** Whether the session is a coder's: a task's own session. */
   isCoder(): boolean;
   /** Whether the coder's turn end waits for its scouts: its task is `running` (default: `isCoder`). */
   holds?(): boolean;
-  core?: ScoutCore;
-  pollMs?: number;
-  waitMs?: number;
 }
 
 export interface ScoutTracker {
@@ -74,19 +64,16 @@ export function scoutReportText(scout: ScoutView): string {
 const answerText = (scout: ScoutView, timedOut: boolean) => actionView("scouts.start", {}, { scout, timedOut }).text;
 
 export function createScoutTracker(options: ScoutToolOptions): ScoutTracker {
-  const core = options.core ?? CORE;
-  const pollMs = options.pollMs ?? (Number(process.env.FACTORY_SCOUT_POLL_MS) || 1_000);
-  const waitMs = () => options.waitMs ?? (Number(process.env.FACTORY_SCOUT_WAIT_MS) || 15 * 60_000);
   /** The coder's scouts whose report it has not had. */
   const owed = new Map<string, ScoutView>();
   const waiting = new Set<string>();
 
   const waitFor = async (id: string, signal: AbortSignal | undefined): Promise<ScoutView> => {
-    const deadline = Date.now() + waitMs();
+    const deadline = Date.now() + WAIT_MS;
     for (;;) {
-      const scout = await core.get(id);
+      const scout = await getScout(id);
       if (scoutEnded(scout) || signal?.aborted || Date.now() >= deadline) return scout;
-      await sleep(pollMs);
+      await sleep(POLL_MS);
     }
   };
 
@@ -95,7 +82,7 @@ export function createScoutTracker(options: ScoutToolOptions): ScoutTracker {
 
     async call(params, signal, ctx) {
       const coder = options.isCoder();
-      const scout = await core.start(isRecord(params) ? params : {}, { cwd: ctx.cwd, signal, origin: ctx.sessionManager.getSessionId() });
+      const { scout } = (await callAction("scouts.start", { ...(isRecord(params) ? params : {}), wait: false }, { cwd: ctx.cwd, signal, origin: ctx.sessionManager.getSessionId() })) as { scout: ScoutView };
       const holds = coder && (options.holds?.() ?? true);
       const later = holds ? "its report arrives as a message before your turn ends" : coder ? "read its report with scouts.get" : "its report arrives as a factory report";
       if (holds) owed.set(scout.id, scout);
@@ -120,13 +107,13 @@ export function createScoutTracker(options: ScoutToolOptions): ScoutTracker {
       const drafts: ScoutReportDraft[] = [];
       while (owed.size > 0 && !stop()) {
         for (const id of [...owed.keys()]) {
-          const scout = await core.get(id).catch(() => undefined);
+          const scout = await getScout(id).catch(() => undefined);
           // A scout whose record is gone reports nothing more.
           if (scout !== undefined && !scoutEnded(scout)) continue;
           if (!owed.delete(id) || scout === undefined) continue;
           drafts.push({ type: "custom_message", customType: SCOUT_REPORT_TYPE, content: scoutReportText(scout), display: true, details: { scout: id } });
         }
-        if (owed.size > 0 && !stop()) await sleep(pollMs);
+        if (owed.size > 0 && !stop()) await sleep(POLL_MS);
       }
       return drafts;
     },

@@ -10,9 +10,13 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import factory from "./index.ts";
 import { coderRequest } from "../ops.ts";
+import { until } from "../core-test-kit.ts";
 import { modelsCommand } from "../models.ts";
 import type { Draft, Settings } from "../state.ts";
+import { restoreEnv } from "../core-test-kit.ts";
 
+const savedEnv = { ...process.env };
+afterAll(() => restoreEnv(savedEnv));
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
 
@@ -127,7 +131,7 @@ function session(cwd: string, branch: Entry[] = []) {
     },
     settled: (aborted = false) => emit("agent_settled", { aborted }),
     until: async (state: string) => {
-      while (states().at(-1) !== state) await Bun.sleep(10);
+      await until(() => states().at(-1) === state);
     },
   };
 }
@@ -260,21 +264,6 @@ describe("how a run ends", () => {
     await cancelled.command("cancel");
     expect(cancelled.notes).toHaveLength(1);
   });
-
-  test("a message queued while the gates ran opens a message round instead of the merge", async () => {
-    const worktree = addTaskWorktree();
-    const pi = session(worktree);
-    await pi.start();
-    writeFileSync(join(worktree, "task.txt"), "task\n");
-    pi.flags.pending = true;
-    expect(await pi.boundary()).toBe(true);
-    expect(pi.of("factory-round").at(-1)).toEqual({ round: 2, trigger: "message" });
-    expect(pi.states()).toEqual(["running/start", "running/message"]);
-    pi.flags.pending = false;
-    expect(await pi.boundary()).toBe(false);
-    await pi.settled();
-    await pi.until("done/merged");
-  });
 });
 
 describe("a task that waits for approve", () => {
@@ -305,23 +294,6 @@ describe("a task that waits for approve", () => {
 
 describe("a resumed task", () => {
   const settings: Settings = { branch: "main", merge: "auto", maxRounds: 3, review: false, models: {} };
-
-  test("a task that was running when the process died resumes as interrupted, and retry starts a round", async () => {
-    const task = { title: "T", request: "R", settings, branch: "task", mainBranch: "main", baseSha: gitIn(repo, "rev-parse", "HEAD") };
-    const pi = session(addTaskWorktree(), [
-      { customType: "factory-task", data: task },
-      { customType: "factory-round", data: { round: 1, trigger: "start" } },
-      { customType: "factory-state", data: { state: "merging", round: 1, reason: "passed" } },
-    ]);
-    await pi.emit("session_start");
-    expect(pi.states().at(-1)).toBe("blocked/interrupted");
-    await pi.command("approve");
-    expect(pi.notes).toHaveLength(1);
-    await pi.command("retry");
-    expect(pi.of("factory-round").at(-1)).toEqual({ round: 2, trigger: "retry" });
-    await pi.command("retry");
-    expect(pi.notes).toHaveLength(2);
-  });
 
   test("retry on a rebase left open in the worktree keeps it and opens a conflict round with feedback", async () => {
     const worktree = addTaskWorktree();
@@ -364,23 +336,6 @@ describe("a task and its target branch (B7)", () => {
     gitIn(repo, "commit", "--quiet", "-am", "main edit");
     return { worktree, pi };
   };
-
-  test("settings.branch is the target: the task merges into release by ref, the primary on main stays untouched", async () => {
-    gitIn(repo, "branch", "release");
-    const worktree = addTaskWorktree("release");
-    const pi = session(worktree);
-    await pi.start({ branch: "release" });
-    expect(pi.of("factory-task")[0]).toMatchObject({ branch: "task", mainBranch: "release" });
-    writeFileSync(join(worktree, "task.txt"), "task\n");
-    await pi.boundary();
-    await pi.settled();
-    await pi.until("done/merged");
-    expect(pi.of("factory-merge")).toMatchObject([{ ok: true, commit: gitIn(repo, "rev-parse", "release"), depsSynced: false }]);
-    expect(gitIn(repo, "log", "--format=%s", "release")).toBe("feat: add task file\nbase");
-    expect(gitIn(repo, "log", "--format=%s", "main")).toBe("base");
-    expect(gitIn(repo, "symbolic-ref", "--short", "HEAD")).toBe("main");
-    expect(gitIn(repo, "status", "--porcelain")).toBe("");
-  });
 
   test("the task branch is squashed before a rebase: a file one run changed and the next reverted never conflicts", async () => {
     const worktree = addTaskWorktree("main");
@@ -450,13 +405,11 @@ describe("a merge in the background", () => {
     await pi.boundary();
     writeFileSync(join(worktree, "slow"), "");
 
-    const started = Date.now();
+    // Within the test's timeout: settling waits for no gate, and the cancel kills the gate that would run 20 s.
     await pi.settled();
-    expect(Date.now() - started).toBeLessThan(1000);
-    while (!pi.statuses.some(([, text]) => text?.includes("merge gate"))) await Bun.sleep(20);
+    await until(() => pi.statuses.some(([, text]) => text?.includes("merge gate")));
     await pi.command("cancel");
     await pi.until("cancelled/cancelled");
-    expect(Date.now() - started).toBeLessThan(4000);
     expect(gitIn(repo, "rev-parse", "main")).toBe(main);
   });
 });

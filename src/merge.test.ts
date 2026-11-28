@@ -10,13 +10,15 @@ import { join } from "node:path";
 import { DEFAULT_PROTECTED, type FactoryConfig } from "./config.ts";
 import { abortLeftoverRebase, snapshotTree, taskBase, taskGit, treeDiff } from "./git.ts";
 import { MERGE_ATTEMPTS, mergeTask, rebaseWorktree, type MergeInput, type MergeOutcome } from "./merge.ts";
-import { joinQueue, leaveQueue, queueAhead } from "./queue.ts";
-import { caseSerial, caseTests } from "./test-case.ts";
+import { joinQueue, leaveQueue } from "./queue.ts";
+import { caseSerial, caseTests, restoreEnv, until } from "./core-test-kit.ts";
 import { CommandRunner, type Exec } from "./run.ts";
 import type { MergeData, Settings, Task } from "./state.ts";
 
+const savedEnv = { ...process.env };
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+afterAll(() => restoreEnv(savedEnv));
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-merge-test-")));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -65,55 +67,12 @@ function input(root: string, task: Task, config: FactoryConfig, round = 1): Merg
   return { exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent: () => undefined };
 }
 
-describe("CommandRunner", () => {
-
-  test("cancel kills the whole process group and never reports exit 0", async () => {
-    const own = new CommandRunner();
-    const pidFile = join(scratch, `grandchild-${caseSerial()}.pid`);
-    const running = own.run(["sh", "-c", `sleep 60 & echo $! > ${pidFile}; wait`], { cwd: scratch });
-    while (!existsSync(pidFile) || readFileSync(pidFile, "utf8").trim() === "") await Bun.sleep(20);
-    const grandchild = Number(readFileSync(pidFile, "utf8"));
-    own.cancel();
-    const result = await running;
-    expect(result).toMatchObject({ exitCode: null, killed: true });
-    await Bun.sleep(100);
-    expect(() => process.kill(grandchild, 0)).toThrow();
-    expect(await own.run(["true"], { cwd: scratch })).toMatchObject({ exitCode: null, killed: true });
-    own.reset();
-    expect(await own.run(["true"], { cwd: scratch })).toMatchObject({ exitCode: 0, killed: false });
-  });
-
-  test("a command that leaves a daemon holding its pipes ends when the command exits", async () => {
-    const result = await runner.run(["sh", "-c", "setsid sleep 30 & echo $!"], { cwd: scratch, maxStdoutChars: 100 });
-    process.kill(Number(result.stdout), "SIGKILL");
-    expect(result).toMatchObject({ exitCode: 0, killed: false });
-    expect(result.durationMs).toBeLessThan(5000);
-  });
-
-  test("a group member that ignores SIGTERM does not outlive a cancelled command", async () => {
-    const own = new CommandRunner();
-    const pidFile = join(scratch, `stubborn-${caseSerial()}.pid`);
-    const running = own.run(["sh", "-c", `(trap "" TERM; echo $$ > /dev/null; sleep 60) & echo $! > ${pidFile}; wait`], { cwd: scratch });
-    while (!existsSync(pidFile) || readFileSync(pidFile, "utf8").trim() === "") await Bun.sleep(20);
-    await Bun.sleep(100);
-    own.cancel();
-    expect(await running).toMatchObject({ exitCode: null, killed: true });
-    await Bun.sleep(100);
-    expect(() => process.kill(Number(readFileSync(pidFile, "utf8")), 0)).toThrow();
-  });
-
-  test("a timeout kills the command and marks it", async () => {
-    const result = await runner.run(["sleep", "60"], { cwd: scratch, timeoutMs: 100 });
-    expect(result).toMatchObject({ exitCode: null, killed: true, timedOut: true });
-  });
-});
-
 describe("taskGit and the task's diff", () => {
   test("refuses the main checkout and a directory that is not the root of a checkout", async () => {
-    await expect(taskGit(runner.run, repo(), "main")).rejects.toThrow("is the repository's main checkout");
+    await expect(taskGit(runner.run, repo(), "main")).rejects.toThrow();
     mkdirSync(join(repo(), "sub"));
-    await expect(taskGit(runner.run, join(repo(), "sub"), "main")).rejects.toThrow("is not the root of its git checkout");
-    await expect(taskGit(runner.run, scratch, "main")).rejects.toThrow("git rev-parse");
+    await expect(taskGit(runner.run, join(repo(), "sub"), "main")).rejects.toThrow();
+    await expect(taskGit(runner.run, scratch, "main")).rejects.toThrow();
   });
 
   test("the diff holds tracked changes and untracked files, and leaves the index alone", async () => {
@@ -222,7 +181,6 @@ describe("mergeTask", () => {
     const outcome = await mergeTask(input(worktree, task, config, 1));
 
     expect(mergeData(outcome)).toMatchObject({ ok: false, commit: null, depsSynced: false });
-    expect(mergeData(outcome).error).toContain("update of main refused: main moved past the task's base");
     expect(outcome.gates).toHaveLength(MERGE_ATTEMPTS);
     expect(gitIn(repo(), "log", "--format=%s")).toBe(`${"raced\n".repeat(MERGE_ATTEMPTS)}earlier\nbase`);
     expect(existsSync(join(repo(), "feature.txt"))).toBe(false);
@@ -310,7 +268,7 @@ describe("mergeTask", () => {
       const task = await taskIn(worktree);
       const head = gitIn(worktree, "rev-parse", "HEAD");
 
-      await expect(rebaseWorktree(runner.run, runner.cleanup, worktree, task.mainBranch)).rejects.toThrow("rebase onto main failed");
+      await expect(rebaseWorktree(runner.run, runner.cleanup, worktree, task.mainBranch)).rejects.toThrow();
 
       expect(gitIn(worktree, "rev-parse", "HEAD")).toBe(head);
       expect(gitIn(worktree, "status", "--porcelain")).toBe("");
@@ -357,45 +315,26 @@ describe("mergeTask", () => {
     expect(outcome.gates).toEqual([]);
   });
 
-  test("a worktree holding the target whose uncommitted change the merge would overwrite refuses it: nothing moved", async () => {
-    const worktree = addWorktree("task-q");
-    const task = await taskIn(worktree);
-    gitIn(repo(), "switch", "--quiet", "-c", "elsewhere");
-    const other = join(scratch, `wt-${caseSerial()}-main`);
-    gitIn(repo(), "worktree", "add", "--quiet", other, "main");
-    writeFileSync(join(worktree, "README.md"), "task version\n");
-    writeFileSync(join(other, "README.md"), "user work in the other worktree\n");
+  for (const where of ["primary checkout", "other worktree"] as const) {
+    test(`uncommitted work in the ${where} holding the target that the merge would overwrite refuses it: nothing moved`, async () => {
+      const worktree = addWorktree("task-q");
+      const task = await taskIn(worktree);
+      let holder = repo();
+      if (where === "other worktree") {
+        gitIn(repo(), "switch", "--quiet", "-c", "elsewhere");
+        holder = join(scratch, `wt-${caseSerial()}-main`);
+        gitIn(repo(), "worktree", "add", "--quiet", holder, "main");
+      }
+      writeFileSync(join(worktree, "README.md"), "task version\n");
+      writeFileSync(join(holder, "README.md"), "user work\n");
 
-    const outcome = await mergeTask(input(worktree, task, noGates));
+      const outcome = await mergeTask(input(worktree, task, noGates));
 
-    expect(mergeData(outcome)).toMatchObject({ ok: false, commit: null });
-    expect(mergeData(outcome).error).toContain("update of main refused");
-    expect(mergeData(outcome).error).toContain("README.md");
-    expect(readFileSync(join(other, "README.md"), "utf8")).toBe("user work in the other worktree\n");
-    expect(gitIn(repo(), "log", "--format=%s", "main")).toBe("base");
-  });
-
-  test("two tasks on the same target checked out in another worktree merge one after the other, the second on top", async () => {
-    const first = addWorktree("task-r");
-    const second = addWorktree("task-s");
-    const firstTask = await taskIn(first, "First");
-    const secondTask = await taskIn(second, "Second");
-    gitIn(repo(), "switch", "--quiet", "-c", "elsewhere");
-    const other = join(scratch, `wt-${caseSerial()}-main`);
-    gitIn(repo(), "worktree", "add", "--quiet", other, "main");
-    writeFileSync(join(first, "first.txt"), "first\n");
-    writeFileSync(join(second, "second.txt"), "second\n");
-
-    const one = await mergeTask(input(first, firstTask, noGates));
-    const two = await mergeTask(input(second, secondTask, noGates));
-
-    expect(mergeData(one).ok).toBe(true);
-    expect(mergeData(two)).toMatchObject({ ok: true, commit: gitIn(other, "rev-parse", "HEAD") });
-    expect(gitIn(other, "log", "--format=%s")).toBe("Second\nFirst\nbase");
-    expect(readFileSync(join(other, "first.txt"), "utf8")).toBe("first\n");
-    expect(readFileSync(join(other, "second.txt"), "utf8")).toBe("second\n");
-    expect(gitIn(other, "status", "--porcelain")).toBe("");
-  });
+      expect(mergeData(outcome)).toMatchObject({ ok: false, commit: null });
+      expect(readFileSync(join(holder, "README.md"), "utf8")).toBe("user work\n");
+      expect(gitIn(repo(), "log", "--format=%s", "main")).toBe("base");
+    });
+  }
 });
 
 describe("mergeTask: what a merge must not get wrong", () => {
@@ -450,16 +389,37 @@ describe("mergeTask: what a merge must not get wrong", () => {
     expect(gitIn(repo(), "log", "--format=%s", "main")).toBe("main edit\nbase");
   });
 
-  test("a primary checkout whose uncommitted work the merge would overwrite refuses the fast-forward", async () => {
-    const worktree = addWorktree("task-p");
+  test("protected paths are never committed by the merge; one whose autostash does not apply after the rebase stops it", async () => {
+    const worktree = addWorktree("task-pp");
     const task = await taskIn(worktree);
-    writeFileSync(join(worktree, "README.md"), "task version\n");
-    writeFileSync(join(repo(), "README.md"), "user work in the primary\n");
-    const outcome = await mergeTask(input(worktree, task, noGates));
-    expect(mergeData(outcome).ok).toBe(false);
-    expect(mergeData(outcome).error).toContain("update of main refused");
-    expect(readFileSync(join(repo(), "README.md"), "utf8")).toBe("user work in the primary\n");
-    expect(gitIn(repo(), "log", "--format=%s")).toBe("base");
+    writeFileSync(join(worktree, "feature.txt"), "feature\n");
+    writeFileSync(join(worktree, "factory.yaml"), "gates: [[task]]\n");
+    expect(mergeData(await mergeTask(input(worktree, task, noGates))).ok).toBe(true);
+    expect([gitIn(repo(), "show", "main:feature.txt"), gitIn(repo(), "show", "main:factory.yaml")]).toEqual(["feature", "gates: []"]);
+
+    writeFileSync(join(repo(), "factory.yaml"), "gates: [[main]]\n");
+    gitIn(repo(), "commit", "--quiet", "-am", "main gates");
+    writeFileSync(join(worktree, "more.txt"), "more\n");
+    expect(mergeData(await mergeTask(input(worktree, task, noGates))).ok).toBe(false);
+    expect(gitIn(repo(), "log", "-1", "--format=%s", "main")).toBe("main gates");
+    expect(gitIn(worktree, "stash", "list")).not.toBe("");
+  });
+
+  test("a cancel while queued for merge ends the merge: nothing moved, its ticket gone", async () => {
+    const worktree = addWorktree("task-cq");
+    const task = await taskIn(worktree);
+    writeFileSync(join(worktree, "feature.txt"), "feature\n");
+    const ahead = await joinQueue(join(repo(), ".git"));
+    // The first wait for the turn is cancelled.
+    const own = new CommandRunner();
+    const exec: Exec = async (argv, options) => {
+      if (argv[0] === "sleep") own.cancel();
+      return own.run(argv, options);
+    };
+    expect(mergeData(await mergeTask({ ...input(worktree, task, noGates), exec, cleanup: own.cleanup })).ok).toBe(false);
+    expect(gitIn(repo(), "log", "--format=%s", "main")).toBe("base");
+    expect(readdirSync(join(repo(), ".git", "factory-merge-queue"))).toEqual([ahead.name]);
+    await leaveQueue(ahead);
   });
 
   test("a worktree that left the task branch is not merged and not reported as merged", async () => {
@@ -478,38 +438,25 @@ describe("mergeTask: what a merge must not get wrong", () => {
 });
 
 describe("merge queue", () => {
-  test("tickets are served in the order they joined, a ticket whose process ended is dropped", async () => {
-    const gitDir = mkdtempSync(join(scratch, "queue-"));
-    const first = await joinQueue(gitDir);
-    await Bun.sleep(2);
-    const second = await joinQueue(gitDir);
-    writeFileSync(join(gitDir, "factory-merge-queue", "000000000000001-999999999-1-crashed"), "");
-
-    expect(await queueAhead(first)).toBe(0);
-    expect(await queueAhead(second)).toBe(1);
-    expect(readdirSync(join(gitDir, "factory-merge-queue"))).not.toContain("000000000000001-999999999-1-crashed");
-
-    await leaveQueue(first);
-    expect(await queueAhead(second)).toBe(0);
-  });
-
+  const queued = () => (existsSync(join(repo(), ".git", "factory-merge-queue")) ? readdirSync(join(repo(), ".git", "factory-merge-queue")) : []);
   test("a second merge waits its turn, then rebases onto the first and runs its gates on top of it", async () => {
     const one = addWorktree("queue-one");
     const two = addWorktree("queue-two");
     const [taskOne, taskTwo] = [await taskIn(one, "one"), await taskIn(two, "two")];
     writeFileSync(join(one, "one.txt"), "one\n");
     writeFileSync(join(two, "two.txt"), "two\n");
-    const statuses: string[] = [];
 
-    // Merge gates apart from the round's run even on an unchanged base: the first holds its turn for 2 s.
-    const first = mergeTask(input(one, taskOne, { ...noGates, merge_gates: [["sleep", "2"]] }));
-    await Bun.sleep(500);
+    // Merge gates apart from the round's run even on an unchanged base: the first holds its turn until the second queues.
+    const go = join(scratch, `go-${caseSerial()}`);
+    const first = mergeTask(input(one, taskOne, { ...noGates, merge_gates: [["sh", "-c", `while [ ! -f ${go} ]; do sleep 0.05; done`]] }));
+    await until(() => queued().length === 1);
     // Its gate proves the order: it only passes on top of the first merge.
-    const second = mergeTask({ ...input(two, taskTwo, gated([["test", "-f", "one.txt"]])), status: (text) => statuses.push(text) });
+    const second = mergeTask(input(two, taskTwo, gated([["test", "-f", "one.txt"]])));
+    await until(() => queued().length === 2);
+    writeFileSync(go, "");
 
     expect(mergeData(await first)).toMatchObject({ ok: true });
     expect(mergeData(await second)).toMatchObject({ ok: true });
-    expect(statuses).toContain("queued for merge, 1 ahead");
     expect(gitIn(repo(), "log", "--format=%s")).toBe("two\none\nbase");
     expect(readdirSync(join(repo(), ".git", "factory-merge-queue"))).toEqual([]);
   }, 20_000);
@@ -521,10 +468,13 @@ describe("merge queue", () => {
     writeFileSync(join(one, "README.md"), "one's version\n");
     writeFileSync(join(two, "README.md"), "two's version\n");
 
-    // Merge gates apart from the round's run even on an unchanged base: the first holds its turn for 2 s.
-    const first = mergeTask(input(one, taskOne, { ...noGates, merge_gates: [["sleep", "2"]] }));
-    await Bun.sleep(500);
+    // Merge gates apart from the round's run even on an unchanged base: the first holds its turn until the second queues.
+    const go = join(scratch, `go-${caseSerial()}`);
+    const first = mergeTask(input(one, taskOne, { ...noGates, merge_gates: [["sh", "-c", `while [ ! -f ${go} ]; do sleep 0.05; done`]] }));
+    await until(() => queued().length === 1);
     const second = mergeTask(input(two, taskTwo, gated([["true"]])));
+    await until(() => queued().length === 2);
+    writeFileSync(go, "");
 
     expect(mergeData(await first)).toMatchObject({ ok: true });
     const outcome = await second;

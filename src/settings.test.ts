@@ -3,20 +3,19 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadSettings, resolveSettings, saveSettings, taskModels, type StoredSettings } from "./settings.ts";
+import { restoreEnv } from "./core-test-kit.ts";
 
 const REPO = "/home/someone/git/project";
 let agentDir: string;
-let previousAgentDir: string | undefined;
+const savedEnv = { ...process.env };
 
 beforeEach(async () => {
-  previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   agentDir = await mkdtemp(join(tmpdir(), "factory-settings-"));
   process.env.PI_CODING_AGENT_DIR = agentDir;
 });
 
 afterEach(async () => {
-  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  restoreEnv(savedEnv);
   await rm(agentDir, { recursive: true, force: true });
 });
 

@@ -3,7 +3,7 @@
  * the real plugin; only the model is faked, by a local OpenAI-compatible server that answers from the scenario's script.
  *
  * - `scenario(name, script, body)`: a `test` whose body gets a `Case`: its dir, a repo, `act` (= `callAction` with the
- *   repo as cwd and the case's origin), `until`, the notices its origin got, the model calls seen. The environment
+ *   repo as cwd and the case's origin), `until` (the notifier looks before each check), the notices its origin got, the model calls seen. The environment
  *   (`PI_CODING_AGENT_DIR`, `HOME`, git identity, `PI_OFFLINE`) is the case's while the body runs, restored after; its
  *   runners are stopped and the server closed
  * - The model: a request that ends on a tool result asks `Setup.afterTool`, else is answered "done" (the turn ends); any
@@ -131,8 +131,8 @@ export interface Setup {
   afterTool?: Script;
 }
 
-/** A test that runs `body` in a case of its own with the model answering from `script`. */
-export function scenario(name: string, script: Script, body: (c: Case) => Promise<void>, setup: Setup = {}, timeoutMs = 60_000): void {
+/** A test that runs `body` in a case of its own with the model answering from `script`; its timeout lies above a 60 s `tasks.wait`. */
+export function scenario(name: string, script: Script, body: (c: Case) => Promise<void>, setup: Setup = {}, timeoutMs = 90_000): void {
   test(
     name,
     async () => {
@@ -176,7 +176,7 @@ export function scenario(name: string, script: Script, body: (c: Case) => Promis
       git(repo, "add", "-A");
       git(repo, "commit", "--quiet", "-m", "init");
       const origin = crypto.randomUUID();
-      const notifier = startNotifier({ origin, send: (_text, notice) => notices.push(notice), isTaskSession: () => false, debounceMs: 20, fallbackMs: 200 });
+      const notifier = startNotifier({ origin, send: (_text, notice) => notices.push(notice), isTaskSession: () => false });
       try {
         await body({
           dir,
@@ -186,7 +186,8 @@ export function scenario(name: string, script: Script, body: (c: Case) => Promis
           notices,
           act: (action, params = {}) => callAction(action, params, { cwd: repo, origin }),
           git: (...args) => git(repo, ...args),
-          until,
+          // Real runners and `pi` beside other test runs: as long as the scenario's `tasks.wait`, below its own timeout.
+          until: (check, ms = 60_000) => until(() => notifier.look().then(check), ms),
         });
       } finally {
         notifier.stop();

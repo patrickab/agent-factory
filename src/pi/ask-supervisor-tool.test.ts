@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import factory from "./index.ts";
+import { restoreEnv } from "../core-test-kit.ts";
 
+const savedEnv = { ...process.env };
+afterAll(() => restoreEnv(savedEnv));
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-ask-tool-test-")));

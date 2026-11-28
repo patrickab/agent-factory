@@ -37,27 +37,43 @@ function runnerSpawn(command: string[], env: RunnerEnv, hostEnv: RunnerEnv, syst
 const SCOPE_GRACE_MS = 250;
 const SCOPE_POLL_MS = 5;
 
-function startChild(argv: string[], env: RunnerEnv, logPath: string, cwd: string): Promise<ChildProcess> {
-  const log = openSync(logPath, "a");
+/** The command line of `pid`, "" when it is unreadable (gone, or a zombie). */
+function cmdline(pid: number): string {
   try {
-    const child = spawn(argv[0], argv.slice(1), { cwd, detached: true, env, stdio: ["ignore", log, log] });
-    return new Promise<ChildProcess>((resolveSpawn, reject) => {
-      child.once("spawn", () => resolveSpawn(child));
-      child.once("error", reject);
-    });
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Resolves once the child runs its own command or ended. Bun reports `spawn` while the forked child may still show
+ * this process's command line (often under load): `lockRunner` would not know the runner, `scopeFails` would take the
+ * scope for exec'd.
+ */
+async function startChild(argv: string[], env: RunnerEnv, logPath: string, cwd: string): Promise<ChildProcess> {
+  const log = openSync(logPath, "a");
+  let child: ChildProcess;
+  try {
+    child = spawn(argv[0], argv.slice(1), { cwd, detached: true, env, stdio: ["ignore", log, log] });
   } finally {
     closeSync(log);
   }
+  await new Promise((resolveSpawn, reject) => {
+    child.once("spawn", resolveSpawn);
+    child.once("error", reject);
+  });
+  const own = cmdline(process.pid);
+  for (let line = cmdline(child.pid ?? 0); (line === "" || line === own) && child.exitCode === null && child.signalCode === null; line = cmdline(child.pid ?? 0)) {
+    await new Promise((resolveTick) => setTimeout(resolveTick, SCOPE_POLL_MS));
+  }
+  return child;
 }
 
 /** Whether `pid` still runs `systemdRun` (as argv[0], or argv[1] under a script's interpreter); "" argv when unreadable. */
 function stillRuns(pid: number, systemdRun: string): { readable: boolean; still: boolean } {
-  try {
-    const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
-    return { readable: argv[0] !== "", still: argv[0] === systemdRun || argv[1] === systemdRun };
-  } catch {
-    return { readable: false, still: false };
-  }
+  const argv = cmdline(pid).split("\0");
+  return { readable: argv[0] !== "", still: argv[0] === systemdRun || argv[1] === systemdRun };
 }
 
 /**
@@ -77,16 +93,11 @@ async function scopeFails(child: ChildProcess, systemdRun: string): Promise<bool
 }
 
 /**
- * Starts `command` (through `runnerSpawn`) detached in `cwd` with `env`, output appended to `logPath`. Resolves with its pid. A scoped spawn that fails before it execs the runner (`scopeFails`) is
- * replaced by the plain one. `systemdRun`: for tests.
+ * Starts `command` (through `runnerSpawn`) detached in `cwd` with `env`, output appended to `logPath`. Resolves with its
+ * pid. A scoped spawn that fails before it execs the runner (`scopeFails`) is replaced by the plain one.
  */
-export async function spawnDetached(
-  command: string[],
-  env: RunnerEnv,
-  logPath: string,
-  cwd: string,
-  systemdRun: string | null = onPath("systemd-run"),
-): Promise<number | undefined> {
+export async function spawnDetached(command: string[], env: RunnerEnv, logPath: string, cwd: string): Promise<number | undefined> {
+  const systemdRun = onPath("systemd-run");
   const runner = runnerSpawn(command, env, process.env, systemdRun);
   let child = await startChild(runner.argv, runner.env, logPath, cwd);
   if (systemdRun !== null && runner.argv !== command && (await scopeFails(child, systemdRun))) child = await startChild(command, env, logPath, cwd);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isResting, applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RETRY_PROMPT, roundsUsed, type Finding, type Task } from "./state.ts";
+import { applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RETRY_PROMPT, roundsUsed, type Finding, type Task } from "./state.ts";
 
 const task: Task = {
   title: "Add notes",
@@ -59,6 +59,11 @@ describe("rebuild", () => {
     expect(applyEntry(run, "factory-round", { round: 2, trigger: "conflict" })).toMatchObject({ runFirstRound: 1 });
   });
 
+  test("the minor findings of every review are kept with their round, oldest first", () => {
+    const review = (round: number) => custom("factory-review", { round, status: "ok", approved: false, findings: [finding("major"), { ...finding("minor"), text: `m${round}` }] });
+    expect(rebuild([custom("factory-task", task), review(1), review(2)])?.minors.map((minor) => [minor.round, minor.text])).toEqual([[1, "m1"], [2, "m2"]]);
+  });
+
   test("a factory-question and waiting_answer rebuild into the resting state with the open question; the answer clears it", () => {
     const entries = [
       custom("factory-task", task),
@@ -69,7 +74,6 @@ describe("rebuild", () => {
     ];
     const asked = rebuild(entries);
     expect(asked).toMatchObject({ state: "waiting_answer", round: 1, runFirstRound: 1, reason: "question", question: "Which table?" });
-    expect(isResting("waiting_answer")).toBe(true);
     const answered = rebuild([...entries, custom("factory-state", { state: "running", round: 1, reason: "answer" })]);
     expect(answered).toMatchObject({ state: "running", round: 1, runFirstRound: 1 });
     expect(answered?.question).toBeUndefined();

@@ -6,6 +6,7 @@ import { runGateStep } from "./flaky-rerun.ts";
 import { type CommandResult, runCommand } from "./run.ts";
 import { type SlotPool, slotWaiting, takeSlot } from "./test-slots.ts";
 import { procStart } from "./lock.ts";
+import { until } from "./core-test-kit.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -20,14 +21,6 @@ function pool(count: number, extra: Partial<SlotPool> = {}): SlotPool {
 
 const OK: CommandResult = { exitCode: 0, killed: false, timedOut: false, durationMs: 1, stdout: "", stdoutTruncated: false, output: "" };
 
-async function until(check: () => boolean | Promise<boolean>, ms = 10_000): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error("timed out waiting");
-    await Bun.sleep(10);
-  }
-}
-
 describe("test slots", () => {
   test("K+1 gate runs: one waits, shown as waiting, and runs when a slot frees", async () => {
     const slots = pool(2);
@@ -41,8 +34,8 @@ describe("test slots", () => {
       }, () => false, slots),
     );
     await until(() => started.length === 2);
+    // The third is waiting for a slot, not started.
     await until(() => slotWaiting([process.pid], slots.dir));
-    await Bun.sleep(100);
     expect(started.length).toBe(2);
     const waiting = [0, 1, 2].find((index) => !started.includes(index))!;
     gates[started[0]].resolve();

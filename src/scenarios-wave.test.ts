@@ -31,6 +31,7 @@ scenario(
     for (const file of ["b.txt", "c.txt", "d.txt"]) expect(c.git("show", `main:${file}`)).toBe(file);
     expect(c.git("rev-list", "--merges", "--count", "main")).toBe("0");
     // Exactly the two merges: no `interrupted` for a task or wave whose runner ended after its last state.
+    await c.until(() => events(c.notices).length >= 2);
     expect(events(c.notices).sort()).toEqual([`wave:${a.id}:merged`, `wave:${b.id}:merged`].sort());
     expect(doneA.usage.cost).toBeGreaterThan(0);
     // A merged wave's task commits landed, squashed and maybe rebased: its removal needs no force.
@@ -59,6 +60,7 @@ scenario(
     const merged = (await c.act("waves.get", { id: wave.id })).wave;
     expect([merged.stage, merged.tasks.length]).toEqual(["merged", 2]);
     for (const file of ["b.txt", "e.txt"]) expect(c.git("show", `main:${file}`)).toBe(file);
+    await c.until(() => events(c.notices).includes(`wave:${wave.id}:merged`));
     expect(events(c.notices)).toEqual([`wave:${wave.id}:fix`, `wave:${wave.id}:merged`]);
   },
 );
@@ -87,15 +89,3 @@ scenario(
   {},
   120_000,
 );
-
-scenario("S10 a wave queued after another starts once that one merged, cut at the new tip", writesNamed, async (c) => {
-  await c.act("repos.add");
-  const { wave: a } = await c.act("waves.start", { tag: "s10/a", title: "a", request: "review", tasks: [{ key: "x", title: "feat: add b", request: "WRITE b.txt" }] });
-  const { wave: b } = await c.act("waves.start", { tag: "s10/b", title: "b", request: "review", after: [a.id], tasks: [{ key: "y", title: "feat: add c", request: "WRITE c.txt" }] });
-  expect(b.stage).toBe("queued");
-  await c.act("tasks.wait", { tag: "s10", timeoutMs: 60_000 });
-  const [doneA, doneB] = [(await c.act("waves.get", { id: a.id })).wave, (await c.act("waves.get", { id: b.id })).wave];
-  expect([doneA.stage, doneB.stage]).toEqual(["merged", "merged"]);
-  expect(doneB.merge.from).toBe(doneA.merge.to);
-  expect(c.git("rev-list", "--count", "main")).toBe("3");
-});

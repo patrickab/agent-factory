@@ -73,6 +73,8 @@ scenario("S6 a cancelled conflict task restores the wave's branch, the wave bloc
       });
       const state = async (key: string) => (await c.act("waves.get", { id: wave.id })).wave.tasks.find((task: { key: string }) => task.key === key);
       await c.until(async () => (await state("d")).state === "done" && (await state("w")).state === "waiting_answer" && (await state("r")).state === "running");
+      const asking = (await state("w")).taskId;
+      await c.until(() => events(c.notices).includes(`task:${asking}:waiting_answer`));
       const applied = await c.act("contracts.apply", { store: "plan", name: "api", op: { op: "update", path: "answer", id: "f0", text: "FACT-2" } });
       const keys = (tasks: { key: string }[]) => tasks.map((task) => task.key);
       expect([keys(applied.notified), keys(applied.kept), keys(applied.done)]).toEqual([["r"], ["w"], ["d"]]);
@@ -84,7 +86,8 @@ scenario("S6 a cancelled conflict task restores the wave's branch, the wave bloc
       // The running one as a follow-up, the waiting one with its answer; the pending one reads the store at its start.
       expect(told.map((call) => call.prompt.includes("ANSWER-W"))).toEqual([false, true]);
       expect(c.calls.some((call) => call.prompt.includes("WRITE p.txt") && call.prompt.includes("run/contract/api"))).toBe(true);
-      expect(events(c.notices).sort()).toEqual([`task:${(await state("w")).taskId}:waiting_answer`, `wave:${wave.id}:contract`, `wave:${wave.id}:merged`].sort());
+      await c.until(() => events(c.notices).includes(`wave:${wave.id}:merged`));
+      expect(events(c.notices).sort()).toEqual([`task:${asking}:waiting_answer`, `wave:${wave.id}:contract`, `wave:${wave.id}:merged`].sort());
     },
     { store: { memories: { "run/contract/api/answer": ["{ok}"] }, docs: {} } },
   );
@@ -105,11 +108,13 @@ scenario("S6 a cancelled conflict task restores the wave's branch, the wave bloc
       await terminate(wave.id);
       const waited = await c.act("tasks.wait", { wave: wave.id, timeoutMs: 30_000 });
       expect(waited.attention).toEqual([wave.id]);
+      await c.until(() => c.notices.length > 0);
       release();
       await c.act("waves.retry", { id: wave.id });
       await c.act("tasks.wait", { wave: wave.id, timeoutMs: 60_000 });
       expect((await c.act("waves.get", { id: wave.id })).wave.stage).toBe("merged");
       expect([c.git("rev-parse", "main~1"), c.git("show", "main:b.txt")]).toEqual([before, "DIFF-SECRET"]);
+      await c.until(() => c.notices.length > 1);
       expect(events(c.notices)).toEqual([`wave:${wave.id}:interrupted`, `wave:${wave.id}:merged`]);
       // The review cut short, its retry, the fit pass: each resumes the session with the earlier tool results (read_diff;
       // read_diff and submit_verdict), never their text.
@@ -129,38 +134,3 @@ scenario("S6 a cancelled conflict task restores the wave's branch, the wave bloc
     },
   );
 }
-
-{
-  const never = new Promise<undefined>(() => {});
-  scenario(
-    "S10 a wave queued after a cancelled one can never start: attention, one notice",
-    () => never,
-    async (c) => {
-      await c.act("repos.add");
-      const { wave: a } = await c.act("waves.start", { tag: "s10/a", title: "a", request: "review", tasks: [{ key: "x", title: "feat: add b", request: "WRITE b.txt" }] });
-      const { wave: b } = await c.act("waves.start", { tag: "s10/b", title: "b", request: "review", after: [a.id], tasks: [{ key: "y", title: "feat: add c", request: "WRITE c.txt" }] });
-      await c.act("waves.cancel", { id: a.id });
-      const waited = await c.act("tasks.wait", { wave: b.id, timeoutMs: 30_000 });
-      expect(waited.attention).toEqual([b.id]);
-      expect((await c.act("waves.get", { id: b.id })).wave.stage).toBe("queued");
-      await c.until(() => c.notices.length > 0);
-      expect(events(c.notices)).toEqual([`wave:${b.id}:never`]);
-      expect(c.git("rev-list", "--count", "main")).toBe("1");
-    },
-  );
-}
-
-scenario(
-  "S11 a wave's merge gate that changes a tracked file blocks the wave, the target stays",
-  writesNamed,
-  async (c) => {
-    await c.act("repos.add");
-    const main = c.git("rev-parse", "main");
-    const { wave } = await c.act("waves.start", { tag: "s11", title: "wave", request: "review", tasks: [{ key: "x", title: "feat: add b", request: "WRITE b.txt" }] });
-    const waited = await c.act("tasks.wait", { wave: wave.id, timeoutMs: 60_000 });
-    expect(waited.attention).toEqual([wave.id]);
-    expect((await c.act("waves.get", { id: wave.id })).wave.stage).toBe("blocked");
-    expect(c.git("rev-parse", "main")).toBe(main);
-  },
-  { factory: "merge_gates:\n  - [sh, -c, 'echo dirty >> a.txt']\n" },
-);

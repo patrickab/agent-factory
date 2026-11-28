@@ -10,23 +10,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ACTIONS } from "../core.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
 import { isTaskSession, registerFactoryTool } from "./tool.ts";
+import { restoreEnv } from "../core-test-kit.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-tool-test-")));
-const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 // A coder runs these tests from its task's Pi, which has the task-session variable (the gates no longer inherit it).
-const savedTaskSession = process.env[TASK_SESSION_ENV];
+const savedEnv = { ...process.env };
 
 beforeEach(() => {
   process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
   delete process.env[TASK_SESSION_ENV];
 });
 
-afterEach(() => {
-  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-  else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
-  if (savedTaskSession === undefined) delete process.env[TASK_SESSION_ENV];
-  else process.env[TASK_SESSION_ENV] = savedTaskSession;
-});
+afterEach(() => restoreEnv(savedEnv));
 
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 

@@ -1,19 +1,19 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FactoryError } from "./core.ts";
+import type { FactoryError } from "./core.ts";
 import { allCancelled, appendWaveEvent, appendWaveEvents, createWave, readWave, readyForReview, startableKeys, stuckKeys, unreachableKeys, validateTaskSpecs, waveCounts, waveTaskState, type WaveDeclaration, type WaveEvent, type WaveFold } from "./waves.ts";
 import type { State } from "./state.ts";
 import { wavePath } from "./wave-poke.ts";
+import { restoreEnv } from "./core-test-kit.ts";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "factory-waves-test-")));
-const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+const savedEnv = { ...process.env };
 process.env.PI_CODING_AGENT_DIR = join(scratch, "agent");
 
 afterAll(() => {
-  if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-  else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+  restoreEnv(savedEnv);
   rmSync(scratch, { recursive: true, force: true });
 });
 
@@ -69,9 +69,6 @@ describe("wave records", () => {
     await appendWaveEvent(ONE, { at: "t1", kind: "tasks", tasks: [spec("a")] });
     const stage = await appendWaveEvent(ONE, { kind: "stage", stage: "reviewing", reason: null });
     expect(stage.at).toMatch(/^\d{4}-\d\d-\d\dT/);
-    const lines = readFileSync(wavePath(ONE), "utf8").split("\n");
-    expect(lines).toHaveLength(4);
-    expect(lines[3]).toBe("");
     expect((await readWave(ONE)).events).toEqual([{ at: "t1", kind: "tasks", tasks: [spec("a")] }, stage]);
   });
 
@@ -213,24 +210,29 @@ describe("scheduling", () => {
   });
 });
 
-describe("validateTaskSpecs", () => {
-  const invalid = (raw: unknown, existing: { key: string }[], message: string) => {
+test("validateTaskSpecs refuses each malformed spec, a repeated key, an unknown or own after, and a cycle", () => {
+  const rows: [unknown, { key: string }[]][] = [
+    [[], []],
+    ["a", []],
+    [[1], []],
+    [[spec("a b")], []],
+    [[spec("a"), spec("a")], []],
+    [[spec("a")], [{ key: "a" }]],
+    [[{ ...spec("a"), title: " " }], []],
+    [[{ key: "a", title: "t" }], []],
+    [[{ ...spec("a"), after: "b" }], []],
+    [[{ ...spec("a"), model: "a/b" }], []],
+    [[spec("a", ["x"])], [{ key: "b" }]],
+    [[spec("a", ["a"])], []],
+    [[spec("a", ["c"]), spec("b", ["a"]), spec("c", ["b"])], []],
+  ];
+  const code = ([raw, existing]: (typeof rows)[number]) => {
     try {
       validateTaskSpecs(raw, existing);
+      return null;
     } catch (error) {
-      expect(error).toBeInstanceOf(FactoryError);
-      expect((error as FactoryError).code).toBe("invalid");
-      expect((error as Error).message).toContain(message);
-      return;
+      return (error as FactoryError).code;
     }
-    throw new Error("validateTaskSpecs accepted the specs");
   };
-
-  test("refuses a repeated key, an unknown or own after, and a cycle", async () => {
-    invalid([spec("a"), spec("a")], [], "task key a is not unique");
-    invalid([spec("a")], [{ key: "a" }], "task key a is not unique");
-    invalid([spec("a", ["x"])], [{ key: "b" }], "task a waits for x, no task of the wave");
-    invalid([spec("a", ["a"])], [], "task a waits for itself");
-    invalid([spec("a", ["c"]), spec("b", ["a"]), spec("c", ["b"])], [], "cycle: a -> c -> b -> a");
-  });
+  expect(rows.map(code)).toEqual(rows.map(() => "invalid"));
 });

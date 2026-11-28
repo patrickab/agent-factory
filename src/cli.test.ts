@@ -25,8 +25,8 @@ test("params run the action and print the agent view, --json the full view; inva
 });
 
 test("--help names every action with its summary; --core-path is a file exporting ACTIONS", async () => {
-  const help = factory(["--help"]).stdout.split("\n");
-  for (const [name, spec] of Object.entries(ACTIONS)) expect(help).toContain(`${name}  ${spec.summary}`);
+  const help = factory(["--help"]).stdout;
+  expect(Object.entries(ACTIONS).filter(([name, spec]) => !help.includes(name) || !help.includes(spec.summary))).toEqual([]);
   const path = factory(["--core-path"]).stdout.trim();
   expect(existsSync(path)).toBe(true);
   expect(Object.keys(((await import(path)) as { ACTIONS: object }).ACTIONS)).toEqual(Object.keys(ACTIONS));

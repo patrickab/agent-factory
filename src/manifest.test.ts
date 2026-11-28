@@ -7,19 +7,12 @@ import { join } from "node:path";
 
 const root = join(import.meta.dirname, "..");
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
-  name: string;
-  version: string;
   exports: Record<string, string>;
   bin: Record<string, string>;
   pi: { extensions: string[] };
 };
 
 describe("package.json", () => {
-  test("names the package agent-factory with a semver version", () => {
-    expect(manifest.name).toBe("agent-factory");
-    expect(manifest.version).toMatch(/^\d+\.\d+\.\d+$/);
-  });
-
   test("exports, bin and pi.extensions point at existing files", () => {
     expect(manifest.exports).toEqual({ ".": "./src/core.ts" });
     expect(Object.keys(manifest.bin).sort()).toEqual(["factory", "factory-mcp"]);

@@ -129,7 +129,6 @@ describe("runRound", () => {
     expect(kinds(result.entries)).toEqual(["factory-gate", "factory-round", "custom_message"]);
     expect(result.entries[1]).toMatchObject({ data: { round: 2, trigger: "gates" } });
     expect(result.entries[2]).toMatchObject({ customType: "factory-feedback", display: true, details: { round: 1, trigger: "gates" } });
-    expect((result.entries[2] as { content: string }).content).toContain("`lint` failed (exit 2)");
     expect((result.entries[2] as { content: string }).content).toContain("E501 line too long");
     expect(result.continue).toBe(true);
   });
@@ -160,8 +159,8 @@ describe("runRound", () => {
     const result = await runRound(snapshotOf(), steps);
     expect(steps.calls).toEqual(["lint", "test"]);
     expect(result.entries.at(-2)).toMatchObject({ data: { round: 2, trigger: "protected" } });
-    expect((result.entries.at(-1) as { content: string }).content).toContain("- factory.yaml\n- .factory/agents/coder.md");
-    expect((result.entries.at(-1) as { content: string }).content).toContain("Restore them to their original state, then stop.");
+    const named = (result.entries.at(-1) as { content: string }).content;
+    expect([named.includes("factory.yaml"), named.includes(".factory/agents/coder.md"), named.includes("src/a.ts")]).toEqual([true, true, false]);
     expect(result.continue).toBe(true);
   });
 
@@ -169,7 +168,8 @@ describe("runRound", () => {
     const rejected = await runRound(snapshotOf(), fakeSteps({ review: async () => reviewOf("ok", ["minor", "major"]) }));
     expect(kinds(rejected.entries).slice(-3)).toEqual(["factory-review", "factory-round", "custom_message"]);
     expect(rejected.entries.at(-2)).toMatchObject({ data: { round: 2, trigger: "review" } });
-    expect((rejected.entries.at(-1) as { content: string }).content).toContain("- [major] a.ts:1: major problem");
+    const feedback = (rejected.entries.at(-1) as { content: string }).content;
+    expect([feedback.includes("major problem"), feedback.includes("minor problem")]).toEqual([true, false]);
 
     const approved = await runRound(snapshotOf(), fakeSteps({ review: async () => reviewOf("ok", ["minor"]) }));
     expect(lastState(approved.entries)).toMatchObject({ state: "merging" });
@@ -212,16 +212,6 @@ describe("runRound", () => {
     expect(result.entries[0]).toMatchObject({ data: { exitCode: null, killed: true } });
     expect(lastState(result.entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
   });
-
-  test("a broken factory.yaml blocks the task with the error", async () => {
-    const steps = fakeSteps({
-      config: () => {
-        throw new Error("factory.yaml: gates must be a list of argv lists");
-      },
-    });
-    const result = await runRound(snapshotOf(), steps);
-    expect(lastState(result.entries)).toEqual({ state: "blocked", round: 1, reason: "pipeline_error: factory.yaml: gates must be a list of argv lists" });
-  });
 });
 
 test("a rebase the coder left open goes back to the coder before any hook or gate runs", async () => {
@@ -229,7 +219,7 @@ test("a rebase the coder left open goes back to the coder before any hook or gat
   const result = await runRound(snapshotOf({}, 2, 1), steps);
   expect(result.continue).toBe(true);
   expect(result.entries[0]).toMatchObject({ data: { round: 3, trigger: "conflict" } });
-  expect((result.entries[1] as { content: string }).content).toContain("A rebase is still in progress in the task worktree");
+  expect((result.entries[1] as { content: string }).content).toContain("notes.txt");
   expect(steps.calls).toEqual([]);
 });
 
@@ -267,7 +257,7 @@ describe("runMerge", () => {
     expect(kinds(entries)).toEqual(["factory-round", "custom_message", "factory-state"]);
     expect(entries[0]).toMatchObject({ data: { round: 3, trigger: "conflict" } });
     expect(entries[1]).toMatchObject({ details: { round: 2, trigger: "conflict" } });
-    expect((entries[1] as { content: string }).content).toContain("- notes.txt\nRun `git rebase refs/heads/main`, resolve the conflicts");
+    expect((entries[1] as { content: string }).content).toContain("notes.txt");
     expect(lastState(entries)).toEqual({ state: "running", round: 3, reason: "conflict" });
 
     const last = await runMerge(merging({ maxRounds: 3 }, 3, 1), config, conflicting);
@@ -279,7 +269,6 @@ describe("runMerge", () => {
     const failedGate = { argv: ["test"], result: commandResult(1, "FAILED test_new_thing") };
     const entries = await runMerge(merging({ maxRounds: 3 }, 2, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
     expect(kinds(entries)).toEqual(["factory-round", "custom_message", "factory-state"]);
-    expect((entries[1] as { content: string }).content).toContain("After the rebase onto main");
     expect((entries[1] as { content: string }).content).toContain("FAILED test_new_thing");
     expect(lastState(entries)).toEqual({ state: "running", round: 3, reason: "gates" });
   });

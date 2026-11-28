@@ -21,8 +21,7 @@ import { listWaves } from "./waves.ts";
 
 export { cancelScouts };
 
-/** 15 minutes; `FACTORY_SCOUT_WAIT_MS` for tests. */
-const scoutWaitMs = () => Number(process.env.FACTORY_SCOUT_WAIT_MS) || 15 * 60_000;
+const SCOUT_WAIT_MS = 15 * 60_000;
 const WAIT_POLL_MS = 200;
 
 function realPath(path: string): string {
@@ -62,7 +61,7 @@ async function requireStore(store: string, cwd: string): Promise<void> {
 }
 
 async function waitForScout(dir: string, signal: AbortSignal | undefined): Promise<{ scout: ScoutView; timedOut: boolean }> {
-  const deadline = Date.now() + scoutWaitMs();
+  const deadline = Date.now() + SCOUT_WAIT_MS;
   for (;;) {
     const scout = await scoutView(dir);
     if (FINAL_SCOUT_STATES.includes(scout.state) || scout.interrupted || signal?.aborted) return { scout, timedOut: false };

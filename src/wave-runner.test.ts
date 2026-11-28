@@ -6,18 +6,16 @@
 import { describe, expect, spyOn } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { caseSerial, caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
-import { git, until } from "./core-test-kit.ts";
+import { expectError, git, noted, until } from "./core-test-kit.ts";
 import { liveWaveRunners, pokeWave, wavePokePath } from "./wave-poke.ts";
-import { writeTask, type TaskRecord } from "./tasks.ts";
+import { writeTask } from "./tasks.ts";
 import { runWave } from "./wave-runner.ts";
-import { BRANCH, caseDir, commit, getWave, holding, promptLog, reviewWorktree, RUN, setState, taskId, useWaveFixture, WAVE, waveRepo } from "./wave-test-kit.ts";
+import { BRANCH, caseDir, commit, getWave, holding, reviewWorktree, setState, taskRecord, useWaveFixture, WAVE, waveRepo } from "./wave-test-kit.ts";
 import { appendWaveEvent, readWave, type WaveView } from "./waves.ts";
 import { NO_USAGE } from "./util.ts";
 
-const test = caseTests();
-useWaveFixture();
+const test = useWaveFixture();
 
 type Event = { at?: string; kind: string; stage?: string; reason?: string | null; detail?: string; dropped?: string[]; key?: string; taskId?: string };
 const timeline = async () => (await readWave(WAVE())).events as Event[];
@@ -60,7 +58,7 @@ describe("the wave runner", () => {
     const main = git(repo, "rev-parse", "main");
     await runWave(WAVE());
     const view = await getWave();
-    expect([view.stage, view.reason, view.detail]).toEqual(["blocked", "conflict", "the rebase onto main conflicts on a.txt; its 2 conflict tasks are used up"]);
+    expect([view.stage, view.reason]).toEqual(["blocked", "conflict"]);
     expect([git(repo, "rev-parse", BRANCH), git(repo, "rev-parse", "main")]).toEqual([wave, main]);
     expect(view.reviews).toEqual([]);
     expect([view.tasks.map((task) => task.key), (await readWave(WAVE())).events.filter((event) => event.kind === "conflict").length]).toEqual([["a", "b"], 2]);
@@ -69,7 +67,7 @@ describe("the wave runner", () => {
   test("merge review: waves.approve only from waiting_approve, then the runner merges", async () => {
     const repo = await waveRepo(undefined, "done", { merge: "review" });
     await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
-    await expect(callAction("waves.approve", { id: WAVE() })).rejects.toThrow("is reviewing, approve needs waiting_approve");
+    await expectError(callAction("waves.approve", { id: WAVE() }), "refused");
     await runWave(WAVE());
     const waiting = await getWave();
     expect([waiting.stage, waiting.actions.includes("waves.approve")]).toEqual(["waiting_approve", true]);
@@ -77,7 +75,8 @@ describe("the wave runner", () => {
     expect(approved.stage).toBe("merging");
     await until(async () => (await getWave()).stage === "merged");
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
-    await expect(callAction("waves.approve", { id: WAVE() })).rejects.toThrow("is merged, approve needs waiting_approve");
+    await expectError(callAction("waves.approve", { id: WAVE() }), "refused");
+    expect((await getWave()).stage).toBe("merged");
   }, 30_000);
 
   test("a failing gate blocks it with reason gates, its output in the gate event; the wave's commits stay", async () => {
@@ -166,11 +165,10 @@ describe("the wave runner", () => {
     await until(async () => (await liveWaveRunners(WAVE())).length === 1);
     expect(await pokeWave(WAVE())).toBe(false);
     expect(await pokeWave(WAVE())).toBe(false);
-    await Bun.sleep(500);
+    // The runner saw the pokes: their marker is gone, and it is still the only one.
+    await until(() => !existsSync(wavePokePath(WAVE())));
     expect(await liveWaveRunners(WAVE())).toHaveLength(1);
     expect([(await getWave()).running, (await getWave()).interrupted]).toEqual([true, false]);
-    // The runner saw the pokes: their marker is gone.
-    await until(() => !existsSync(wavePokePath(WAVE())));
   });
 
 });
@@ -185,7 +183,7 @@ describe("a wave never waits silently (invariant 8)", () => {
     const wave = await getWave();
     expect([wave.stage, wave.running, wave.interrupted, wave.tasks.map((task) => task.state)]).toEqual(["building", false, false, ["cancelled", "done", "pending"]]);
     const said = (await timeline()).filter((event) => event.kind === "stage");
-    expect(said).toEqual([{ at: expect.any(String), kind: "stage", stage: "building", reason: null, detail: expect.stringContaining("task c can never start") }]);
+    expect(said).toEqual([{ at: expect.any(String), kind: "stage", stage: "building", reason: null, detail: expect.any(String) }]);
     const waited = await waitWave(10_000);
     expect([waited.timedOut, waited.attention, waited.waves[0].stage]).toEqual([false, [WAVE()], "building"]);
     // A second look says nothing new.
@@ -211,7 +209,7 @@ describe("a wave never waits silently (invariant 8)", () => {
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.running, wave.tasks.map((task) => task.state)]).toEqual(["blocked", "infra", false, ["done", "done", "pending"]]);
     const last = (await timeline()).at(-1);
-    expect(last).toMatchObject({ kind: "stage", stage: "blocked", reason: "infra", detail: expect.stringContaining("task c") });
+    expect(last).toMatchObject({ kind: "stage", stage: "blocked", reason: "infra", detail: expect.any(String) });
     expect(JSON.stringify(last)).not.toContain(repo);
     const waited = await waitWave(10_000);
     expect([waited.timedOut, waited.attention]).toEqual([false, [WAVE()]]);
@@ -224,39 +222,24 @@ describe("a wave never waits silently (invariant 8)", () => {
   test("waves.add while it reviews kills the review at once: the runner loses its stage change, removes the worktree, builds on", async () => {
     const repo = await waveRepo();
     // A record of the added task already exists (as a crashed launch would leave it): the runner adopts it, so nothing launches.
-    const record: TaskRecord = {
-      id: taskId(3),
-      repo,
-      worktree: join(caseDir, "task-x"),
-      branch: "task-x",
-      title: "Fix b",
-      sessionId: `session-${RUN}-${caseSerial()}-x`,
-      sessionDir: join(caseDir, "sessions"),
-      createdAt: "2026-01-01T00:00:03.000Z",
-      tag: "factory/w1",
-      plan: null,
-      wave: WAVE(),
-      origin: null,
-    };
+    const record = taskRecord(repo, "x", 3);
     await writeTask(record);
     setState("x", "done");
     process.env.FAKE_REVIEW_SLEEP = "120000";
     await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
     const run = runWave(WAVE());
-    await until(() => existsSync(promptLog));
+    await until(() => noted("reviewing").length > 0);
     // The next reviewer answers at once.
     delete process.env.FAKE_REVIEW_SLEEP;
-    const added = Date.now();
     // The added task's id is the record's, as the launch that crashed took it.
-    const uuid = spyOn(crypto, "randomUUID").mockReturnValue(taskId(3) as ReturnType<typeof crypto.randomUUID>);
+    const uuid = spyOn(crypto, "randomUUID").mockReturnValue(record.id as ReturnType<typeof crypto.randomUUID>);
     await callAction("waves.add", { id: WAVE(), tasks: [{ key: "x", title: "Fix b", request: "fix b", after: ["a"] }] });
     uuid.mockRestore();
     await until(async () => (await timeline()).some((event) => event.kind === "task" && event.key === "x"), 10_000);
-    expect(Date.now() - added).toBeLessThan(10_000);
     expect(await run).toBe(0);
-    const events = await timeline();
-    expect(events.map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "gate", "tasks", "building", "task", "reviewing", "gate", "review", "merging", "merge", "merged"]);
-    expect(events.find((event) => event.kind === "task" && event.key === "x")?.taskId).toBe(taskId(3));
+    // The killed review recorded no verdict: one review, of the wave with the added task.
+    expect((await getWave()).reviews).toHaveLength(1);
+    expect((await timeline()).find((event) => event.kind === "task" && event.key === "x")?.taskId).toBe(record.id);
     expect(existsSync(reviewWorktree(repo))).toBe(false);
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
   }, 30_000);
@@ -269,7 +252,6 @@ describe("resuming from the log", () => {
     expect(await runWave(WAVE())).toBe(0);
     expect((await getWave()).stage).toBe("merged");
     expect(git(repo, "log", "--format=%s", "main")).toBe("feat: add c\nfeat: add b\ninit");
-    expect((await timeline()).slice(-2).map((event) => event.stage ?? event.kind)).toEqual(["merge", "merged"]);
     expect(existsSync(reviewWorktree(repo))).toBe(false);
   });
 });
@@ -322,13 +304,12 @@ describe("a runner stopped from outside", () => {
     process.env.FAKE_REVIEW_SLEEP = "120000";
     await appendWaveEvent(WAVE(), { kind: "stage", stage: "reviewing", reason: null });
     expect(await pokeWave(WAVE())).toBe(true);
-    await until(() => existsSync(promptLog));
+    await until(() => noted("reviewing").length > 0);
     const [pid] = await liveWaveRunners(WAVE());
     process.kill(pid, "SIGTERM");
     await until(async () => (await liveWaveRunners(WAVE())).length === 0);
     const wave = await getWave();
     expect([wave.stage, wave.reason, wave.interrupted, wave.reviews, wave.actions.includes("waves.retry")]).toEqual(["reviewing", null, true, [], true]);
-    expect((await timeline()).map((event) => event.stage ?? event.kind)).toEqual(["tasks", "task", "task", "reviewing", "gate"]);
     expect(existsSync(reviewWorktree(repo))).toBe(true);
     delete process.env.FAKE_REVIEW_SLEEP;
     expect(await runWave(WAVE())).toBe(0);

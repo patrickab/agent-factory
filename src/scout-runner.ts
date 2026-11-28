@@ -7,7 +7,6 @@
  */
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { runCommand } from "./run.ts";
 import { SCOUT_COMMIT_ENV, SCOUT_DIR_ENV, SCOUT_STORE_ENV } from "./scout-map.ts";
 import {
   appendScoutEvent,
@@ -26,7 +25,7 @@ import { unlockFile, withLock } from "./lock.ts";
 import { errorText } from "./util.ts";
 import { ls, memoryStoreRoot } from "./store.ts";
 
-const POLL_MS = Number(process.env.FACTORY_SCOUT_POLL_MS) || 1_000;
+const POLL_MS = 1_000;
 
 /** The scout's brief: the concern, the map, the rules and the report's shape. */
 export function scoutPrompt(declaration: ScoutDeclaration, listing: string, mapDir: string): string {

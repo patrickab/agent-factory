@@ -4,19 +4,16 @@
  * reviewer a fake `pi` on PATH that approves.
  */
 import { describe, expect } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { caseTests } from "./test-case.ts";
 import { callAction } from "./core.ts";
-import { lockWave, waveLockPath, wavePath } from "./wave-poke.ts";
-import { unlockFile } from "./lock.ts";
+import { wavePath } from "./wave-poke.ts";
+import { git } from "./core-test-kit.ts";
 import { runWave, waveCommitsRef } from "./wave-runner.ts";
-import { BRANCH, caseDir, commit, getWave, reviewWorktree, TAG, useWaveFixture, WAVE, waveRepo } from "./wave-test-kit.ts";
+import { BRANCH, caseDir, commit, getWave, holding, reviewWorktree, TAG, useWaveFixture, WAVE, waveRepo } from "./wave-test-kit.ts";
 import { readWave } from "./waves.ts";
 
-const test = caseTests();
-useWaveFixture();
+const test = useWaveFixture();
 
 function gitOk(cwd: string, ...args: string[]): boolean {
   try {
@@ -25,10 +22,6 @@ function gitOk(cwd: string, ...args: string[]): boolean {
   } catch {
     return false;
   }
-}
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
 const REF = () => waveCommitsRef({ id: WAVE(), tag: TAG });
@@ -91,12 +84,7 @@ describe("a squash wave", () => {
     expect((await getWave()).stage).toBe("waiting_approve");
     commit(repo, "d.txt", "d\n", "main: add d");
     // Held: the approve's poke starts no runner of its own.
-    await lockWave(WAVE());
-    try {
-      await callAction("waves.approve", { id: WAVE() });
-    } finally {
-      await unlockFile(waveLockPath(WAVE()));
-    }
+    await holding(() => callAction("waves.approve", { id: WAVE() }));
     expect(await runWave(WAVE())).toBe(0);
     const runs = readFileSync(count, "utf8").split("\n").filter(Boolean).length;
     // The review's run, then the merge's three: two found the target moved after them.

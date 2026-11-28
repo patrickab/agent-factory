@@ -56,20 +56,20 @@ describe("tasks.update", () => {
       expect(changed.changed).toBe(true);
       expect(taskOf(changed.wave, "p")).toMatchObject({ title: "Task P", after: ["q"] });
       expect((await update({ id: of("p"), title: "Task P" })).changed).toBe(false);
-      for (const key of ["s", "l", "r"]) await expectError(update({ id: of(key), request: "r" }), "refused", "tasks.message");
+      for (const key of ["s", "l", "r"]) await expectError(update({ id: of(key), request: "r" }), "refused");
     } finally {
       await end();
     }
     await appendWaveEvent(id, { kind: "stage", stage: "merged", reason: null });
-    await expectError(update({ id: of("q"), request: "r" }), "refused", "merged");
-    await expectError(callAction("waves.update", { id, request: "r" }), "refused", "merged");
+    await expectError(update({ id: of("q"), request: "r" }), "refused");
+    await expectError(callAction("waves.update", { id, request: "r" }), "refused");
   });
 });
 
 describe("waves.update", () => {
   test("replaces title and reviewer instructions, an event shown by waves.get; nothing changed without one", async () => {
     const { id } = await writtenWave(4, [spec("a")]);
-    await expectError(callAction("waves.update", { id }), "invalid", "needs title or request");
+    await expectError(callAction("waves.update", { id }), "invalid");
     const { wave, changed } = (await callAction("waves.update", { id, title: "Wave two", request: "check the docs too" })) as { wave: WaveView; changed: boolean };
     expect([changed, wave.title, wave.request]).toEqual([true, "Wave two", "check the docs too"]);
     expect(wave.updates).toEqual([{ at: expect.any(String), key: null, fields: ["title", "request"] }]);

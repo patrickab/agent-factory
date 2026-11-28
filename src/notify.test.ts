@@ -22,6 +22,7 @@ test("each attention state of a task or wave is one notice to its origin, the re
     wave({ stage: "merged" }),
     wave({ stage: "reviewing", interrupted: true }),
     wave({ stuck: true, tasks: [waveTask("a", "cancelled"), waveTask("b", "pending", ["a"])] }),
+    wave({ stage: "queued", stuck: true, after: [WAVE_ID] }),
   ];
   for (const input of waves) {
     const notices = pendingNotices([], [input], none);

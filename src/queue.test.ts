@@ -25,9 +25,11 @@ test("a pid is alive only with the ticket's start time: a reused pid is dead", a
 test("a dead holder's ticket is dropped, a live one counts until it leaves", async () => {
   const gitDir = mkdtempSync(join(scratch, "q-"));
   const dir = join(gitDir, "factory-merge-queue");
-  const ahead = await joinQueue(gitDir);
-  await Bun.sleep(2);
   const mine = await joinQueue(gitDir);
+  // A live ticket of this process that is older than mine.
+  const name = `000000000000000-${process.pid}-${await procStart(process.pid)}-ahead`;
+  const ahead = { name, path: join(dir, name) };
+  writeFileSync(ahead.path, "");
   const dead = `000000000000001-${await deadPid()}-0-dead`;
   writeFileSync(join(dir, dead), "");
   expect(await queueAhead(mine)).toBe(1);
