@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +65,10 @@ describe("readReviewerOutput", () => {
 
 describe("runReview", () => {
   const reviewsDir = mkdtempSync(join(tmpdir(), "factory-reviews-test-"));
+  // The worktree under review: the reviewer's run compares it before and after.
+  const root = join(reviewsDir, "repo");
+  execFileSync("git", ["init", "--quiet", root]);
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "--allow-empty", "-m", "init"], { cwd: root });
   afterAll(() => rmSync(reviewsDir, { recursive: true, force: true }));
   const task: Task = {
     title: "Fix the cart",
@@ -90,7 +95,7 @@ describe("runReview", () => {
         calls.push({ argv, options });
         return result;
       },
-      root: "/repo",
+      root,
       round: 2,
       task,
       followUps,
@@ -101,11 +106,8 @@ describe("runReview", () => {
       cancelled: () => cancelled,
     });
 
-  test("starts a read-only child and maps its verdict", async () => {
-    const calls: { argv: string[]; options: CommandOptions }[] = [];
-    expect(await review(child(), calls)).toMatchObject({ round: 2, status: "ok", approved: false, findings: [blocker] });
-    const tools = calls[0].argv[calls[0].argv.indexOf("--tools") + 1].split(",");
-    expect(tools.filter((tool) => ["write", "edit", "bash"].includes(tool))).toEqual([]);
+  test("maps the child's verdict", async () => {
+    expect(await review(child())).toMatchObject({ round: 2, status: "ok", approved: false, findings: [blocker] });
   });
 
   test.each([

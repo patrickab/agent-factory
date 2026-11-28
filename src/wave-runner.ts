@@ -330,7 +330,10 @@ async function review(fold: WaveFold): Promise<Chooser | null> {
     if (fit === null) return null;
     const { sessionId, model, verdict, status, findings, usage, wallMs } = fit;
     const event: Extract<NewWaveEvent, { kind: "review" }> = { kind: "review", round, sessionId, model, verdict, status, findings, usage, wallMs };
-    if (verdict === "failed") return choice("blocked", "review_failed", `the reviewer gave no verdict (${status})`, [event]);
+    if (verdict === "failed") {
+      const why = fit.edited.length > 0 ? `the reviewer changed its worktree (${fit.edited.join(", ")}), its verdict is void` : `the reviewer gave no verdict (${status})`;
+      return choice("blocked", "review_failed", why, [event]);
+    }
     return (now) => afterFit(fold, now, round, event);
   } catch (error) {
     return choice("blocked", "infra", `review: ${oneLine(errorText(error))}`);

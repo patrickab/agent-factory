@@ -6,6 +6,7 @@
  *   as a `STUB_PREFIX` line through Pi's `context` hook; the same stubs at every request keep the cached prefix
  * - A wave's reviewer (`REVIEW_WAVE_ENV`) also gets `scout`, `feedback`, `notify_supervisor` and `start_fix`
  *   (`registerReviewerTools`): the factory plugin is not loaded here
+ * - `bash` refuses a git command that changes the tree, the index, a branch or a remote (`changesGit`)
  */
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -30,6 +31,15 @@ export interface ReviewerIds {
   task: string | null;
   plan: string | null;
 }
+
+/**
+ * A git subcommand that changes the tree, the index, a branch or a remote, as a word after `git` and its global
+ * options, anywhere in the command (`&&`, `;`, `|`, `$(...)`, `bash -c "..."`). A guard against a slip, not a sandbox:
+ * an odd read-only command may be refused, and the worktree check after the run (`runReviewer`) is what holds the rule.
+ */
+const GIT_WRITE =
+  /(^|[\s;&|("'`])git(\s+(-[Cc]\s+\S+|-{1,2}[\w-]+(=\S+)?))*\s+(commit|push|merge|rebase|reset|checkout|switch|restore|stash|cherry-pick|revert|am|apply|worktree|tag|clean|add|rm|mv|pull|fetch|branch\s+([^;&|]*\s)?-(d|D|m|M|-delete|-move))(?=$|[\s;&|)"'`])/;
+const changesGit = (command: string): boolean => GIT_WRITE.test(command);
 
 const failed = (error: unknown) => toolError(factoryToolError(error));
 const nonEmptyString = (value: unknown): string | undefined => (typeof value === "string" && value.trim() !== "" ? value : undefined);
@@ -129,6 +139,12 @@ export default function (pi: ExtensionAPI) {
       return { ...message, content: [{ type: "text" as const, text: `${STUB_PREFIX} ${message.toolName} result of an earlier review` }] };
     });
     return changed ? { messages } : undefined;
+  });
+  pi.on("tool_call", (event) => {
+    if (event.toolName === "bash" && changesGit(String((event.input as { command?: unknown }).command))) {
+      return { block: true, reason: "Refused: a reviewer never changes the worktree, the index, a branch or a remote; it reviews and gives instructions (findings, start_fix)." };
+    }
+    return undefined;
   });
   const diffFile = process.env[REVIEW_DIFF_ENV];
   if (diffFile) {

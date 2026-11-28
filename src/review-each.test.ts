@@ -4,7 +4,7 @@
  * `/factory reviewed` it is handed: approved, it merges; rejected, it changes a file and rests `reviewing` again.
  */
 import { describe, expect } from "bun:test";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import { noted, prompts, until } from "./core-test-kit.ts";
@@ -20,7 +20,7 @@ import { NO_USAGE } from "./util.ts";
 
 const test = useWaveFixture();
 
-type Call = { key: string; prompt: string; tools: string; diff: string | null; start: number; end: number };
+type Call = { key: string; prompt: string; tools: string; diff: string | null; base: string; start: number; end: number };
 const taskCalls = () => noted<Call>("reviewed").filter((call) => call.key !== "wave");
 /** The verdicts handed to the tasks, in order. */
 const handed = () => prompts().map((prompt) => JSON.parse(prompt.slice("/factory reviewed ".length)) as { round: number; review: { approved: boolean; findings: { severity: string }[] } });
@@ -34,9 +34,9 @@ describe("review per task", () => {
     const [call] = taskCalls();
     expect(readDiffText(call!.diff!)).toContain("+a one");
     expect(call!.prompt).not.toContain("a one");
-    // The reviewer judges, it never edits.
-    expect(call!.tools.split(",").filter((tool) => ["write", "edit", "bash"].includes(tool))).toEqual([]);
-    expect((await taskReviews()).map((review) => [review.key, review.round, review.verdict])).toEqual([["a", 1, "approved"]]);
+    // The reviewer judges with a shell, it never edits; the task's base is in its environment.
+    expect(call!.tools.split(",").filter((tool) => ["write", "edit", "bash"].includes(tool))).toEqual(["bash"]);
+    expect((await taskReviews()).map((review) => [review.key, review.round, review.verdict, review.base])).toEqual([["a", 1, "approved", call!.base]]);
     // Every task done: the wave then reviews and merges as before.
     expect((await readWave(WAVE())).fold.stage).toBe("merged");
   });
@@ -61,6 +61,18 @@ describe("review per task", () => {
       [1, "rejected"],
       [2, "approved"],
     ]);
+  });
+
+  test("a reviewer that changes the worktree: put back with the task's own work, its verdict void, the log names the file", async () => {
+    await eachWave(["a"]);
+    const { worktree } = (await tasksById()).values().next().value!;
+    process.env.FAKE_REVIEW_WRITE = join(worktree, "edit.txt");
+    const logged: string[] = [];
+    const { fold } = await readWave(WAVE());
+    expect(await reviewNext(fold, new Map([["a", "reviewing"]]), { ...reviewEachDeps, env: process.env, log: (text) => logged.push(text) })).toBe(true);
+    expect([existsSync(join(worktree, "edit.txt")), readFileSync(join(worktree, "a.txt"), "utf8")]).toEqual([false, "a one\n"]);
+    expect((await taskReviews()).map((review) => review.verdict)).toEqual(["failed"]);
+    expect(logged.some((line) => line.includes("edit.txt") && !line.includes(caseDir))).toBe(true);
   });
 
   test("two tasks done at once are reviewed one after another", async () => {

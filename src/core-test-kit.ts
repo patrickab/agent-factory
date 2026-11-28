@@ -37,7 +37,8 @@ import { listWaves } from "./waves.ts";
  * - `json` with `map_write` (a scout's child): loads its extension, writes `$FAKE_SCOUT.writes`, then holds (`hold`)
  *   or ends with `report`; each assistant message costs `$FAKE_SCOUT.cost`
  * - `json` else (a reviewer): notes `reviewing <key>`, sleeps `$FAKE_REVIEW_SLEEP` ms, answers the next of the
- *   verdicts in `$FAKE_VERDICT_<key>` (`approve`, `reject`; the last one repeats) and notes the call (`reviewed`)
+ *   verdicts in `$FAKE_VERDICT_<key>` (`approve`, `reject`; the last one repeats) and notes the call (`reviewed`) with
+ *   its `FACTORY_BASE`; `$FAKE_REVIEW_WRITE`: it first writes that file, as a reviewer that edits
  */
 const FAKE_PI = `#!/usr/bin/env bun
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -86,10 +87,11 @@ if (option("--mode") === "json") {
   note("reviewing", key);
   const start = Date.now();
   if (env.FAKE_REVIEW_SLEEP) await sleep(Number(env.FAKE_REVIEW_SLEEP));
+  if (env.FAKE_REVIEW_WRITE) writeFileSync(env.FAKE_REVIEW_WRITE, "edited by the reviewer\\n");
   const verdicts = (env["FAKE_VERDICT_" + key] ?? "approve").split(" ");
   const verdict = verdicts[Math.min(noted("reviewed").filter((call) => call.key === key).length, verdicts.length - 1)];
   const findings = verdict === "reject" ? [{ file: "x.txt", line: 1, severity: "major", text: "x is wrong" }, { file: "x.txt", line: null, severity: "minor", text: "style" }] : [];
-  note("reviewed", { key, prompt, tools: option("--tools"), diff: env.FACTORY_REVIEW_DIFF ? readFileSync(env.FACTORY_REVIEW_DIFF, "utf8") : null, start, end: Date.now() });
+  note("reviewed", { key, prompt, tools: option("--tools"), diff: env.FACTORY_REVIEW_DIFF ? readFileSync(env.FACTORY_REVIEW_DIFF, "utf8") : null, base: env.FACTORY_BASE, start, end: Date.now() });
   emit({ type: "session", id });
   emit({ type: "tool_execution_end", toolName: "submit_verdict", isError: false, result: { details: { findings } } });
   emit({ type: "message_end", message: { role: "assistant", usage: usage(0.5) } });

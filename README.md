@@ -29,7 +29,9 @@ Invariants every step keeps:
 
 - Nothing reaches a target but a commit rebased onto it that passed the gates on exactly that tree; a target only
   fast-forwards. A wave's gates and reviewer see only the committed tree: a dirty worktree blocks it (`dirty`)
-- Whoever approves a change did not write it: the reviewer judges and may add `fix:` tasks, it never edits
+- Whoever approves a change did not write it: the reviewer judges and may add `fix:` tasks, it never edits. It has a
+  shell to read the code before the change (`$FACTORY_BASE`) and run a test; `bash` refuses git commands that write,
+  and a worktree it changed is put back and its verdict void
 - A wave never waits silently: whatever needs the supervisor is a resting stage with a `detail` that says why
 - Every notice reaches its origin once, also across restarts (`notified.jsonl`)
 

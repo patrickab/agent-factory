@@ -61,6 +61,24 @@ describe("reviewer tools", () => {
     expect(names({ FACTORY_REVIEW_WAVE: crypto.randomUUID(), FACTORY_REVIEW_TASK: "t" })).toEqual(["submit_verdict", "scout", "feedback", NOTIFY_TOOL, FIX_TOOL]);
   });
 
+  test("bash refuses a git command that changes the worktree, a branch or a remote, and lets reading pass", () => {
+    const handlers = new Map<string, (event: unknown) => unknown>();
+    defaultExtension({ registerTool: () => {}, on: (name: string, handler: (event: unknown) => unknown) => handlers.set(name, handler) } as unknown as ExtensionAPI);
+    const refused = (command: string) => (handlers.get("tool_call")!({ toolName: "bash", input: { command } }) as { block?: boolean } | undefined)?.block === true;
+    const table: [string, boolean][] = [
+      ["git commit -m x", true],
+      ["git -C . push", true],
+      ["cd x && git reset --hard", true],
+      ['bash -c "git stash"', true],
+      ["git show HEAD:a", false],
+      ["git log", false],
+      ["git diff", false],
+      ["git status", false],
+      ["bun test a.test.ts", false],
+    ];
+    expect(table.map(([command]) => [command, refused(command)])).toEqual(table);
+  });
+
   test("feedback in the fit pass (no task) is the wave's: stored with task null and listed by waves.get", async () => {
     const bin = join(caseDir, "store-bin");
     const root = join(caseDir, "stores");
