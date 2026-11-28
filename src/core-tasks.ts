@@ -15,6 +15,7 @@ import {
   deleteTask,
   launchTask,
   DONE_REFUSAL,
+  refusesDone,
   liveRunners,
   MERGING_REFUSAL,
   messageTask,
@@ -30,7 +31,7 @@ import { readFactoryStates, sessionEntries, sessionFilePath, taskMainBranch } fr
 import { runCommand } from "./run.ts";
 import { requireModels } from "./models.ts";
 import { checkSettings, factoryHome, loadSettings, resolveSettings } from "./settings.ts";
-import { COMMIT_ASK_TYPE, isFactoryTurn, isFinal, isFactoryPrompt, messageText, rebuild, isResting, spentUntil, type Finding, type MinorFinding, type ReviewData, type Settings, type Snapshot, type Spent, type State } from "./state.ts";
+import { COMMIT_ASK_TYPE, isFactoryTurn, isFinal, isFactoryPrompt, messageText, rebuild, isResting, SNAPSHOT_VERSION, spentUntil, type Finding, type MinorFinding, type ReviewData, type Settings, type Snapshot, type Spent, type State } from "./state.ts";
 import { listTasks, lockTask, tagInGroup, taskLockPath, type TaskRecord } from "./tasks.ts";
 import { unlockFile } from "./lock.ts";
 import { addUsage, cents, FactoryError, isRecord, jsonLines, piUsage, short, writeAtomic, type Usage } from "./util.ts";
@@ -194,9 +195,9 @@ async function sessionSummary(sessionPath: string | null): Promise<SessionSummar
   if (file !== null) {
     const known = summaries.get(sessionPath);
     if (known?.size === file.size && known.mtimeMs === file.mtimeMs) return known;
-    // A cache of another shape has no snapshot: read again and rewritten.
+    // A cache written for another Snapshot shape (or none) is read again and rewritten.
     const cached: unknown = await readFile(cachePath, "utf8").then(JSON.parse, () => null).catch(() => null);
-    if (isRecord(cached) && cached.size === file.size && cached.mtimeMs === file.mtimeMs && isRecord(cached.snapshot)) return cached as unknown as SessionSummary;
+    if (isRecord(cached) && cached.version === SNAPSHOT_VERSION && cached.size === file.size && cached.mtimeMs === file.mtimeMs) return cached as unknown as SessionSummary;
   }
   const summary = summarize(await sessionEntries(sessionPath));
   if (file === null) return summary;
@@ -206,7 +207,7 @@ async function sessionSummary(sessionPath: string | null): Promise<SessionSummar
   summaries.set(sessionPath, stored);
   if (summary.snapshot && isFinal(summary.snapshot.state)) {
     // Only a cache: on a failure the next listing reads the session again.
-    await writeAtomic(cachePath, JSON.stringify(stored)).catch(() => undefined);
+    await writeAtomic(cachePath, JSON.stringify({ ...stored, version: SNAPSHOT_VERSION })).catch(() => undefined);
   }
   return summary;
 }
@@ -290,7 +291,7 @@ export function refusal(view: Omit<TaskView, "actions">, action: TaskActionName,
     case "tasks.message":
       if (view.state === null) return refused("has not started yet, send the message once it runs");
       if (view.state === "merging") return refused(MERGING_REFUSAL);
-      if (view.state === "done" && view.wave !== null) return refused(DONE_REFUSAL);
+      if (refusesDone(view.state, view.wave)) return refused(DONE_REFUSAL);
       return view.state === "waiting_answer" ? null : leftBuilding("a message");
   }
 }

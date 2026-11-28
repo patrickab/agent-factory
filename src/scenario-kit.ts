@@ -10,12 +10,12 @@
  *   other asks the script, with the role (`reviewer` when `submit_verdict` is offered), the text of the last message and
  *   the request. A script that returns nothing ends the turn
  */
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "bun:test";
 import { callAction } from "./core.ts";
-import { git, until } from "./core-test-kit.ts";
+import { git, removeHome, until } from "./core-test-kit.ts";
 import { liveRunners, stopRunners } from "./launch.ts";
 import { writeFakeMemoryStore, writeStore, type FakeStore } from "./fake-memory-store.ts";
 import type { Notice } from "./notify.ts";
@@ -195,7 +195,7 @@ export function scenario(name: string, script: Script, body: (c: Case) => Promis
         server.stop(true);
         for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
         Object.assign(process.env, saved);
-        rmSync(dir, { recursive: true, force: true });
+        removeHome(dir);
       }
     },
     timeoutMs,

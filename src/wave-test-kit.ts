@@ -7,12 +7,12 @@
  */
 import { randomBytes } from "node:crypto";
 import { afterAll, afterEach } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import { stopRunners, worktreePath } from "./launch.ts";
-import { caseDigits, caseSerial, caseTests, git, GIT_ENV, restoreEnv, TASK_ENTRY, writeFakePi } from "./core-test-kit.ts";
+import { caseDigits, caseSerial, caseTests, git, GIT_ENV, removeHome, restoreEnv, TASK_ENTRY, writeFakePi } from "./core-test-kit.ts";
 import { listTasks, writeTask, type TaskRecord } from "./tasks.ts";
 import { lockWave, stopWaveRunners, waveLockPath } from "./wave-poke.ts";
 import { unlockFile } from "./lock.ts";
@@ -32,7 +32,7 @@ export function useWaveFixture(): ReturnType<typeof caseTests> {
     for (const record of await listTasks()) await stopRunners(record);
     restoreEnv(savedEnv);
   });
-  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  afterAll(() => removeHome(scratch));
   return caseTests(() => {
     caseDir = join(scratch, `case-${caseSerial()}`);
     mkdirSync(caseDir);

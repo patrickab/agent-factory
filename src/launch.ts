@@ -13,11 +13,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
 import { contractsForLaunch } from "./contracts.ts";
 import { git, primaryCheckout } from "./git.ts";
-import { CODER_EXTENSIONS_ENV, inboxReadPath, lastFactoryState, readFactoryStates, readInboxOffset, takeInboxLine, taskMainBranch } from "./runner.ts";
+import { CODER_EXTENSIONS_ENV, inboxReadPath, lastFactoryState, readFactoryStates, readInboxOffset, takeInboxLine, taskMainBranch, withdrawInboxLine } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, taskModels, type ModelSize, type StoredSettings } from "./settings.ts";
-import { isFinal, type Settings, type StartPayload } from "./state.ts";
-import { lockRunner, startRunner, unlockFile } from "./lock.ts";
+import { isFinal, type Settings, type StartPayload, type State } from "./state.ts";
+import { lockRunner, startRunner, unlockFile, withLock } from "./lock.ts";
 import { onPath, stopProcesses, type RunnerEnv } from "./spawn.ts";
 import { lockTask, removeTask, systemUser, taskLockPath, taskLogPath, tasksDir, writeTask, type TaskRecord } from "./tasks.ts";
 import { TASK_WAVE_ENV, waveDir } from "./wave-poke.ts";
@@ -192,7 +192,8 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
     });
     let record: TaskRecord | undefined;
     try {
-      await runAfterCreate(commands.run, worktree);
+      // Package managers race on their shared cache: one repository's hooks run one launch at a time.
+      await withLock(join(factoryHome(), "locks", `${repoDirName(repo)}.hooks`), "hooks are busy", Infinity, () => runAfterCreate(commands.run, worktree), input.signal);
       if (aborted()) throw new Error("the start was aborted");
       await input.beforeRecord?.(settings.branch, worktree);
       record = {
@@ -285,6 +286,8 @@ export function taskInboxPath(id: string): string {
 export const MERGING_REFUSAL = "is merging, send the message when the merge has ended";
 /** A done task of a wave takes no message: more work for the wave is `waves.add`; a cancelled one keeps what it did. */
 export const DONE_REFUSAL = "is done: give the work to its wave with waves.add, or start a new task";
+/** The one rule for a message to a done task, sent by an action or typed into its session: refused in a wave, else it runs again. */
+export const refusesDone = (state: State | null | undefined, wave: string | null): boolean => state === "done" && wave !== null;
 
 /**
  * Before a follow-up run of a done task outside a wave: a worktree that is gone is made again on the task branch, new
@@ -321,6 +324,7 @@ async function restoreWorktree(record: TaskRecord): Promise<void> {
  */
 export async function messageTask(record: TaskRecord, text: string, env?: RunnerEnv): Promise<void> {
   const inbox = taskInboxPath(record.id);
+  const line = `${JSON.stringify({ text })}\n`;
   /** The inbox's size once `text` is in it; 0 before. */
   let end = 0;
   for (;;) {
@@ -330,7 +334,7 @@ export async function messageTask(record: TaskRecord, text: string, env?: Runner
       if (end === 0 && merging) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${MERGING_REFUSAL}`);
       if (end === 0) {
         await mkdir(tasksDir(), { recursive: true });
-        await appendFile(inbox, `${JSON.stringify({ text })}\n`, "utf8");
+        await appendFile(inbox, line, "utf8");
         end = (await stat(inbox)).size;
       }
       while (
@@ -355,10 +359,16 @@ export async function messageTask(record: TaskRecord, text: string, env?: Runner
         // The caller checked `refusal(view, "tasks.message")` before the lock; the state may have moved since.
         const state = await lastFactoryState(record.sessionDir, record.sessionId);
         const followUp = state?.state === "done" && record.wave === null;
-        if (followUp) await restoreWorktree(record);
+        if (followUp) {
+          await restoreWorktree(record).catch(async (error: unknown) => {
+            // The next runner would send a line left in the inbox.
+            if (end > 0) await withdrawInboxLine(inbox, line);
+            throw error;
+          });
+        }
         if (end > 0) {
           if (state !== undefined && isFinal(state.state) && !followUp) {
-            await takeInboxLine(inbox);
+            await withdrawInboxLine(inbox, line);
             throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${DONE_REFUSAL}`);
           }
           const first = state === undefined || state.state === "merging" ? undefined : await takeInboxLine(inbox);
@@ -367,7 +377,7 @@ export async function messageTask(record: TaskRecord, text: string, env?: Runner
         }
         if (state === undefined) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} has not started yet, send the message once it runs`);
         if (state.state === "merging") throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${MERGING_REFUSAL}`);
-        if (state.state === "done" && !followUp) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${DONE_REFUSAL}`);
+        if (refusesDone(state.state, record.wave)) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${DONE_REFUSAL}`);
         return await sendCommand(record, text, env);
       } finally {
         await unlockFile(taskLockPath(record.id));

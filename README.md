@@ -115,7 +115,7 @@ Read from a commit of the target branch, never from the coder's tree. Example: `
 
 | Key | What |
 |---|---|
-| `hooks.after_create` | argv lists run in every worktree the factory makes (install packages here) |
+| `hooks.after_create` | argv lists run in every worktree the factory makes (install packages here); one launch at a time per repository |
 | `hooks.after_merge` | run in the main checkout after a merge that changed a lockfile |
 | `gates` | fast checks, after every coder turn |
 | `task_gates` | the tests a wave's task reaches, at its merge into the wave's branch; env `FACTORY_BASE` = the commit its change sits on |

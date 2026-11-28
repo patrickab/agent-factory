@@ -13,7 +13,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { afterAll, afterEach, beforeEach, expect, test as bunTest } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callAction, FactoryError, type TaskView } from "./core.ts";
@@ -271,7 +271,33 @@ process.exit(0);
     restoreEnv(savedEnv);
   });
 
-  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  afterAll(() => removeHome(scratch));
+}
+
+/** Stops every process whose command line holds `home` (a unique temporary directory), then removes it. */
+export function removeHome(home: string): void {
+  const prefix = `${home}/`;
+  const holders = () =>
+    readdirSync("/proc")
+      .filter((name) => /^\d+$/.test(name) && Number(name) !== process.pid)
+      .filter((name) => {
+        try {
+          return readFileSync(`/proc/${name}/cmdline`, "utf8").includes(prefix);
+        } catch {
+          return false;
+        }
+      })
+      .map(Number);
+  // A parent that dies may have started a child a moment before: kill until none is left.
+  for (let round = 0; round < 50 && holders().length > 0; round++) {
+    for (const pid of holders()) {
+      try {
+        process.kill(pid, round < 5 ? "SIGTERM" : "SIGKILL");
+      } catch {}
+    }
+    Bun.sleepSync(20);
+  }
+  rmSync(home, { recursive: true, force: true });
 }
 
 /** Sets the environment back to `saved`: a variable set since is removed. */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { caseDir, git, makeRepo, runnerEnded, scratch, testPath, until, useCoreFixture } from "./core-test-kit.ts";
@@ -49,8 +49,8 @@ esac
 }
 
 /** A repo with `factory.yaml` committed as `config` (none: null). */
-function repoWith(config: string | null): string {
-  const repo = makeRepo(false);
+function repoWith(config: string | null, name = "repo"): string {
+  const repo = makeRepo(false, name);
   if (config === null) return repo;
   writeFileSync(join(repo, "factory.yaml"), config);
   git(repo, "add", "-A");
@@ -100,6 +100,19 @@ describe("launchTask", () => {
     const refusal = launchTask({ repo, title: "t", request: "r" });
     await expect(refusal).rejects.toMatchObject({ code: "refused" });
     expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
+  });
+
+  test("hooks.after_create of one repository run one launch at a time; another repository is not held", async () => {
+    const spans = join(caseDir, "spans");
+    const hook = (tag: string) => `hooks:\n  after_create:\n    - ["sh", "-c", "echo ${tag} start $(date +%s%N) >> ${spans}; sleep 0.4; echo ${tag} end $(date +%s%N) >> ${spans}"]\n`;
+    const [a, b] = [repoWith(hook("a")), repoWith(hook("b"), "other")];
+    await Promise.all([a, a, b].map((repo, i) => launchTask({ repo, title: `T${i}`, request: "r" })));
+    const lines = readFileSync(spans, "utf8").trim().split("\n").map((line) => line.split(" "));
+    const times = (tag: string, kind: string) => lines.filter((l) => l[0] === tag && l[1] === kind).map((l) => BigInt(l[2]!)).sort((x, y) => (x < y ? -1 : 1));
+    const [starts, ends] = [times("a", "start"), times("a", "end")];
+    expect(starts[1]! >= ends[0]!).toBe(true);
+    expect(times("b", "start")[0]! < ends[0]!).toBe(true);
+    await runnersEnded();
   });
 
   for (const [label, usesAgentWorktree] of [

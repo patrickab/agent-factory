@@ -157,6 +157,9 @@ export function spentUntil(snapshot: Snapshot, interrupted: boolean, now: string
   return isFinal(snapshot.state) ? snapshot.spent.ms : closeSpan(snapshot.spent, interrupted ? "blocked" : snapshot.state, now).ms;
 }
 
+/** The shape of `Snapshot` in a cached session summary (`cache/sessions`): a cache of another version is read again. Raise it with every change of Snapshot. */
+export const SNAPSHOT_VERSION = 2;
+
 /** What the extension knows about its task: rebuilt from the session's entries, updated with every entry it writes. */
 export interface Snapshot {
   task: Task;

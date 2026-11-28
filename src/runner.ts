@@ -8,7 +8,7 @@
  * - Imports nothing outside node built-ins and the plain plugin modules: the deployed plugin has no `node_modules`
  */
 import { existsSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { open, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { contractCheck } from "./contracts.ts";
 import { agentDir } from "./settings.ts";
@@ -383,6 +383,22 @@ export async function takeInboxLine(inboxPath: string): Promise<string | undefin
     if (text === undefined) continue;
     await writeInboxOffset(inboxPath, end);
     return text;
+  }
+}
+
+/**
+ * Takes back the caller's own `line` (as appended, newline included) while it is unsent: blanked in place, so the
+ * offsets of the lines around it hold and every reader passes over it. An earlier sender's unsent line stays.
+ */
+export async function withdrawInboxLine(inboxPath: string, line: string): Promise<void> {
+  const bytes = await ifMissing(readFile(inboxPath), null);
+  const at = bytes?.lastIndexOf(line) ?? -1;
+  if (at < (await readInboxOffset(inboxPath))) return;
+  const handle = await open(inboxPath, "r+");
+  try {
+    await handle.write(" ".repeat(Buffer.byteLength(line) - 1), at);
+  } finally {
+    await handle.close();
   }
 }
 

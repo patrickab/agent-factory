@@ -136,20 +136,26 @@ function session(cwd: string, branch: Entry[] = []) {
   };
 }
 
-test("the answer to the commit message ask is the commit message", async () => {
-  const branch: Entry[] = [];
-  const worktree = addTaskWorktree();
-  const pi = session(worktree, branch);
-  const { readTask, writeTask } = await import("../tasks.ts");
-  await writeTask({ id: "43000000-0000-4000-8000-0000000000aa", repo, worktree, branch: "task", title: "Add task file", sessionId: "test-session", sessionDir: scratch, createdAt: "2026-01-01T00:00:00.000Z", tag: "t/title", plan: null, wave: null, origin: null, start: "" });
-  await pi.command(`start ${JSON.stringify({ request: "Add task.txt", title: "Add task file", settings: { branch: "main", merge: "review", maxRounds: 3, review: false, models: {} } })}`);
-  writeFileSync(join(worktree, "task.txt"), "done\n");
-  expect(await pi.boundary()).toBe(true);
-  expect(pi.of("factory-commit-ask")).toHaveLength(1);
-  branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "feat: add the task file\n\n- adds task.txt" }] } } as never);
-  expect(await pi.boundary()).toBe(false);
-  expect(pi.of("factory-commit-message")).toEqual([{ title: "feat: add the task file", body: "- adds task.txt" }]);
-  expect((await readTask("43000000-0000-4000-8000-0000000000aa")).title).toBe("feat: add the task file");
+test("the answer to the commit message ask is the commit message, also when the new title cannot be written", async () => {
+  // A task of a wave that is gone: its title reaches the task record, the wave's log refuses it. Null last: the later
+  // tests of this file share the session id and read its record.
+  for (const wave of ["gone-wave", null]) {
+    const branch: Entry[] = [];
+    const worktree = addTaskWorktree();
+    const pi = session(worktree, branch);
+    const { readTask, writeTask } = await import("../tasks.ts");
+    await writeTask({ id: "43000000-0000-4000-8000-0000000000aa", repo, worktree, branch: "task", title: "Add task file", sessionId: "test-session", sessionDir: scratch, createdAt: "2026-01-01T00:00:00.000Z", tag: "t/title", plan: null, wave, origin: null, start: "" });
+    await pi.command(`start ${JSON.stringify({ request: "Add task.txt", title: "Add task file", settings: { branch: "main", merge: "review", maxRounds: 3, review: false, models: {} } })}`);
+    writeFileSync(join(worktree, "task.txt"), "done\n");
+    expect(await pi.boundary()).toBe(true);
+    expect(pi.of("factory-commit-ask")).toHaveLength(1);
+    branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "feat: add the task file\n\n- adds task.txt" }] } } as never);
+    expect(await pi.boundary()).toBe(false);
+    expect(pi.of("factory-commit-message")).toEqual([{ title: "feat: add the task file", body: "- adds task.txt" }]);
+    if (wave === null) expect((await readTask("43000000-0000-4000-8000-0000000000aa")).title).toBe("feat: add the task file");
+    gitIn(repo, "worktree", "remove", "--force", worktree);
+    gitIn(repo, "branch", "-D", "task");
+  }
 });
 
 describe("/factory start", () => {
@@ -319,6 +325,23 @@ describe("a resumed task", () => {
     expect(pi.messages).toEqual([]);
     expect(pi.sent).toMatchObject([{ message: { customType: "factory-feedback", details: { round: 1, trigger: "conflict" } }, options: { triggerTurn: true } }]);
     expect(pi.sent[0].message.content).toContain("- README.md");
+  });
+
+  test("a line typed into a done task's session: refused in a wave, a run outside one", async () => {
+    const worktree = addTaskWorktree();
+    const baseSha = gitIn(repo, "rev-parse", "HEAD");
+    const pi = session(worktree, [
+      { customType: "factory-task", data: { title: "T", request: "R", settings, branch: "task", mainBranch: "main", baseSha } },
+      { customType: "factory-round", data: { round: 1, trigger: "start" } },
+      { customType: "factory-state", data: { state: "done", round: 1, reason: "merged" } },
+    ]);
+    const { writeTask } = await import("../tasks.ts");
+    // Null last: the other tests of this file share the session id and read its record.
+    for (const [wave, answer] of [["typed-wave", { action: "handled" }], [null, undefined]] as const) {
+      await writeTask({ id: "43000000-0000-4000-8000-0000000000aa", repo, worktree, branch: "task", title: "T", sessionId: "test-session", sessionDir: scratch, createdAt: "2026-01-01T00:00:00.000Z", tag: "t/done", plan: null, wave, origin: null, start: "" });
+      await pi.emit("session_start");
+      expect(await pi.emit("input", { text: "one more thing" })).toEqual(answer);
+    }
   });
 });
 

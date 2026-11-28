@@ -1,14 +1,16 @@
 /** The core's task actions and `TaskView` (`core-tasks.ts`), over the fixture of `core-test-kit.ts`. */
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { callAction } from "./core.ts";
 import type { TaskView, TimelineEntry } from "./core-tasks.ts";
 import { caseDir, expectError, failure, fakeRecord, git, ID_1, ID_2, makeRepo, noted, prompts, recordOf, restingTask, runnerEnded, runnerHolding, startTask, stateOf, until, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { stopRunners, taskInboxPath } from "./launch.ts";
-import { lastFactoryState } from "./runner.ts";
+import { lastFactoryState, takeInboxLine } from "./runner.ts";
 import { listTasks, lockTask, taskLockPath, taskLogPath, writeTask } from "./tasks.ts";
 import { unlockFile } from "./lock.ts";
+import { factoryHome } from "./settings.ts";
+import { SNAPSHOT_VERSION } from "./state.ts";
 
 useCoreFixture();
 
@@ -41,6 +43,21 @@ describe("task reads", () => {
       usage: { input: 111, output: 56, cacheRead: 3500, cacheWrite: 20, cost: 1.75 },
       actions: ["tasks.retry", "tasks.cancel", "tasks.remove", "tasks.message"],
     });
+  });
+
+  test("tasks.get of a finished task: a cached summary of another snapshot version (or none) is rebuilt and rewritten", async () => {
+    const done = { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:01.000Z", data: { state: "cancelled", round: 1, reason: "stop" } };
+    for (const [id, version] of [[ID_1, undefined], [ID_2, SNAPSHOT_VERSION - 1]] as const) {
+      const record = fakeRecord(id, "/r");
+      await writeTask(record);
+      const path = writeSession(record, [sessionEntries[0], done]);
+      const cachePath = join(factoryHome(), "cache", "sessions", `${basename(path)}.json`);
+      const { size, mtimeMs } = statSync(path);
+      mkdirSync(dirname(cachePath), { recursive: true });
+      writeFileSync(cachePath, JSON.stringify({ version, size, mtimeMs, snapshot: { state: "done" }, usage: null, lastMessage: null }));
+      expect(await callAction("tasks.get", { id })).toMatchObject({ id, state: "cancelled" });
+      expect(JSON.parse(readFileSync(cachePath, "utf8"))).toMatchObject({ version: SNAPSHOT_VERSION, snapshot: { state: "cancelled" } });
+    }
   });
 
   test("tasks.timeline reads from since on; a torn last line is read once it is whole", async () => {
@@ -227,7 +244,7 @@ describe("tasks.message", () => {
       const error = await outcome;
       if (final) {
         expect((error as { code: string }).code).toBe("refused");
-        expect(Number(readFileSync(`${taskInboxPath(record.id)}.read`, "utf8"))).toBe(readFileSync(taskInboxPath(record.id)).length);
+        expect(await takeInboxLine(taskInboxPath(record.id))).toBeUndefined();
         expect(await runnerEnded(record)).toBe(true);
         continue;
       }
@@ -257,13 +274,22 @@ describe("tasks.message", () => {
     await expectError(callAction("tasks.message", { id: ID_2, text: "hi" }), "refused");
   }, 30_000);
 
-  test("a done task whose worktree is gone and whose branch holds other work refuses a message and stays done", async () => {
+  test("a done task whose worktree is gone and whose branch holds other work refuses a message, stays done and keeps no line for a later run", async () => {
     const repo = makeRepo();
     const record = { ...fakeRecord(ID_1, repo), branch: "taken" };
     git(repo, "branch", "taken", git(repo, "commit-tree", "main^{tree}", "-p", "main", "-m", "other work"));
     await writeTask(record);
     writeSession(record, [TASK_ENTRY, { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: "done", round: 1, reason: "merged" } }]);
     await expectError(callAction("tasks.message", { id: ID_1, text: "more" }), "refused");
+    // A line appended while a runner held the task, which ends without sending it.
+    const end = join(caseDir, "runner-end");
+    const runner = await runnerHolding(taskLockPath(record.id), record.sessionId, { ...process.env, FAKE_RUNNER_END: end });
+    const sent = callAction("tasks.message", { id: ID_1, text: "late note" });
+    await until(() => existsSync(taskInboxPath(record.id)));
+    writeFileSync(end, "");
+    await runner.exited;
+    await expectError(sent, "refused");
+    expect(await takeInboxLine(taskInboxPath(record.id))).toBeUndefined();
     expect((await lastFactoryState(record.sessionDir, record.sessionId))?.state).toBe("done");
     expect(existsSync(record.worktree)).toBe(false);
     expect(prompts()).toEqual([]);

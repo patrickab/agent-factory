@@ -70,15 +70,15 @@ export async function lockFile(path: string, busy: string): Promise<void> {
   throw new FactoryError("busy", busy);
 }
 
-/** Runs `act` holding the lock file `path`, waiting up to `waitMs` for another holder; then the FactoryError `busy`. */
-export async function withLock<T>(path: string, busy: string, waitMs: number, act: () => Promise<T>): Promise<T> {
+/** Runs `act` holding the lock file `path`, waiting up to `waitMs` for another holder; then the FactoryError `busy`. An aborted `signal` ends the wait. */
+export async function withLock<T>(path: string, busy: string, waitMs: number, act: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {
       await lockFile(path, busy);
       break;
     } catch (error) {
-      if (!isBusy(error) || Date.now() > deadline) throw error;
+      if (!isBusy(error) || Date.now() > deadline || signal?.aborted) throw error;
       await Bun.sleep(20);
     }
   }

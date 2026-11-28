@@ -13,6 +13,7 @@ import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
 import { retitleSessionTask, sessionWave } from "../core.ts";
+import { DONE_REFUSAL, refusesDone } from "../launch.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
 import { isConventionalTitle, parseCommitMessage } from "../commitmsg.ts";
@@ -273,6 +274,10 @@ export default function (pi: ExtensionAPI) {
     // The answer to the coder's question continues its round: no rebase, so the worktree stays as the coder left it.
     if (atRest.state === "waiting_answer") return;
     if (!isResting(atRest.state)) return;
+    if (refusesDone(atRest.state, (await sessionRecord(ctx))?.wave ?? null)) {
+      ctx.ui.notify(`factory: this task ${DONE_REFUSAL}`, "error");
+      return { action: "handled" };
+    }
     const ops = deps(ctx);
     try {
       opened = await openRun(ops, atRest);
@@ -340,7 +345,10 @@ export default function (pi: ExtensionAPI) {
           const answer = lastAssistantText(ctx.sessionManager.getBranch());
           // The coder's subject becomes the title of a task dropped in plain words; a follow-up run keeps the first title.
           const subject = parseCommitMessage(answer)?.title;
-          if (subject !== undefined && !isConventionalTitle(current.task.title) && current.mergedCommit == null) await retitleSessionTask(ctx.sessionManager.getSessionId(), subject);
+          // A title that cannot be written leaves the old one: the commit still lands.
+          if (subject !== undefined && !isConventionalTitle(current.task.title) && current.mergedCommit == null) {
+            await retitleSessionTask(ctx.sessionManager.getSessionId(), subject).catch((error: unknown) => console.error(`factory: the commit subject did not become the task's title: ${errorText(error)}`));
+          }
           result = commitAnswerDrafts(current, answer, asked.passedInto, ctx.hasPendingMessages());
         } else {
           result = await runRound(current, pipelineSteps(ops, task, await taskFiles(ops, task), false));
