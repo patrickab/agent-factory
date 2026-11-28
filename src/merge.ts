@@ -1,31 +1,10 @@
 /**
- * The merge step of a passed task.
- *
- * - Consumes the task, the repo's `FactoryConfig` and two `Exec`s: `exec` is killed by a cancel, `cleanup` is not
- * - Commit, rebase onto the target branch, gates again (`merge_gates`, or `MergeInput.gates`; skipped when the rebase
- *   moved nothing, or when the rebased commit is the one they already passed on: `MergeInput.gated`), then
- *   under the merge lock (a cancel ends the wait for it, never the update): a target checked out in a worktree (the
- *   primary or another one) is fast-forwarded there, and `hooks.after_merge` run when that is the primary and the
- *   merge changed a lockfile (`config.lockfiles`); a target checked out nowhere is moved with a compare-and-swap
- *   `update-ref`, no hooks
- * - A conflicting rebase is aborted and reported with its files (`MergeResult` `conflict`), not as a failure. A merge
- *   gate that fails on the rebased branch is reported with its command (`MergeResult` `gate_failed`): the rebase stays,
- *   so the coder fixes the change on top of the target branch
- * - Provides `rebaseWorktree`, which a run that opens uses to bring the task branch up to date the same way. It
- *   squashes the task branch onto its base first (`taskBase`): the rebase replays one commit, the task's net change.
- *   A branch merged as it is (`asIs`, a wave's) is never committed to nor squashed: the rebase replays its commits and
- *   the target gets every one of them and nothing else. Its worktree must hold nothing but HEAD's tree when the merge
- *   starts, and what its merge gates leave untracked is removed after them
- * - The factory's own commits run no commit hooks and are not signed (`--no-verify --no-gpg-sign`)
+ * The merge step of a passed task or wave: commit, rebase onto the target, merge gates, then under the merge lock the
+ * fast-forward where the target is checked out, else a compare-and-swap `update-ref`.
+ * - A cancel ends the wait for the merge lock, never the update
+ * - `mergeTask` never throws: a failure is a `failed` result; a conflict or a failing gate is a result of its own
  * - Reports the step that cannot be undone (`intent`) right before it, so a resume can tell whether it happened
- * - Provides `mergeTask`: the `MergeResult` and the `factory-gate` data of the commands it ran. It never throws, a
- *   failure is a `failed` result whose `factory-merge` data is `ok: false` with the reason
- * - The merge commit carries `MergeInput.message` (default: the task title)
- * - `squash` (a wave's setting): after the merge gates, the rebased tip of commits is kept under `squash.ref` and the
- *   target moves to one commit of the gated tree on top of it, its message from the commits' subjects (a branch of one
- *   commit lands as that commit, of none as it is, without a ref). The tree that lands is asserted to be the gated one
- * - A task merged into an open wave's branch marks a sync due for the wave's other running tasks (`sync.ts`
- *   `taskLanded`); that never fails the merge
+ * - The factory's own commits run no commit hooks and are not signed (`--no-verify --no-gpg-sign`)
  */
 import { basename, join } from "node:path";
 import { commitMessageFallback, commitText, type CommitMessage } from "./commitmsg.ts";
@@ -35,20 +14,19 @@ import {
   addAllArgs,
   assertCheckoutReady,
   git,
+  LOCKFILES,
   nulList,
   primaryCheckout,
   rebaseInProgress,
   removeUntracked,
   targetMoved,
   taskBase,
-  trackedChanges,
-  uncommittedFiles,
+  worktreeChanges,
 } from "./git.ts";
 import { joinQueue, leaveQueue, queueAhead } from "./queue.ts";
 import type { CommandResult, Exec } from "./run.ts";
 import { gateData, passed, type GateData, type MergeData, type MergeIntentData, type Task } from "./state.ts";
 import { ERROR_TAIL_CHARS, errorText, outputTail } from "./util.ts";
-import { taskLanded } from "./sync.ts";
 
 /** How long a merge waits for the merge lock, polling once a second. */
 const LOCK_WAIT_MS = 60_000;
@@ -107,12 +85,6 @@ export interface MergeInput {
    * commits in order (called on every landing attempt, only for two or more commits).
    */
   squash?: SquashLanding;
-  /**
-   * Lands the gated `head` elsewhere before the move (a `squash` wave on its forge), called only when the target is
-   * still `onto` and `head` has commits on it: the commit the target moves to then, null to move to the local
-   * landing, `error` to fail with nothing moved.
-   */
-  land?: (gated: { head: string; onto: string }) => Promise<{ commit: string } | { error: string } | null>;
 }
 
 export interface SquashLanding {
@@ -141,29 +113,30 @@ export interface MergeOutcome {
   result: MergeResult;
 }
 
+/** Commits the task's worktree (`commitWorktree`) and squashes its branch onto its base (`squashOntoBase`). */
+export async function prepareTaskBranch(exec: Exec, root: string, task: Task, protectedGlobs: string[], message = task.title): Promise<void> {
+  await commitWorktree(exec, root, message, protectedGlobs);
+  await squashOntoBase(exec, root, task, message);
+}
+
 /**
- * Brings the task branch up to date: commits the worktree as `commitWorktree` does and squashes the branch onto its
- * base (neither when `asIs`), then rebases it onto the target branch. A conflicting rebase is aborted with `cleanup` and its conflicting files
- * returned, else null. Any other failure throws. `--autostash` carries what the commit leaves out (protected paths)
+ * Rebases the branch of `root` onto `mainBranch`. A conflicting rebase is aborted with `cleanup` and its conflicting
+ * files returned, else null. Any other failure throws. `--autostash` carries what is not committed (protected paths)
  * over the rebase.
  */
-export async function rebaseWorktree(exec: Exec, cleanup: Exec, root: string, task: Task, protectedGlobs: string[], message = task.title, asIs = false): Promise<string[] | null> {
-  if (!asIs) {
-    await commitWorktree(exec, root, message, protectedGlobs);
-    await squashOntoBase(exec, root, task, message);
-  }
-  const rebase = await continueResolved(exec, cleanup, root, task.mainBranch, await exec(["git", "rebase", "--autostash", `refs/heads/${task.mainBranch}`], { cwd: root }));
+export async function rebaseWorktree(exec: Exec, cleanup: Exec, root: string, mainBranch: string): Promise<string[] | null> {
+  const rebase = await continueResolved(exec, cleanup, root, mainBranch, await exec(["git", "rebase", "--autostash", `refs/heads/${mainBranch}`], { cwd: root }));
   if (passed(rebase)) {
     // An autostash that did not apply cleanly leaves conflict markers, which the next commit would take.
     const unmerged = nulList(await git(exec, root, ["diff", "--name-only", "--diff-filter=U", "-z"]));
-    if (unmerged.length > 0) throw new Error(`the autostash did not apply after the rebase onto ${task.mainBranch} (kept in git stash list): ${unmerged.join(", ")}`);
+    if (unmerged.length > 0) throw new Error(`the autostash did not apply after the rebase onto ${mainBranch} (kept in git stash list): ${unmerged.join(", ")}`);
     return null;
   }
   const open = await rebaseInProgress(cleanup, root);
   const conflicts = open ?? [];
   if (open !== null || rebase.killed) await cleanup(["git", "rebase", "--abort"], { cwd: root });
   if (conflicts.length > 0 && !rebase.killed) return conflicts;
-  throw new Error(`rebase onto ${task.mainBranch} failed: ${outputTail(rebase.output)}`);
+  throw new Error(`rebase onto ${mainBranch} failed: ${outputTail(rebase.output)}`);
 }
 
 /**
@@ -239,33 +212,6 @@ export async function squashCommit(exec: Exec, root: string, head: string, onto:
   return commit;
 }
 
-/** `name`: what the target merges, named in its reflog (the task branch; a squash commit's id). */
-function tryMoveTarget(cleanup: Exec, lock: string, root: string, primary: string, task: Task, head: string, before: string, name = task.branch) {
-  const argv = ["flock", "-n", "-E", String(LOCK_BUSY_EXIT), lock, "sh", "-c", MOVE_TARGET_SCRIPT, "sh", primary, task.mainBranch, name, head, before];
-  return cleanup(argv, { cwd: root, maxStdoutChars: 100 });
-}
-
-/**
- * Moves the target to `commit` (which must descend from it) under the merge lock, outside a merge's turn (a forge
- * landing resumed at its fetch). Returns the target's commit before; throws when it did not move.
- */
-export async function forwardTarget(exec: Exec, cleanup: Exec, root: string, task: Task, commit: string): Promise<string> {
-  const { primary, gitDir } = await primaryCheckout(exec, root);
-  const lock = join(gitDir, "factory-merge.lock");
-  const target = await git(exec, primary, ["rev-parse", `refs/heads/${task.mainBranch}`]);
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  let result = await tryMoveTarget(cleanup, lock, root, primary, task, commit, target, commit);
-  while (result.exitCode === LOCK_BUSY_EXIT) {
-    if (Date.now() > deadline) throw new Error(`the merge lock ${lock} stayed taken for ${LOCK_WAIT_MS / 1000} s`);
-    if ((await exec(["sleep", "1"], { cwd: root })).killed) throw new Error("cancelled while waiting for the merge lock");
-    result = await tryMoveTarget(cleanup, lock, root, primary, task, commit, target, commit);
-  }
-  if (result.exitCode !== 0) throw new Error(`${task.mainBranch} did not move to ${commit}: ${result.output.trim().slice(-ERROR_TAIL_CHARS)}`);
-  const now = await git(cleanup, primary, ["rev-parse", `refs/heads/${task.mainBranch}`]);
-  if (now !== commit) throw new Error(`${task.mainBranch} is at ${now} after the update, not at ${commit}`);
-  return target;
-}
-
 async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<MergeResult> {
   const { exec, cleanup, root, round, task, config, intent } = input;
   const asIs = input.asIs === true;
@@ -286,10 +232,10 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
   // worktree clean, so anything in it now (during `waiting_approve`) is somebody's work, which the merge gates must not
   // see and their cleanup must not delete.
   if (asIs) {
-    if (await uncommittedFiles(exec, root)) return { kind: "dirty" };
+    if (await worktreeChanges(exec, root, true)) return { kind: "dirty" };
   } else {
     status("commit");
-    await commitWorktree(exec, root, text, config.protected);
+    await prepareTaskBranch(exec, root, task, config.protected, text);
   }
   let ontoBefore = await taskBase(exec, root, task);
   const mergeGates = input.gates ?? config.merge_gates;
@@ -297,8 +243,24 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
 
   // Rebased before it queues: a conflict goes to the coder at once, without a place in the queue.
   status(`rebase onto ${task.mainBranch}`);
-  const conflicts = await rebaseWorktree(exec, cleanup, root, task, config.protected, text, asIs);
+  const conflicts = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
   if (conflicts) return { kind: "conflict", files: conflicts };
+
+  /**
+   * Moves the target to `landing` under the merge lock, `name` in its reflog (the task branch; a squash commit's id).
+   * Each try takes the lock or gives up at once. The update is not killed by a cancel: a fast-forward cut in half
+   * leaves the target's checkout partly updated. The wait between tries is, and a lock that stays taken ends in a timeout.
+   */
+  const moveTarget = async (landing: string, before: string, name: string): Promise<CommandResult> => {
+    const argv = ["flock", "-n", "-E", String(LOCK_BUSY_EXIT), lock, "sh", "-c", MOVE_TARGET_SCRIPT, "sh", primary, task.mainBranch, name, landing, before];
+    for (const deadline = Date.now() + LOCK_WAIT_MS; ; ) {
+      const result = await cleanup(argv, { cwd: root, maxStdoutChars: 100 });
+      if (result.exitCode !== LOCK_BUSY_EXIT) return result;
+      if (Date.now() > deadline) throw new Error(`the merge lock ${lock} stayed taken for ${LOCK_WAIT_MS / 1000} s`);
+      status("wait for the merge lock");
+      if ((await exec(["sleep", "1"], { cwd: root })).killed) throw new Error("cancelled while waiting for the merge lock");
+    }
+  };
 
   /** The ticket's turn: rebase, merge gates, move the target. Again from the rebase when the target moved anyway. */
   const turn = async (): Promise<MergeResult> => {
@@ -307,11 +269,14 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
     let head: string;
     let landing: string;
     for (let attempt = 1; ; attempt++) {
-      status(attempt === 1 ? `rebase onto ${task.mainBranch}` : `rebase onto ${task.mainBranch} again, it moved (attempt ${attempt})`);
-      const conflicts = await rebaseWorktree(exec, cleanup, root, task, config.protected, text, asIs);
-      if (conflicts) return { kind: "conflict", files: conflicts };
+      // The first attempt rebases only when the target moved since the rebase before the queue.
+      if (attempt > 1 || (await targetMoved(exec, root, task))) {
+        status(attempt === 1 ? `rebase onto ${task.mainBranch}` : `rebase onto ${task.mainBranch} again, it moved (attempt ${attempt})`);
+        const conflicts = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
+        if (conflicts) return { kind: "conflict", files: conflicts };
+      }
       // The rebase brings the target's .gitignore: a file it stopped ignoring is somebody's work, not merge gate output.
-      if (asIs && (await uncommittedFiles(exec, root))) return { kind: "dirty" };
+      if (asIs && (await worktreeChanges(exec, root, true))) return { kind: "dirty" };
       head = await git(exec, root, ["rev-parse", "HEAD"]);
       // Merge gates that are the round's gates, on the base the round passed them on (the squash keeps the tree), would
       // only repeat that run.
@@ -331,30 +296,15 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       }
       ontoBefore = onto;
       // The fast-forward moves the target to HEAD: an `asIs` working tree must be what was gated.
-      if (asIs && (await trackedChanges(exec, root))) return { kind: "dirty" };
+      if (asIs && (await worktreeChanges(exec, root, false))) return { kind: "dirty" };
 
       status("fast-forward");
       await assertCheckoutReady(exec, root, task.branch);
       const target = await git(exec, primary, ["rev-parse", `refs/heads/${task.mainBranch}`]);
       landing = input.squash === undefined ? head : await squashCommit(exec, root, head, onto, input.squash);
-      if (input.land !== undefined && target === onto && head !== onto) {
-        const elsewhere = await input.land({ head, onto });
-        if (elsewhere !== null && "error" in elsewhere) return fail(elsewhere.error);
-        if (elsewhere !== null) landing = elsewhere.commit;
-      }
       // A squash commit is no branch tip: the move fast-forwards to the commit itself.
-      const name = landing === head ? task.branch : landing;
-      intent({ commit: landing, before: target, message });
-      // Each try takes the lock or gives up at once. The update is not killed by a cancel: a fast-forward cut in half
-      // leaves the target's checkout partly updated. The wait between tries is, and a lock holder that hangs ends in a timeout.
-      const deadline = Date.now() + LOCK_WAIT_MS;
-      moveResult = await tryMoveTarget(cleanup, lock, root, primary, task, landing, target, name);
-      while (moveResult.exitCode === LOCK_BUSY_EXIT) {
-        if (Date.now() > deadline) return fail(`the merge lock ${lock} stayed taken for ${LOCK_WAIT_MS / 1000} s`);
-        status("wait for the merge lock");
-        if ((await exec(["sleep", "1"], { cwd: root })).killed) return fail("cancelled while waiting for the merge lock");
-        moveResult = await tryMoveTarget(cleanup, lock, root, primary, task, landing, target, name);
-      }
+      intent({ commit: landing, before: target });
+      moveResult = await moveTarget(landing, target, landing === head ? task.branch : landing);
       if (moveResult.exitCode === TARGET_MOVED_EXIT && attempt < MERGE_ATTEMPTS) continue;
       if (!passed(moveResult)) return fail(`update of ${task.mainBranch} refused: ${tail(moveResult.output)}`);
       break;
@@ -362,13 +312,11 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
     const [before, moved] = moveResult.stdout.trim().split(" ");
     const commit = await git(cleanup, primary, ["rev-parse", `refs/heads/${task.mainBranch}`]);
     if (commit !== landing) return fail(`${task.mainBranch} is at ${commit} after the update, not at the task's commit ${landing}`);
-    // Files in step (`sync.ts`): the wave's other running tasks learn of it; that never fails the merge.
-    if (!asIs) await taskLanded(cleanup, root, task.branch, task.mainBranch, before, commit).catch(() => undefined);
 
     // Hooks install into the primary only: another worktree, or a target checked out nowhere, gets none.
     if (moved !== "primary") return merged(commit, null, false);
     const changed = (await git(cleanup, primary, ["diff", "--name-only", before, commit])).split("\n");
-    if (!changed.some((path) => config.lockfiles.includes(basename(path)))) return merged(commit, null, false);
+    if (!changed.some((path) => LOCKFILES.includes(basename(path)))) return merged(commit, null, false);
     for (const argv of config.hooks.after_merge) {
       status(`after_merge ${argv.join(" ")}`);
       // Under the merge lock, so two tasks never install into the primary checkout at once. `-o`: a process the hook
@@ -388,7 +336,7 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       // A merge ahead landed: rebase onto it now, a conflict leaves the queue and goes to the coder.
       if (!(await targetMoved(exec, root, task))) continue;
       status(`rebase onto ${task.mainBranch}, a merge ahead landed`);
-      const moved = await rebaseWorktree(exec, cleanup, root, task, config.protected, text, asIs);
+      const moved = await rebaseWorktree(exec, cleanup, root, task.mainBranch);
       if (moved) return { kind: "conflict", files: moved };
     }
     return await turn();

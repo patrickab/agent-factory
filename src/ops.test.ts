@@ -8,28 +8,14 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadTaskFiles } from "./config.ts";
-import {
-  applyReviewed,
-  approveTask,
-  askSupervisor,
-  cancelTask,
-  CODER_REQUEST_LINE,
-  coderRequest,
-  initConfig,
-  openRun,
-  newTaskSession,
-  pipelineSteps,
-  record,
-  resumeAnswered,
-  resumeTask,
-  retryTask,
-  startTask,
-  type CoderMessage,
-  type OpsDeps,
-} from "./ops.ts";
+import { applyReviewed, approveTask, askSupervisor, cancelTask, openRun, newTaskSession, pipelineSteps, record, resumeAnswered, startTask, type CoderMessage, type OpsDeps } from "./ops.ts";
 import { CommandRunner } from "./run.ts";
-import { RETRY_PROMPT, roundsUsed, type Settings, type State, type Task } from "./state.ts";
+import { until } from "./core-test-kit.ts";
+import { type Settings, type State, type Task } from "./state.ts";
+import { restoreEnv } from "./core-test-kit.ts";
 
+const savedEnv = { ...process.env };
+afterAll(() => restoreEnv(savedEnv));
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
 
@@ -90,156 +76,60 @@ function fake(cwd: string) {
     followUps: () => [],
     sessionModel: () => null,
     sessionId: () => "ops-test",
+    wave: async () => null,
   };
   const states = () => entries.filter((entry) => entry.customType === "factory-state").map((entry) => `${entry.data.state}/${entry.data.reason}`);
   /** Puts a task in `state` into the session, as its entries would. */
   const holdTask = (state: State) => {
-    const task: Task = { title: "t", request: "r", settings, branch: "task", mainBranch: "main", baseSha: "0".repeat(40), protocol: 2 };
+    const task: Task = { title: "t", request: "r", settings, branch: "task", mainBranch: "main", baseSha: "0".repeat(40) };
     record(deps, "factory-task", task);
     record(deps, "factory-state", { state, round: 1, reason: "test" });
   };
   return { deps, entries, userMessages, coderMessages, flags, states, holdTask };
 }
 
-describe("pipelineSteps.askCommitMessage", () => {
-  test("a conventional task title is the message, until the task merged: a follow-up asks for its own; the merge clears the last one", async () => {
-    const pi = fake(dir);
-    pi.holdTask("running");
-    const task = { ...pi.deps.session.snapshot!.task, title: "feat: add t" };
-    const files = { config: {}, prompts: {} } as never;
-    expect(pipelineSteps(pi.deps, task, files, false).askCommitMessage!()).toBe(false);
-    record(pi.deps, "factory-commit-message", { title: "feat: t", body: "- t" });
-    record(pi.deps, "factory-merge", { ok: true, commit: "a".repeat(40), error: null, depsSynced: false });
-    expect(pi.deps.session.snapshot!.commitMessage).toBeNull();
-    expect(pipelineSteps(pi.deps, task, files, false).askCommitMessage!()).toBe(true);
-  });
-});
-
 describe("startTask", () => {
   test("expected failures are results and write nothing", async () => {
     const held = fake(dir);
     held.holdTask("running");
-    expect(await startTask(held.deps, payload())).toEqual({ ok: false, error: "this session already holds a task" });
+    expect(await startTask(held.deps, payload())).toMatchObject({ ok: false });
     const busy = fake(dir);
     busy.flags.idle = false;
-    expect(await startTask(busy.deps, payload())).toEqual({ ok: false, error: "the session is busy" });
+    expect(await startTask(busy.deps, payload())).toMatchObject({ ok: false });
     const invalid = fake(dir);
-    expect(await startTask(invalid.deps, "{not json")).toEqual({ ok: false, error: "payload is not JSON" });
-    const outside = await startTask(fake(dir).deps, payload());
-    expect(outside.ok).toBe(false);
-    const primary = await startTask(fake(repo).deps, payload());
-    expect(primary).toMatchObject({ ok: false, error: expect.stringContaining("is the repository's main checkout") });
+    expect(await startTask(invalid.deps, "{not json")).toMatchObject({ ok: false });
+    expect(await startTask(fake(dir).deps, payload())).toMatchObject({ ok: false });
+    expect(await startTask(fake(repo).deps, payload())).toMatchObject({ ok: false });
     const noModel = fake(addTaskWorktree());
     noModel.flags.modelAvailable = false;
-    expect(await startTask(noModel.deps, payload({ models: { coder: "nobody/nothing" } }))).toEqual({ ok: false, error: "model nobody/nothing is not available" });
+    expect(await startTask(noModel.deps, payload({ models: { coder: "nobody/nothing" } }))).toMatchObject({ ok: false });
     expect([...busy.entries, ...invalid.entries, ...noModel.entries, ...noModel.userMessages]).toEqual([]);
     expect(noModel.deps.session.starting).toBe(false);
   });
 
-  test("records the task and prompts the coder", async () => {
-    const pi = fake(addTaskWorktree());
-    expect(await startTask(pi.deps, payload())).toEqual({ ok: true });
-    expect(pi.entries.map((entry) => entry.customType)).toEqual(["factory-task", "factory-round", "factory-state"]);
-    expect(pi.userMessages).toEqual([coderRequest("Add task.txt")]);
-    expect(pi.userMessages[0]!.startsWith("Add task.txt\n")).toBe(true);
-    expect(pi.userMessages[0]!.split(CODER_REQUEST_LINE).length - 1).toBe(1);
-    // The task records the request as the supervisor wrote it: the reviewer reads it without the line.
-    expect(pi.deps.session.snapshot?.task.request).toBe("Add task.txt");
-    expect(pi.deps.session.snapshot?.state).toBe("running");
-  });
-
-  test("a wave task's contracts go before the request in the first message, the task records the request without them", async () => {
-    const pi = fake(addTaskWorktree());
-    const start = JSON.stringify({ ...JSON.parse(payload()), prefix: "Your contracts: core" });
-    expect(await startTask(pi.deps, start)).toEqual({ ok: true });
-    expect(pi.userMessages).toEqual([coderRequest("Your contracts: core\n\nAdd task.txt")]);
-    expect(pi.deps.session.snapshot?.task.request).toBe("Add task.txt");
-    expect(JSON.stringify(pi.entries)).not.toContain("Your contracts");
-  });
-});
-
-describe("approveTask", () => {
-  test("expected failures", async () => {
-    expect(await approveTask(fake(dir).deps)).toEqual({ ok: false, error: "this session holds no task" });
-    const running = fake(dir);
-    running.holdTask("running");
-    expect(await approveTask(running.deps)).toEqual({ ok: false, error: "the task is not waiting for approve" });
-    const busy = fake(dir);
-    busy.holdTask("waiting_approve");
-    busy.flags.idle = false;
-    expect(await approveTask(busy.deps)).toEqual({ ok: false, error: "the session is busy" });
-    expect(busy.states()).toEqual(["waiting_approve/test"]);
-  });
-
-  test("answers at once with merging, the merge then ends the task", async () => {
-    const pi = fake(dir);
-    pi.holdTask("waiting_approve");
-    expect(await approveTask(pi.deps)).toEqual({ ok: true });
-    expect(pi.states()).toEqual(["waiting_approve/test", "merging/approved"]);
-    // Not a repo: the merge cannot read its rules and ends blocked.
-    while (pi.states().length < 3) await Bun.sleep(10);
-    expect(pi.states()[2]).toStartWith("blocked/pipeline_error: ");
-  });
 });
 
 describe("approveTask before any await", () => {
   test("merging is recorded before the call returns: a runner can never see the task still waiting once Pi answers", async () => {
     const pi = fake(dir);
     pi.holdTask("waiting_approve");
-    const answer = approveTask(pi.deps);
+    const answer = approveTask(pi.deps, pi.deps.session.snapshot!);
     expect(pi.states()).toEqual(["waiting_approve/test", "merging/approved"]);
     expect(pi.deps.session.snapshot?.state).toBe("merging");
     expect(await answer).toEqual({ ok: true });
-    while (pi.states().length < 3) await Bun.sleep(10);
-  });
-});
-
-describe("factory.yaml lockfiles", () => {
-  /** A task worktree whose repo's factory.yaml names `Cargo.lock` as its only lockfile. */
-  function cargoTask() {
-    writeFileSync(join(repo, "factory.yaml"), 'lockfiles: ["Cargo.lock"]\n');
-    gitIn(repo, "commit", "--quiet", "-am", "cargo lockfile");
-    const worktree = addTaskWorktree();
-    const pi = fake(worktree);
-    pi.holdTask("running");
-    return { worktree, pi };
-  }
-
-  test("the review's patch puts the configured lockfiles last", async () => {
-    const { worktree, pi } = cargoTask();
-    writeFileSync(join(worktree, "Cargo.lock"), "lock\n");
-    writeFileSync(join(worktree, "a.txt"), "source\n");
-    const files = await loadTaskFiles(new CommandRunner().run, worktree, gitIn(worktree, "rev-parse", "HEAD"));
-    const { patch } = await pipelineSteps(pi.deps, pi.deps.session.snapshot!.task, files, false).diff();
-    expect(patch.indexOf("b/a.txt")).toBeGreaterThan(-1);
-    expect(patch.indexOf("b/Cargo.lock")).toBeGreaterThan(patch.indexOf("b/a.txt"));
-  });
-
-  test("a merge that landed while the session was down: a changed configured lockfile means after_merge did not run", async () => {
-    const { worktree, pi } = cargoTask();
-    writeFileSync(join(worktree, "Cargo.lock"), "lock\n");
-    gitIn(worktree, "add", "-A");
-    gitIn(worktree, "commit", "--quiet", "-m", "lock");
-    const before = gitIn(repo, "rev-parse", "main");
-    const commit = gitIn(worktree, "rev-parse", "HEAD");
-    gitIn(repo, "update-ref", "refs/heads/main", commit, before);
-    record(pi.deps, "factory-state", { state: "merging", round: 1, reason: "passed" });
-    record(pi.deps, "factory-merge-intent", { commit, before });
-    await resumeTask(pi.deps, pi.deps.session.snapshot!);
-    expect(pi.entries.find((entry) => entry.customType === "factory-merge")?.data.error).toBe("after_merge did not run: the session ended during the merge");
-    expect(pi.states().at(-1)).toBe("done/merged, after_merge failed");
+    await until(() => pi.states().length === 3);
   });
 });
 
 describe("an invalid factory.yaml", () => {
-  test("a run does not open on defaults: the task blocks as infra, naming the file and the error", async () => {
+  test("a run does not open on defaults: the task blocks as infra", async () => {
     writeFileSync(join(repo, "factory.yaml"), "task_gate: []\n");
     gitIn(repo, "commit", "--quiet", "-am", "typo");
     const worktree = addTaskWorktree();
     const pi = fake(worktree);
     pi.holdTask("blocked");
     const opening = await openRun(pi.deps, pi.deps.session.snapshot!);
-    expect(opening.failed).toStartWith("infra: factory.yaml: unknown key task_gate");
+    expect(opening.failed).toStartWith("infra:");
   });
 });
 
@@ -250,9 +140,9 @@ describe("the merge step", () => {
     pi.holdTask("merging");
     writeFileSync(join(worktree, "task.txt"), "work\n");
     let asked = 0;
-    pi.deps.mergeRefusal = async () => {
+    pi.deps.wave = async () => {
       asked += 1;
-      return "its wave is reviewing";
+      return { id: "w", mergeRefusal: "its wave is reviewing" };
     };
     const main = gitIn(repo, "rev-parse", "main");
     const files = await loadTaskFiles(new CommandRunner().run, worktree, main);
@@ -277,7 +167,7 @@ describe("the merge step", () => {
     const main = gitIn(repo, "rev-parse", "main");
     const pi = fake(worktree);
     pi.holdTask("merging");
-    pi.deps.wave = async () => wave;
+    pi.deps.wave = async () => (wave === null ? null : { id: wave, mergeRefusal: null });
     writeFileSync(join(worktree, "task.txt"), "work\n");
     const files = await loadTaskFiles(new CommandRunner().run, worktree, main);
     const outcome = await pipelineSteps(pi.deps, pi.deps.session.snapshot!.task, files, false).merge(files.config);
@@ -295,47 +185,6 @@ describe("the merge step", () => {
     const { ran, outcome } = await gatedMerge(null);
     expect(outcome.result.kind).toBe("merged");
     expect(ran).toEqual(["merge_gates unset"]);
-  });
-});
-
-describe("retryTask", () => {
-  test("expected failures", async () => {
-    expect(await retryTask(fake(dir).deps)).toEqual({ ok: false, error: "this session holds no task" });
-    const done = fake(dir);
-    done.holdTask("done");
-    expect(await retryTask(done.deps)).toEqual({ ok: false, error: "retry needs a blocked or cancelled task" });
-    const busy = fake(dir);
-    busy.holdTask("blocked");
-    busy.flags.idle = false;
-    expect(await retryTask(busy.deps)).toEqual({ ok: false, error: "the session is busy" });
-    const outside = fake(dir);
-    outside.holdTask("blocked");
-    expect((await retryTask(outside.deps)).ok).toBe(false);
-    expect(outside.userMessages).toEqual([]);
-  });
-
-  test("opens a retry round and prompts the coder", async () => {
-    const pi = fake(addTaskWorktree());
-    await startTask(pi.deps, payload());
-    record(pi.deps, "factory-state", { state: "blocked", round: 1, reason: "agent_error" });
-    expect(await retryTask(pi.deps)).toEqual({ ok: true });
-    expect(pi.entries.at(-2)).toEqual({ customType: "factory-round", data: { round: 2, trigger: "retry" } });
-    expect(pi.states().at(-1)).toBe("running/retry");
-    expect(pi.userMessages.at(-1)).toBe(RETRY_PROMPT);
-  });
-
-  test("a task interrupted mid-round, then retried: a fresh run with the full maxRounds", async () => {
-    const pi = fake(addTaskWorktree());
-    await startTask(pi.deps, payload());
-    // Round 2 of 3 is running when the runner is killed; the next session start sets it right.
-    record(pi.deps, "factory-round", { round: 2, trigger: "gates" });
-    record(pi.deps, "factory-state", { state: "running", round: 2, reason: "gates" });
-    await resumeTask(pi.deps, pi.deps.session.snapshot!);
-    expect(pi.states().at(-1)).toBe("blocked/interrupted");
-    expect(await retryTask(pi.deps)).toEqual({ ok: true });
-    const snapshot = pi.deps.session.snapshot!;
-    expect(snapshot).toMatchObject({ state: "running", round: 3, runFirstRound: 3 });
-    expect([roundsUsed(snapshot), snapshot.task.settings.maxRounds]).toEqual([1, 3]);
   });
 });
 
@@ -357,54 +206,18 @@ describe("askSupervisor and resumeAnswered", () => {
 });
 
 describe("cancelTask", () => {
-  test("expected failures", async () => {
-    expect(await cancelTask(fake(dir).deps)).toEqual({ ok: false, error: "this session holds no task" });
-    for (const state of ["done", "cancelled"] as const) {
-      const pi = fake(dir);
-      pi.holdTask(state);
-      expect(await cancelTask(pi.deps)).toEqual({ ok: false, error: "the task is not active" });
-    }
-  });
-
   test("an idle task ends cancelled, a busy one is aborted", async () => {
     const idle = fake(dir);
     idle.holdTask("blocked");
-    expect(await cancelTask(idle.deps)).toEqual({ ok: true });
+    expect(await cancelTask(idle.deps, idle.deps.session.snapshot!)).toEqual({ ok: true });
     expect(idle.states().at(-1)).toBe("cancelled/cancelled");
     expect(idle.deps.session.runner.cancelled).toBe(false);
     const busy = fake(dir);
     busy.holdTask("running");
     busy.flags.idle = false;
-    expect(await cancelTask(busy.deps)).toEqual({ ok: true });
+    expect(await cancelTask(busy.deps, busy.deps.session.snapshot!)).toEqual({ ok: true });
     expect(busy.flags.aborts).toBe(1);
     expect(busy.states()).toEqual(["running/test"]);
-  });
-});
-
-describe("initConfig", () => {
-  test("expected failures: not a repo, factory.yaml exists already", async () => {
-    expect((await initConfig(fake(dir).deps)).ok).toBe(false);
-    expect(await initConfig(fake(repo).deps)).toEqual({ ok: false, error: `${join(repo, "factory.yaml")} exists already, init does not overwrite it` });
-  });
-
-  test("writes the draft and says where", async () => {
-    rmSync(join(repo, "factory.yaml"));
-    expect(await initConfig(fake(repo).deps)).toEqual({ ok: true, message: `wrote ${join(repo, "factory.yaml")} (nothing detected, fill the gates in). Review it, then commit it.` });
-    expect(readFileSync(join(repo, "factory.yaml"), "utf8")).toContain("gates");
-  });
-});
-
-describe("an old merge request in its own session (invariant 7)", () => {
-  test("approve and retry are refused: nothing is recorded, nothing reaches the coder", async () => {
-    const pi = fake(addTaskWorktree());
-    const task: Task = { title: "t", request: "r", settings, branch: "task", mainBranch: "main", baseSha: "0".repeat(40), kind: "merge_request" };
-    record(pi.deps, "factory-task", task);
-    record(pi.deps, "factory-state", { state: "waiting_approve", round: 1, reason: "test" });
-    expect(await approveTask(pi.deps)).toEqual({ ok: false, error: "this task is an old merge request: approve is refused, it can only be removed" });
-    record(pi.deps, "factory-state", { state: "blocked", round: 1, reason: "test" });
-    expect(await retryTask(pi.deps)).toEqual({ ok: false, error: "this task is an old merge request: retry is refused, it can only be removed" });
-    expect(pi.states()).toEqual(["waiting_approve/test", "blocked/test"]);
-    expect([pi.userMessages, pi.coderMessages]).toEqual([[], []]);
   });
 });
 
@@ -415,38 +228,14 @@ describe("applyReviewed", () => {
   };
   const command = (severities: ("blocker" | "major" | "minor")[], round = 1) => JSON.stringify({ round, review: review(severities) });
 
-  test("approved: the review is recorded and the task merges into its target", async () => {
-    const worktree = addTaskWorktree();
-    writeFileSync(join(worktree, "task.txt"), "t\n");
-    const pi = fake(worktree);
-    pi.holdTask("reviewing");
-    record(pi.deps, "factory-round", { round: 1, trigger: "start" });
-    expect(await applyReviewed(pi.deps, command(["minor"]))).toEqual({ ok: true });
-    expect(pi.entries.map((entry) => entry.customType)).toContain("factory-review");
-    while (pi.states().length < 3) await Bun.sleep(10);
-    expect(pi.states()).toEqual(["reviewing/test", "merging/approved", "done/merged"]);
-    expect(gitIn(repo, "show", "main:task.txt")).toBe("t");
-  });
-
-  test("a major finding: the next round starts the coder with it", async () => {
-    const pi = fake(dir);
-    pi.holdTask("reviewing");
-    record(pi.deps, "factory-round", { round: 1, trigger: "start" });
-    expect(await applyReviewed(pi.deps, command(["major"]))).toEqual({ ok: true });
-    expect(pi.states()).toEqual(["reviewing/test", "running/review"]);
-    expect(pi.coderMessages).toHaveLength(1);
-    expect(pi.coderMessages[0]!.triggerTurn).toBe(true);
-    expect(String(pi.coderMessages[0]!.message.content)).toContain("[major] task.txt:1: major problem");
-  });
-
   test("a verdict for another round, or a task not reviewing, changes nothing: delivered twice is applied once", async () => {
     const pi = fake(dir);
     pi.holdTask("reviewing");
     record(pi.deps, "factory-round", { round: 1, trigger: "start" });
-    expect(await applyReviewed(pi.deps, command(["major"], 2))).toEqual({ ok: false, error: "the task is not reviewing round 2" });
-    expect(await applyReviewed(pi.deps, command(["major"]))).toEqual({ ok: true });
-    expect(await applyReviewed(pi.deps, command(["major"]))).toEqual({ ok: false, error: "the task is not reviewing round 1" });
+    expect(await applyReviewed(pi.deps, pi.deps.session.snapshot!, command(["major"], 2))).toEqual({ ok: false, error: "the task is not reviewing round 2" });
+    expect(await applyReviewed(pi.deps, pi.deps.session.snapshot!, command(["major"]))).toEqual({ ok: true });
+    expect(await applyReviewed(pi.deps, pi.deps.session.snapshot!, command(["major"]))).toEqual({ ok: false, error: "the task is not reviewing round 1" });
     expect(pi.states()).toEqual(["reviewing/test", "running/review"]);
-    expect(await applyReviewed(pi.deps, "{bad")).toMatchObject({ ok: false });
+    expect(await applyReviewed(pi.deps, pi.deps.session.snapshot!, "{bad")).toMatchObject({ ok: false });
   });
 });

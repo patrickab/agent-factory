@@ -1,18 +1,9 @@
 /**
- * The pipeline of one round, as control flow over injected steps. No Pi, no git, no spawn of its own.
- *
- * - Consumes the task `Snapshot` and `PipelineSteps` (the side effects: commands, diff, review, merge)
- * - Provides `runRound`: the entries of the round in order, and whether the coder gets another turn. A passed `auto`
- *   round ends in `merging` and does not merge: the caller merges once it knows the run was not aborted
- * - Provides `runMerge`: the entries of a merge, used after a passed `auto` round and by `/factory approve`. The task
- *   is rebased onto its target branch first. A rebase that conflicts gets a `conflict` round, a merge gate that
- *   fails on the rebased branch a `gates` round: the coder resolves it and the task merges once that round passes
- * - A rebase the coder left open in the worktree goes back to the coder as a `conflict` round before anything runs
- * - A passed round whose task title is not a conventional commit title first asks the coder for the commit message
- *   (`askCommitMessage`, a `factory-commit-ask` message in the same run); `commitAnswerDrafts` turns the answer into
- *   the `factory-commit-message` entry and the state the round passed into
+ * The pipeline of one round, as control flow over injected steps (`PipelineSteps`). No Pi, no git, no spawn of its own.
+ * - A passed `auto` round ends in `merging` and does not merge: the caller merges once it knows the run was not aborted
+ * - A rebase conflict becomes a `conflict` round, a merge gate failing on the rebased branch a `gates` round
  * - A hook or gate that exits `INFRA_EXIT` (75, EX_TEMPFAIL) says the environment is broken, not the change: the task
- *   ends `blocked`, `infra: <last output line>`, without feedback to the coder. A retry starts the next round once it is fixed
+ *   ends `blocked` without feedback to the coder
  */
 import { COMMIT_MESSAGE_PROMPT, commitMessageFallback, parseCommitMessage } from "./commitmsg.ts";
 import { protectedPaths, type FactoryConfig } from "./config.ts";
@@ -56,13 +47,13 @@ export interface PipelineSteps {
   merge(config: FactoryConfig): Promise<MergeOutcome>;
   /** The conflicting files of a rebase in progress in the task's worktree, null when none is. */
   openRebase(): Promise<string[] | null>;
-  /** True when a passed round asks the coder for the commit message before it ends. Absent: never. */
-  askCommitMessage?(): boolean;
+  /** True when a passed round asks the coder for the commit message before it ends. */
+  askCommitMessage(): boolean;
   /**
-   * True when the task's wave reviews each task (`reviewEach`): a passed round rests `reviewing` for the wave's
-   * reviewer instead of the task's own review, approve or merge. Absent: never.
+   * True when the task belongs to a wave: a passed round rests `reviewing` for the wave's reviewer instead of the
+   * task's own review, approve or merge.
    */
-  reviewEach?(): Promise<boolean>;
+  inWave(): Promise<boolean>;
 }
 
 export interface RoundResult {
@@ -101,13 +92,15 @@ export function messageRoundDrafts(round: number): Draft[] {
 }
 
 /**
- * A problem found in the snapshot's round: the next coder round and the feedback, or only the feedback when the run
- * used up its `maxRounds` (the caller ends it `blocked`, `max_rounds: <trigger>`).
+ * A problem found in the snapshot's round: the next coder round, its feedback and `running` (a round in progress is
+ * `running` already), or the feedback and `blocked`, `max_rounds: <trigger>`, when the run used up its `maxRounds`.
  */
 function nextRound(snapshot: Snapshot, trigger: Trigger, text: string): RoundResult {
-  const feedback = feedbackDraft(snapshot.round, trigger, text);
-  if (roundsUsed(snapshot) >= snapshot.task.settings.maxRounds) return { entries: [feedback], continue: false };
-  return { entries: [customDraft("factory-round", { round: snapshot.round + 1, trigger }), feedback], continue: true };
+  const { round } = snapshot;
+  const feedback = feedbackDraft(round, trigger, text);
+  if (roundsUsed(snapshot) >= snapshot.task.settings.maxRounds) return { entries: [feedback, stateDraft("blocked", round, `max_rounds: ${trigger}`)], continue: false };
+  const running = snapshot.state === "running" ? [] : [stateDraft("running", round + 1, trigger)];
+  return { entries: [customDraft("factory-round", { round: round + 1, trigger }), feedback, ...running], continue: true };
 }
 
 /** The entries after `merging`: the merge gates, the merge and the state it ends in. */
@@ -117,11 +110,7 @@ export async function runMerge(snapshot: Snapshot, config: FactoryConfig, steps:
   const { gates, result } = await steps.merge(config);
   const drafts: Draft[] = gates.map((gate) => customDraft("factory-gate", gate));
   // Nothing was merged: the coder resolves the conflict or the failed gate in a round of its own, unless cancelled.
-  const problem = (trigger: Trigger, text: string): Draft[] => {
-    const next = nextRound(snapshot, trigger, text);
-    const state = next.continue ? stateDraft("running", round + 1, trigger) : stateDraft("blocked", round, `max_rounds: ${trigger}`);
-    return [...drafts, ...next.entries, state];
-  };
+  const problem = (trigger: Trigger, text: string): Draft[] => [...drafts, ...nextRound(snapshot, trigger, text).entries];
   switch (result.kind) {
     case "conflict":
       if (steps.cancelled()) return [...drafts, stateDraft("cancelled", round, "cancelled")];
@@ -161,23 +150,21 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
   const problem = (trigger: Trigger, text: string): RoundResult => {
     const next = nextRound(snapshot, trigger, text);
     drafts.push(...next.entries);
-    return next.continue ? { entries: drafts, continue: true } : end("blocked", `max_rounds: ${trigger}`);
+    return next.continue || !steps.pendingMessages() ? { entries: drafts, continue: next.continue } : messageRound();
   };
 
   try {
     const config = steps.config();
     const conflicts = await steps.openRebase();
     if (conflicts) return problem("conflict", conflictFeedback(round, task.mainBranch, conflicts, true));
-    for (const [phase, commands] of [["hooks", config.hooks.after_code], ["gates", config.gates]] as const) {
-      for (const argv of commands) {
-        steps.status(`round ${round}: ${phase} ${argv.join(" ")}`);
-        // A failed gate runs once more before it counts (`runGateStep`); hooks run once.
-        const { result, flaky } = phase === "gates" ? await runGateStep(argv, (env) => steps.runCommand(argv, env), steps.cancelled) : { result: await steps.runCommand(argv), flaky: null };
-        drafts.push(customDraft("factory-gate", gateData(round, phase, argv, result, flaky)));
-        if (steps.cancelled()) return end("cancelled", "cancelled");
-        if (result.exitCode === INFRA_EXIT && !result.killed) return end("blocked", `infra: ${lastLine(result.output)}`);
-        if (!passed(result)) return problem(phase, commandFeedback(round, argv, result));
-      }
+    for (const argv of config.gates) {
+      steps.status(`round ${round}: gates ${argv.join(" ")}`);
+      // A failed gate runs once more before it counts (`runGateStep`).
+      const { result, flaky } = await runGateStep(argv, (env) => steps.runCommand(argv, env), steps.cancelled);
+      drafts.push(customDraft("factory-gate", gateData(round, "gates", argv, result, flaky)));
+      if (steps.cancelled()) return end("cancelled", "cancelled");
+      if (result.exitCode === INFRA_EXIT && !result.killed) return end("blocked", `infra: ${lastLine(result.output)}`);
+      if (!passed(result)) return problem("gates", commandFeedback(round, argv, result));
     }
 
     steps.status(`round ${round}: diff`);
@@ -187,7 +174,7 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
     const touched = protectedPaths(diff.paths, config.protected);
     if (touched.length > 0) return problem("protected", protectedFeedback(round, touched));
 
-    const byWave = (await steps.reviewEach?.()) ?? false;
+    const byWave = await steps.inWave();
     if (task.settings.review && !byWave) {
       steps.status(`round ${round}: review`);
       const review = await steps.review(round, diff);
@@ -200,7 +187,7 @@ export async function runRound(snapshot: Snapshot, steps: PipelineSteps): Promis
     // The message is about a change that is neither approved nor merged yet: it goes first.
     if (steps.pendingMessages()) return messageRound();
     const passedInto: State = byWave ? "reviewing" : task.settings.merge === "review" ? "waiting_approve" : "merging";
-    if (steps.askCommitMessage?.()) {
+    if (steps.askCommitMessage()) {
       drafts.push(commitAskDraft(round));
       return { entries: drafts, continue: true, commitAsk: passedInto };
     }
@@ -221,8 +208,6 @@ export function reviewedDrafts(snapshot: Snapshot, review: ReviewData): RoundRes
   const entries: Draft[] = [customDraft("factory-review", review)];
   if (review.status !== "ok") return { entries: [...entries, stateDraft("blocked", round, `review_${review.status}`)], continue: false };
   if (review.approved) return { entries: [...entries, stateDraft("merging", round, "approved")], continue: false };
-  const rejecting = review.findings.filter((finding) => finding.severity !== "minor");
-  const next = nextRound(snapshot, "review", reviewFeedback(round, rejecting));
-  const state = next.continue ? stateDraft("running", round + 1, "review") : stateDraft("blocked", round, "max_rounds: review");
-  return { entries: [...entries, ...next.entries, state], continue: next.continue };
+  const next = nextRound(snapshot, "review", reviewFeedback(round, review.findings.filter((finding) => finding.severity !== "minor")));
+  return { entries: [...entries, ...next.entries], continue: next.continue };
 }

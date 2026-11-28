@@ -1,10 +1,11 @@
 /** `decisions.list`: a session's decisions in order (`decisions.ts`, contract `cards`). */
-import { plural, short } from "./agent-view.ts";
+import { plural } from "./agent-view.ts";
 import { card } from "./cards.ts";
-import { FactoryError, nonEmpty } from "./core-shared.ts";
+import { nonEmpty } from "./core-shared.ts";
 import { readDecisions, type DecisionEntry } from "./decisions.ts";
 import { feature, spec } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
+import { FactoryError, short } from "./util.ts";
 
 type Listed = { decisions: DecisionEntry[] };
 
@@ -26,26 +27,18 @@ export const DECISIONS = feature({
   name: "decisions",
   actions: {
     "decisions.list": spec(
-      "The decisions of a session in order: the supervisor's actions that settle something, each with the notice key it answers. Answers {decisions: {at, key?, answers?, card}[]}",
+      "The decisions of a session in order: the supervisor's actions that settle something, each with the notice key it answers. Answers {decisions: {at, card}[]}, card.answers the notice key",
       { origin: { type: "string", description: "The session's id. Default: the calling session" } },
       [],
       false,
+      (_params, result: Listed) =>
+        card("action", "quiet", result.decisions.length === 0 ? "no decisions" : plural(result.decisions.length, "decision"), {
+          rows: result.decisions.map((entry, index) => ({ label: String(index + 1), text: `${entry.card.title}${entry.card.answers === undefined ? "" : `  answers ${answered(entry.card.answers)}`}` })),
+        }),
     ),
   },
   get handlers(): Handlers {
     return HANDLERS;
-  },
-  renderers: {
-    "decisions.list": (_params, result: Listed) =>
-      result.decisions.length === 0
-        ? "no decisions"
-        : [plural(result.decisions.length, "decision"), ...result.decisions.map((entry, index) => `  ${index + 1}. ${entry.card.title}${entry.answers === undefined ? "" : `  answers ${answered(entry.answers)}`}`)].join("\n"),
-  },
-  cards: {
-    "decisions.list": (_params, result: Listed) =>
-      card("action", "quiet", result.decisions.length === 0 ? "no decisions" : plural(result.decisions.length, "decision"), {
-        rows: result.decisions.map((entry) => ({ label: entry.at, text: entry.card.title })),
-      }),
   },
   toolBlurb: '"decisions.list" lists the decisions of a session (your settling actions and what each answers).',
 });

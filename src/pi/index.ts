@@ -1,56 +1,10 @@
 /**
- * Agent factory: the pipeline of a factory task, run inside the task's own coding session.
- *
- *   /factory init                                     write a draft factory.yaml into the main checkout (any session)
- *   /factory start {"request", "title", "settings"}   record the task and start the coder
- *   /factory approve                                  merge a task that waits for approve
- *   /factory retry                                    another coder turn on a blocked or cancelled task
- *   /factory cancel                                   kill the running command group, end `cancelled`
- *   /factory reviewed {"round", "review"}             the wave reviewer's verdict on a task resting `reviewing`
- *   /factory models [add|remove|set ...]              the user's factory model list (`models.ts`, any session)
- *   /factory waves                                    show or hide the finished waves in this session's widget
- *
- * - After every coder turn (`agent_before_settle`) it runs `hooks.after_code`, `gates`, the protected-path check and
- *   the review. A problem goes back to the coder as a `factory-feedback` message and starts the next round, up to
- *   `settings.maxRounds`. A passed round waits for approve or merges, a round with an empty diff ends `done`/`no_changes`
- * - The merge of a passed round starts in `agent_settled`, the first place that knows whether the run was aborted: an
- *   abort is invisible inside `agent_before_settle`, so the steps already started there run to their end, but nothing
- *   is merged after it and the task ends `blocked`/`stopped`. The merge is not awaited there: Pi defers every prompt,
- *   `/factory cancel` included, until the `agent_settled` handlers return
- * - `factory.yaml` and the role prompts come from a commit of the target branch (the task's base, `taskBase`, at the
- *   run's start), never from the tree the coder edits
- * - A task runs in a git worktree of its own, on its own branch, made off `settings.branch` by whoever starts it. It
- *   stays up to date with that branch and merges into it: a run that opens commits the worktree and rebases it onto
- *   the branch. A conflicting rebase is aborted and the run opens with a `conflict` round instead, so does a rebase
- *   the coder left open, which is never aborted. A rebase or commit that fails otherwise (a hook, a deleted branch, an
- *   untracked file in the way) opens no run and ends the task `blocked`, `rebase_failed: <git error>`: a later retry
- *   or message tries again
- * - Every step is a `custom` session entry (`state.ts`). The task is rebuilt from them on `session_start`, where a
- *   merge that landed while the session went down is recorded from its `factory-merge-intent`
- * - A plain message to a waiting, blocked, cancelled or done task starts new rounds; to a task in `waiting_answer` (the
- *   coder called `factory_ask_supervisor`) it is the answer, and the coder continues the same round
- * - Loaded into every coding session: without a `factory-task` entry no handler does anything
- * - Registers the `factory` tool (`tool.ts`), which starts and drives tasks like this one from any session
- * - A passed round of a task whose title is not a conventional commit title asks the coder for the commit message
- *   first (`commitmsg.ts`), in the same run
- * - A message to a merged task (`done`/`merged`) opens a follow-up run (`followup.ts`): its change merges as a new
- *   commit, with a commit message the coder is asked for; a part outside the task's scope goes to a new task through
- *   `factory_new_task` (registered in task sessions only, usable in a follow-up run, once per user message), on this
- *   task's target branch and merge mode
- * - Notifications (`notifier.ts`): in a session that is not a task's own, the notices of the tasks it started and the
- *   waves it declared arrive as a message that starts a turn (`factory-notice`)
- * - `scout` (`scout-tool.ts`) in every session: a coder's turn does not end (`agent_before_settle`) before its scouts
- *   reported, their reports arrive as `factory-scout` messages and the coder goes on; a supervisor's arrive as notices
- * - The waves a session declared show above its editor (`session-widget.ts`), refreshed by the notifier's looks and
- *   at every turn's end, with the count of cards to rule on; only in the interactive terminal UI
- *   (`ctx.mode === "tui"`), never in a task's own session
- * - Notices and `factory` tool results are drawn as their cards (`cards-tui.ts`); Alt+V shows the agent's text
- * - A task of a wave merges into the wave's branch only until the wave's review began (`waveMergeRefusal`, invariant
- *   2): a merge after that ends the task `blocked`, `merge_failed`, its work stays in its worktree. Its merge gates
- *   are `gates` and `task_gates` (`taskWave`), not `merge_gates`: the wave runs those
- * - Files in step (`sync.ts`): at the end of a coder turn, before the round, a due sync rebases the worktree onto the
- *   target's tip; its follow-up (`factory-sync`) continues the coder in the same round. The sync's snapshot ref goes
- *   once a round passed its gates
+ * Agent factory's Pi extension: the pipeline of a task, run inside the task's own session, and the tools, notices,
+ * cards and widget of every other session. Without a `factory-task` entry no task handler does anything.
+ * - After every coder turn (`agent_before_settle`): gates, protected paths, review. The merge starts in `agent_settled`,
+ *   the first place that knows whether the run was aborted; it is not awaited there: Pi defers every prompt,
+ *   `/factory cancel` included, until those handlers return
+ * - `factory.yaml` and the role prompts come from the task's base commit, never from the tree the coder edits
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -58,8 +12,8 @@ import { cardsToRule, sessionWidget } from "../session-widget.ts";
 import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
-import { followUpPrompt, registerAskSupervisorTool, registerNewTaskTool } from "./followup.ts";
-import { taskWave, waveMergeRefusal, waveReviewsEach } from "../core.ts";
+import { sessionWave } from "../core.ts";
+import { DONE_REFUSAL } from "../launch.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
 import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "../pipeline.ts";
@@ -86,19 +40,16 @@ import {
   type OpsDeps,
   type RunOpening,
 } from "../ops.ts";
-import { applyEntry, followUpMessages, messageText, rebuild, RESTING_STATES, stateDraft, wasInterrupted, type Draft, type Snapshot, type State } from "../state.ts";
+import { applyEntry, followUpMessages, messageText, rebuild, isResting, stateDraft, type Draft, type State } from "../state.ts";
 import { startNotifier, type Notifier } from "./notifier.ts";
-import { createScoutTracker, registerScoutTool, type ScoutCore } from "./scout-tool.ts";
-import { isTaskSession, registerFactoryTool } from "./tool.ts";
+import { createScoutTracker, registerScoutTool } from "./scout-tool.ts";
+import { isTaskSession, registerFactoryTool, toolError, toolText } from "./tool.ts";
 import { TASK_SESSION_ENV } from "../runner.ts";
-import { errorText } from "../util.ts";
-import { roundPassedGates, sessionTask, SYNC_TYPE, syncAtTurnEnd, syncLeftOf, syncRoundPassed, type SyncDraft, type SyncLeft } from "../sync.ts";
-import type { TaskRecord } from "../tasks.ts";
+import { errorText, isRecord } from "../util.ts";
+import { sessionTask, type TaskRecord } from "../tasks.ts";
 
 /** Tag of the system prompt section that carries `.factory/agents/coder.md`. */
 const ROLE_SECTION = "factory_role";
-/** Tag of the system prompt section that tells the coder how a follow-up on a merged task is carried out. */
-const FOLLOW_UP_SECTION = "factory_followup";
 /** Key of the widget above the editor that lists the session's waves. */
 const WAVES_WIDGET = "factory-waves";
 
@@ -112,15 +63,21 @@ function lastAssistantText(entries: Iterable<{ type: string }>): string {
   return text;
 }
 
-function isMergedTask(snapshot: Snapshot): boolean {
-  return snapshot.state === "done" && snapshot.reason.startsWith("merged");
+/** The tool calls of the session's last assistant message: Pi records the message before it runs any of its calls. */
+function lastAssistantToolCalls(entries: Iterable<{ type: string }>): number {
+  let calls = 0;
+  for (const entry of entries) {
+    const { message } = entry as { message?: { role?: unknown; content?: unknown } };
+    if (entry.type !== "message" || message?.role !== "assistant") continue;
+    calls = Array.isArray(message.content) ? message.content.filter((part) => isRecord(part) && part.type === "toolCall").length : 0;
+  }
+  return calls;
 }
 
-/** `scoutCore`: how the `scout` tool reaches the core, for tests; Pi passes nothing. */
-export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; scoutPollMs?: number } = {}) {
+export default function (pi: ExtensionAPI) {
   const session = newTaskSession();
   // A turn end with the commit message ask open waits for no scout (`agent_before_settle`): a scout then is not owed.
-  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, holds: () => session.snapshot?.state === "running" && commitAsk === undefined, core: testing.scoutCore, pollMs: testing.scoutPollMs });
+  const scouts = createScoutTracker({ isCoder: () => session.snapshot !== undefined, holds: () => session.snapshot?.state === "running" && commitAsk === undefined });
   const cards = registerCardRenderers(pi);
   registerFactoryTool(pi, scouts, cards);
   registerScoutTool(pi, scouts);
@@ -131,52 +88,46 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
   /** The commit message ask of a passed round awaiting the coder's answer: the state it passed into, the tree that passed. */
   let commitAsk: { passedInto: State; tree: string } | undefined;
   let taskTools = false;
-  /** The conflicts the last sync left (`sync.ts`), until resolved, reminded of once, or a round passed its gates. */
-  let syncLeft: SyncLeft | undefined;
-  /** The factory's record of this session's task, looked up once: the sync log and snapshot ref go by its id. */
-  let syncTaskRecord: Promise<TaskRecord | undefined> | undefined;
-  const syncRecord = (ctx: ExtensionContext): Promise<TaskRecord | undefined> => {
-    const dir = ctx.sessionManager.getSessionDir?.();
-    if (dir === undefined) return Promise.resolve(undefined);
-    syncTaskRecord ??= sessionTask(dir, ctx.sessionManager.getSessionId()).catch(() => undefined);
-    return syncTaskRecord;
+  /** The factory's record of this session's task, looked up once. */
+  let taskRecord: Promise<TaskRecord | undefined> | undefined;
+  const sessionRecord = (ctx: ExtensionContext): Promise<TaskRecord | undefined> => {
+    taskRecord ??= sessionTask(ctx.sessionManager.getSessionId()).catch(() => undefined);
+    return taskRecord;
   };
-  /** `factory_new_task` and `factory_ask_supervisor` exist in task sessions only: registered once the session holds a task. */
+  /** `feedback` and `factory_ask_supervisor` exist in task sessions only: registered once the session holds a task. */
   const registerTaskTools = () => {
     if (taskTools || !session.snapshot) return;
     taskTools = true;
-    registerNewTaskTool(pi, {
-      refusal: () => {
-        const current = session.snapshot;
-        if (!current) return "this session holds no task";
-        if (!session.followUp || current.state !== "running") return "only a follow-up run on a merged task may start a new task";
-        if (session.followUp.spawnedForMessage) return "a task was started for this message already: one per message";
-        return null;
-      },
-      overrides: () => {
-        const task = session.snapshot?.task;
-        return task ? { branch: task.mainBranch, merge: task.settings.merge } : {};
-      },
-      spawned: (spawn) => {
-        if (session.followUp) session.followUp.spawnedForMessage = true;
-        pi.appendEntry("factory-spawn", spawn);
-        session.snapshot = applyEntry(session.snapshot, "factory-spawn", spawn);
-      },
-    });
     registerFeedbackTool(pi, {
       role: "coder",
       context: async (ctx) => {
-        const record = await syncRecord(ctx);
+        const record = await sessionRecord(ctx);
         return record === undefined ? null : { task: record.id, wave: record.wave, plan: record.plan };
       },
-      keep: (entry) => {
-        pi.appendEntry("factory-feedback", entry);
-      },
     });
-    registerAskSupervisorTool(pi, {
-      refusal: () => (session.snapshot?.state === "running" ? null : "only the coder of a running task may ask"),
-      asked: (question, ctx) => {
-        if (session.snapshot) askSupervisor(deps(ctx), session.snapshot, question);
+    // A terminating call, so the turn ends with the question. Pi ends a turn early only when every call of the batch
+    // terminates, and runs a queued message anyway: the call is refused next to another tool call or while a message
+    // is queued, so an accepted question always ends the turn.
+    pi.registerTool({
+      name: "factory_ask_supervisor",
+      label: "Ask the supervisor",
+      description:
+        "Ask whoever runs this factory task a question you cannot answer from the request or the code (a decision, missing information). Call it alone, with no other tool call in the same message. Your turn ends with the call; the answer arrives as the next message and you continue the same round. Ask only when guessing would risk wrong work.",
+      promptSnippet: "Ask the task's supervisor a blocking question; the turn ends and the answer comes as the next message",
+      parameters: {
+        type: "object",
+        required: ["question"],
+        properties: { question: { type: "string", description: "The question, self-contained: the supervisor has not seen your work" } },
+      } as never,
+      async execute(_toolCallId, params: unknown, _signal, _onUpdate, ctx) {
+        const fail = (text: string) => toolError(`factory_ask_supervisor: ${text}`);
+        if (session.snapshot?.state !== "running") return fail("only the coder of a running task may ask");
+        const { question } = isRecord(params) ? params : {};
+        if (typeof question !== "string" || question.trim() === "") return fail("question must not be empty");
+        if (lastAssistantToolCalls(ctx.sessionManager.getBranch()) > 1) return fail("call it alone, with no other tool call in the same message: the turn could not end with it");
+        if (ctx.hasPendingMessages()) return fail("a message is queued for you: read it first, then ask if the question still stands");
+        askSupervisor(deps(ctx), session.snapshot, question);
+        return { ...toolText("Question recorded. Stop now: the answer arrives as the next message.", { question }), terminate: true };
       },
     });
   };
@@ -203,19 +154,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     followUps: () => followUpMessages(ctx.sessionManager.getBranch()),
     sessionModel: () => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null),
     sessionId: () => ctx.sessionManager.getSessionId(),
-    // A test double of the session manager may have no session dir: no factory session, no wave.
-    mergeRefusal: async () => {
-      const dir = ctx.sessionManager.getSessionDir?.();
-      return dir === undefined ? null : waveMergeRefusal(dir, ctx.sessionManager.getSessionId());
-    },
-    wave: async () => {
-      const dir = ctx.sessionManager.getSessionDir?.();
-      return dir === undefined ? null : taskWave(dir, ctx.sessionManager.getSessionId());
-    },
-    reviewEach: async () => {
-      const dir = ctx.sessionManager.getSessionDir?.();
-      return dir === undefined ? false : waveReviewsEach(dir, ctx.sessionManager.getSessionId());
-    },
+    wave: () => sessionWave(ctx.sessionManager.getSessionId()),
   });
 
   const command = (args: string, ops: OpsDeps): Promise<OpResult> => {
@@ -228,11 +167,12 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
       });
     }
     if (verb === "init") return initConfig(ops);
-    if (!session.snapshot) return Promise.resolve({ ok: false, error: "this session holds no task" });
-    if (verb === "approve") return approveTask(ops);
-    if (verb === "retry") return retryTask(ops);
-    if (verb === "cancel") return cancelTask(ops);
-    if (verb === "reviewed") return applyReviewed(ops, text.slice(verb.length).trim());
+    const current = session.snapshot;
+    if (!current) return Promise.resolve({ ok: false, error: "this session holds no task" });
+    if (verb === "approve") return approveTask(ops, current);
+    if (verb === "retry") return retryTask(ops, current);
+    if (verb === "cancel") return cancelTask(ops, current);
+    if (verb === "reviewed") return applyReviewed(ops, current, text.slice(verb.length).trim());
     return Promise.resolve({ ok: false, error: `unknown command "${verb}"` });
   };
 
@@ -304,16 +244,15 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     }
     session.snapshot = rebuild(ctx.sessionManager.getBranch());
     session.files = undefined;
-    syncLeft = syncLeftOf(ctx.sessionManager.getBranch());
-    syncTaskRecord = undefined;
+    taskRecord = undefined;
     registerTaskTools();
-    if (session.snapshot && wasInterrupted(session.snapshot)) await resumeTask(deps(ctx), session.snapshot);
+    // A run is active only inside the process that started it: a task loaded in a state that does not rest was interrupted.
+    if (session.snapshot && !isResting(session.snapshot.state)) await resumeTask(deps(ctx), session.snapshot);
   });
 
   pi.on("session_tree", (_event, ctx) => {
     session.snapshot = rebuild(ctx.sessionManager.getBranch());
     session.files = undefined;
-    syncLeft = syncLeftOf(ctx.sessionManager.getBranch());
   });
 
   pi.on("session_shutdown", () => {
@@ -327,22 +266,19 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
   pi.on("input", async (_event, ctx) => {
     const atRest = session.snapshot;
     if (!atRest) return;
-    // One `factory_new_task` per user message, a follow-up queued during the run included.
-    if (session.followUp) session.followUp.spawnedForMessage = false;
     if (atRest.state === "merging") {
       ctx.ui.notify("factory: a merge is running, send the message when it has ended", "warning");
       return { action: "handled" };
     }
-    // The answer to the coder's question continues its round: no rebase, so the worktree stays as the coder left it.
-    if (atRest.state === "waiting_answer") {
-      // A merged task runs again only in a follow-up run, whose session state a new runner has to restore.
-      session.followUp = atRest.mergedCommit === null ? undefined : { merged: atRest.mergedCommit, spawnedForMessage: false };
-      return;
+    if (atRest.state === "done") {
+      ctx.ui.notify(`factory: the task ${DONE_REFUSAL}`, "warning");
+      return { action: "handled" };
     }
-    if (!RESTING_STATES.includes(atRest.state)) return;
+    // The answer to the coder's question continues its round: no rebase, so the worktree stays as the coder left it.
+    if (atRest.state === "waiting_answer") return;
+    if (!isResting(atRest.state)) return;
     const ops = deps(ctx);
     try {
-      session.followUp = isMergedTask(atRest) ? { merged: atRest.mergedCommit, spawnedForMessage: false } : undefined;
       opened = await openRun(ops, atRest);
     } catch (error) {
       ctx.ui.notify(`factory: the message starts no run: ${errorText(error)}`, "error");
@@ -364,13 +300,12 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     opened = undefined;
     const ops = deps(ctx);
     const answers = event.messageType === "user" && atRest.state === "waiting_answer";
-    const opens = event.messageType === "user" && !answers && RESTING_STATES.includes(atRest.state);
+    const opens = event.messageType === "user" && !answers && isResting(atRest.state);
     if (answers) resumeAnswered(ops, atRest);
     if (opens) startRun(ops, atRest, "message", opening);
     // A `factory.yaml` that does not parse is reported by the round, not here.
     const taskFilesNow = await taskFiles(ops, atRest.task).catch(() => undefined);
     if (taskFilesNow?.prompts.coder) event.systemPromptOptions.sections[ROLE_SECTION] = taskFilesNow.prompts.coder;
-    if (session.followUp) event.systemPromptOptions.sections[FOLLOW_UP_SECTION] = followUpPrompt(session.followUp.merged);
     // The user's message and the conflict both reach the coder in this run.
     if (opens && opening.conflict !== undefined) return { message: conflictMessage(atRest.round, opening.conflict) };
   });
@@ -396,7 +331,6 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
       return ctx.hasPendingMessages() ? { entries: [...entries, ...messageRoundDrafts(round)], continue: true } : { entries, continue: false };
     };
     let result: RoundResult;
-    const syncDrafts: SyncDraft[] = [];
     const asked = commitAsk;
     commitAsk = undefined;
     if (event.outcome === "error") {
@@ -409,23 +343,8 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
         if (asked && (await snapshotTree(runner.run, ctx.cwd)) === asked.tree) {
           result = commitAnswerDrafts(current, lastAssistantText(ctx.sessionManager.getBranch()), asked.passedInto, ctx.hasPendingMessages());
         } else {
-          // Files in step (`sync.ts`): a due sync first; its follow-up continues the coder in this round.
-          const record = await syncRecord(ctx);
-          const sync = await syncAtTurnEnd(runner.cleanup, ctx.cwd, record, task.mainBranch, syncLeft);
-          syncLeft = sync.left;
-          syncDrafts.push(...sync.drafts);
-          if (sync.follow) {
-            result = { entries: [], continue: true };
-          } else {
-            result = await runRound(current, pipelineSteps(ops, task, await taskFiles(ops, task), false));
-            if (result.commitAsk) commitAsk = { passedInto: result.commitAsk, tree: await snapshotTree(runner.run, ctx.cwd) };
-            // The snapshot of the last sync and the consumed lines of its log are kept until a round passed its gates after it.
-            if (record && roundPassedGates(result.entries, result.commitAsk !== undefined)) {
-              await syncRoundPassed(runner.cleanup, ctx.cwd, record.id);
-              if (syncLeft) syncDrafts.push({ type: "custom", customType: SYNC_TYPE, data: { kind: "cleared" } });
-              syncLeft = undefined;
-            }
-          }
+          result = await runRound(current, pipelineSteps(ops, task, await taskFiles(ops, task), false));
+          if (result.commitAsk) commitAsk = { passedInto: result.commitAsk, tree: await snapshotTree(runner.run, ctx.cwd) };
         }
       } catch (error) {
         result = stopped(`pipeline_error: ${errorText(error)}`);
@@ -434,7 +353,7 @@ export default function (pi: ExtensionAPI, testing: { scoutCore?: ScoutCore; sco
     // Pi commits the returned entries: the snapshot follows them without `appendEntry`.
     for (const draft of result.entries) if (draft.type === "custom") session.snapshot = applyEntry(session.snapshot, draft.customType, draft.data);
     roundEnd = session.snapshot?.state;
-    const entries = [...event.entries, ...syncDrafts, ...result.entries];
+    const entries = [...event.entries, ...result.entries];
     return result.continue ? { entries, continue: true } : { entries };
   });
 

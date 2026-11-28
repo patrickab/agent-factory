@@ -3,11 +3,12 @@
  *
  * - Returns at once and never ends the turn: no `terminate`, no wake of anyone
  * - `context` says which task, wave and plan store the entry belongs to; the entry is stored as a fact (`feedback.ts`)
- *   and `keep` also puts it on the task (the session), so it stays there without a store
+ *   and the result's `details` hold it, so it stays in the session without a store
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { FEEDBACK_KINDS, type FeedbackEntry, type FeedbackKind, storeFeedback } from "../feedback.ts";
 import { errorText, isRecord } from "../util.ts";
+import { toolError, toolText } from "./tool.ts";
 
 export const FEEDBACK_TOOL = "feedback";
 
@@ -21,8 +22,6 @@ export interface FeedbackContext {
 export interface FeedbackToolGate {
   role: string;
   context(ctx: ExtensionContext): Promise<FeedbackContext | null>;
-  /** Puts the entry on the task. */
-  keep(entry: FeedbackEntry): void;
 }
 
 export function registerFeedbackTool(pi: ExtensionAPI, gate: FeedbackToolGate): void {
@@ -43,7 +42,7 @@ export function registerFeedbackTool(pi: ExtensionAPI, gate: FeedbackToolGate): 
       },
     } as never,
     async execute(_toolCallId, params: unknown, _signal, _onUpdate, ctx) {
-      const fail = (text: string) => ({ content: [{ type: "text" as const, text: `${FEEDBACK_TOOL}: ${text}` }], details: undefined, isError: true });
+      const fail = (text: string) => toolError(`${FEEDBACK_TOOL}: ${text}`);
       const { kind, what, cost, suggestion } = isRecord(params) ? params : {};
       if (typeof kind !== "string" || !FEEDBACK_KINDS.includes(kind as FeedbackKind)) return fail(`kind must be one of ${FEEDBACK_KINDS.join(", ")}`);
       if (typeof what !== "string" || what.trim() === "") return fail("what must not be empty");
@@ -52,9 +51,8 @@ export function registerFeedbackTool(pi: ExtensionAPI, gate: FeedbackToolGate): 
         const whose = await gate.context(ctx);
         if (whose === null || (!whose.task && !whose.wave)) return fail("this session holds no task");
         const entry: FeedbackEntry = { kind: kind as FeedbackKind, what, cost: optional(cost), suggestion: optional(suggestion), task: whose.task, wave: whose.wave, role: gate.role };
-        gate.keep(entry);
         const stored = await storeFeedback(whose.plan, entry);
-        return { content: [{ type: "text" as const, text: stored ? "Feedback recorded." : "Feedback recorded on the task." }], details: entry };
+        return toolText(stored ? "Feedback recorded." : "Feedback recorded on the task.", entry);
       } catch (error) {
         return fail(errorText(error));
       }

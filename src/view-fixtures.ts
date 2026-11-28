@@ -5,7 +5,6 @@ import type { ProofView } from "./gates-prove.ts";
 
 export const TASK_ID = "4ae7325b-1111-4222-8333-944445555666";
 export const WAVE_ID = "3f2a91c0-aaaa-4bbb-8ccc-dddddddddddd";
-export const OTHER_WAVE = "77b0c2e1-0000-4000-8000-000000000000";
 export const SESSION = "0197c0de-5555-7666-8777-888899990000";
 
 export function task(over: Partial<TaskView> = {}): TaskView {
@@ -35,14 +34,15 @@ export function task(over: Partial<TaskView> = {}): TaskView {
     failure: null,
     review: null,
     merged: null,
+    minors: [],
     flaky: [],
     actions: ["tasks.cancel", "tasks.message"],
     ...over,
   };
 }
 
-export type WaveTask = WaveView["tasks"][number];
-export const waveTask = (key: string, state: string, after: string[] = [], taskId: string | null = `${key.padEnd(8, "0").slice(0, 8)}-1111-4222-8333-944445555666`): WaveTask => ({
+type WaveTask = WaveView["tasks"][number];
+export const waveTask = (key: string, state: WaveTask["state"], after: string[] = [], taskId: string | null = `${key.padEnd(8, "0").slice(0, 8)}-1111-4222-8333-944445555666`): WaveTask => ({
   key,
   title: `the ${key}`,
   after,
@@ -51,6 +51,7 @@ export const waveTask = (key: string, state: string, after: string[] = [], taskI
   sessionId: state === "pending" ? null : SESSION,
   state,
   usage: state === "pending" ? null : { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 1 },
+  id: taskId ?? `${key.padEnd(8, "0").slice(0, 8)}-1111-4222-8333-944445555666`,
 });
 
 export function wave(over: Partial<WaveView> = {}): WaveView {
@@ -64,7 +65,6 @@ export function wave(over: Partial<WaveView> = {}): WaveView {
     branch: "master-factory-w1",
     after: [],
     target: "master",
-    base: "0ab12cd0ab12cd0ab12cd0ab12cd0ab12cd0ab12",
     origin: SESSION,
     createdAt: "2025-01-02T10:00:00.000Z",
     stage: "building",
@@ -72,12 +72,15 @@ export function wave(over: Partial<WaveView> = {}): WaveView {
     detail: null,
     running: true,
     interrupted: false,
+    stuck: false,
+    attention: false,
     tasks: [waveTask("record", "done"), waveTask("actions", "running", ["record"]), waveTask("docs", "pending", ["actions"])],
     counts: { total: 3, done: 1 },
     reviews: [],
     gates: [],
     merge: null,
-    remote: null,
+    minors: [],
+    updates: [],
     usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, cost: 18.4 },
     actions: ["waves.add", "waves.cancel"],
     ...over,
@@ -98,10 +101,10 @@ export const review = (verdict: "approved" | "rejected" | "failed", findings: Wa
 
 export const FINDINGS: WaveView["reviews"][number]["findings"] = [
   { severity: "major", file: "src/wave-runner.ts", line: 309, text: "A wave whose tasks can never start\nstays building forever." },
-  { severity: "minor", file: "src/tasks.ts", line: null, text: "tasks.import can put a task into a wave." },
+  { severity: "minor", file: "src/tasks.ts", line: null, text: "tasks.start can put a task onto a wave's branch." },
 ];
 
-export const PROOF_ID = "9c1d2e3f-aaaa-4bbb-8ccc-dddddddddddd";
+const PROOF_ID = "9c1d2e3f-aaaa-4bbb-8ccc-dddddddddddd";
 
 export function proof(over: Partial<ProofView> = {}): ProofView {
   return {
@@ -125,7 +128,6 @@ export function proof(over: Partial<ProofView> = {}): ProofView {
   };
 }
 
-/** One full view per action, as `callAction` answers it. */
 export const SCOUT = {
   id: "5c0a1234-0000-4000-8000-000000000001",
   caller: { kind: "task", id: TASK_ID },
@@ -151,26 +153,17 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "models.set": { params: { models: ["anthropic/opus"] }, result: { models: ["anthropic/opus"] } },
   "repos.list": { params: {}, result: { repos: ["/home/me/git/app", "/home/me/git/bot"] } },
   "repos.add": { params: { repo: "/home/me/git/app" }, result: { repo: "/home/me/git/app", repos: ["/home/me/git/app"] } },
-  "repos.remove": { params: { repo: "/home/me/git/app" }, result: { repos: [] } },
-  "branches.list": {
-    params: { repo: "." },
-    result: {
-      branches: [
-        { name: "master", default: true, hasConfig: false },
-        { name: "waves", default: false, hasConfig: true },
-      ],
-    },
-  },
+  "branches.list": { params: { repo: "." }, result: { branches: [{ name: "master" }, { name: "waves" }] } },
   "settings.get": {
     params: { repo: "." },
     result: {
-      stored: { merge: "review", models: { coder: "anthropic/opus", big: "anthropic/opus" } },
+      stored: { merge: "review", models: { big: "anthropic/opus" } },
       resolved: {
         branch: "master",
         merge: "review",
         maxRounds: 3,
         review: true,
-        models: { small: "anthropic/sonnet", big: "anthropic/opus", coder: "anthropic/opus", reviewer: "openai/gpt" },
+        models: { small: "anthropic/sonnet", big: "anthropic/opus", reviewer: "openai/gpt" },
         preview: false,
       },
       defaults: {
@@ -178,7 +171,7 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
         merge: "auto",
         maxRounds: 3,
         review: true,
-        models: { small: "anthropic/sonnet", big: "openai/gpt", coder: "openai/gpt", reviewer: "openai/gpt" },
+        models: { small: "anthropic/sonnet", big: "openai/gpt", reviewer: "openai/gpt" },
         preview: false,
       },
     },
@@ -187,31 +180,13 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
     params: { repo: ".", settings: { merge: "review" } },
     result: { stored: { merge: "review" }, resolved: { branch: "master", merge: "review", maxRounds: 3 }, defaults: {} },
   },
-  "config.get": { params: { repo: ".", branch: "waves" }, result: { exists: true, text: "gates:\n  - [bun, run, types]\n", draft: null, source: [] } },
+  "config.get": { params: { repo: "." }, result: { exists: true, text: "gates:\n  - [bun, run, types]\n", draft: null, source: [] } },
   "config.write": { params: { repo: ".", text: "gates: []" }, result: { path: "/home/me/git/app/factory.yaml" } },
   "tasks.list": { params: {}, result: { tasks: [task(), task({ id: "7cf4e91e-0000-4000-8000-000000000000", state: "done", reason: "merged" })] } },
   "tasks.get": { params: { id: "4ae7" }, result: task() },
-  "tasks.import": { params: { record: {} }, result: task() },
-  "tasks.timeline": {
-    params: { id: "4ae7" },
-    result: {
-      entries: [
-        { at: "2025-01-02T10:07:16.000Z", kind: "gate", data: { name: "types", passed: true, sessionPath: "/home/me/x.jsonl", at: "2025-01-02T10:07:16.000Z" } },
-        { at: "2025-01-02T10:08:00.000Z", kind: "coder", data: { text: `Done. Session ${SESSION} wrote /home/me/git/app/src/x.ts\nmore` } },
-      ],
-      next: 4096,
-    },
-  },
   "tasks.diff": {
     params: { id: "4ae7" },
-    result: {
-      base: "0ab12cd",
-      diff: "diff --git a/src/x.ts b/src/x.ts\n+secret patch",
-      files: [
-        { path: "src/x.ts", added: 10, removed: 2 },
-        { path: "src/x.test.ts", added: 30, removed: 0 },
-      ],
-    },
+    result: { base: "0ab12cd", diff: "diff --git a/src/x.ts b/src/x.ts\n+secret patch", files: [{ path: "src/x.ts", added: 10, removed: 2 }, { path: "src/x.test.ts", added: 30, removed: 0 }] },
   },
   "tasks.start": { params: { repo: ".", title: "t", request: "SECRET-REQUEST" }, result: task({ round: 0 }) },
   "tasks.wait": { params: { tag: "factory" }, result: { tasks: [task({ state: "done", reason: "merged", running: false })], waves: [wave({ stage: "merged", running: false })], attention: [], timedOut: false } },
@@ -219,30 +194,18 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
   "tasks.retry": { params: { id: "4ae7" }, result: task({ round: 3 }) },
   "tasks.cancel": { params: { id: "4ae7" }, result: task({ state: "cancelled", running: false, reason: "cancelled" }) },
   "tasks.remove": { params: { id: "4ae7" }, result: { removed: TASK_ID, dropped: "1 unmerged commit" } },
-  "tasks.message": { params: { id: "4ae7", text: "go on" }, result: task() },
+  "tasks.message": { params: { id: "4ae7", text: "SECRET-REQUEST" }, result: task() },
   "waves.start": { params: { repo: ".", tag: "factory/w1", title: "t", request: "SECRET-REQUEST", tasks: [] }, result: { wave: wave() } },
   "waves.add": { params: { id: "3f2a", tasks: [{ key: "fix", title: "fix", request: "SECRET-REQUEST" }] }, result: { wave: wave({ tasks: [...wave().tasks, waveTask("fix", "running")] }) } },
   "waves.get": { params: { id: "3f2a" }, result: { wave: wave() } },
   "waves.list": { params: {}, result: { waves: [wave(), wave({ id: "77b0c2e1-0000-4000-8000-000000000000", stage: "merged" })] } },
-  "waves.timeline": {
-    params: { id: "3f2a" },
-    result: {
-      events: [
-        { at: "2025-01-02T10:00:00.000Z", kind: "task", key: "record", taskId: TASK_ID, sessionId: SESSION },
-        { at: "2025-01-02T10:30:00.000Z", kind: "stage", stage: "reviewing", reason: null },
-      ],
-      next: 2,
-    },
-  },
   "waves.retry": { params: { id: "3f2a" }, result: { wave: wave({ stage: "reviewing" }) } },
   "waves.approve": { params: { id: "3f2a" }, result: { wave: wave({ stage: "merging" }) } },
   "waves.cancel": { params: { id: "3f2a" }, result: { wave: wave({ stage: "cancelled", running: false }) } },
   "waves.remove": { params: { id: "3f2a" }, result: { removed: WAVE_ID } },
   "scouts.start": { params: { concern: "how a.txt is made", wait: true }, result: { scout: SCOUT, timedOut: false } },
   "scouts.get": { params: { id: "5c0a" }, result: { scout: { ...SCOUT, state: "running", report: null, reportPath: null, written: ["map/a"] } } },
-  "scouts.list": { params: {}, result: { scouts: [SCOUT] } },
   "gates.prove": { params: { repo: "." }, result: { proof: proof({ state: "running", running: true, failing: null, steps: [], flaky: [], endedAt: null }) } },
-  "gates.get": { params: { id: "9c1d" }, result: { proof: proof() } },
   "contracts.apply": {
     params: { store: "team/plan", name: "api", op: { op: "update", path: "answer", text: "t" } },
     result: {
@@ -254,8 +217,8 @@ export const FIXTURES: Record<string, { params: unknown; result: unknown }> = {
       done: [{ wave: WAVE_ID, tag: "factory/w1", key: "docs", task: "4ae7325b-2222-4000-8000-000000000000" }],
     },
   },
-  "tasks.update": { params: { id: "4ae7325b", request: "the new request" }, result: { wave: wave(), key: "docs", changed: true, delivery: "pending" } },
-  "waves.update": { params: { id: WAVE_ID, request: "new instructions" }, result: { wave: wave(), changed: true } },
+  "tasks.update": { params: { id: "4ae7325b", request: "SECRET-REQUEST" }, result: { wave: wave(), key: "docs", changed: true } },
+  "waves.update": { params: { id: WAVE_ID, request: "SECRET-REQUEST" }, result: { wave: wave(), changed: true } },
   "decisions.list": {
     params: {},
     result: {

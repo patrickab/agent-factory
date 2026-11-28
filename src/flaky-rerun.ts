@@ -1,14 +1,9 @@
 /**
- * A gate step run once more when it fails, for the three gate loops (a task's round, a task's merge, a wave's review
- * and merge).
- *
- * - Provides `runGateStep`: the step's result and, when it failed and then passed, its `flaky` names (the failing test
- *   names read from the first run's output, else the command). A flaky step counts as passed
+ * A gate step run once more when it fails; a flaky step (failed, then passed) counts as passed.
  * - No rerun after exit `INFRA_EXIT`, a kill or a timeout: those are not the step's to repeat
- * - A step that reruns its own failures says so in the last line of its output, one trailer (`rerunsTrailer`, as
- *   `scripts/changed-tests.ts` prints it): it is not run again, and the trailer's `flaky` names are its flaky names.
- *   A mark anywhere else (a test's own output) is not read
- * - Every run holds a test slot (`test-slots.ts`) while its command runs: `run` gets the slot's env for the command
+ * - A step that reruns its own failures says so in the last line of its output (`rerunsTrailer`): it is not run
+ *   again. A mark anywhere else (a test's own output) is not read
+ * - Every run holds a test slot (`test-slots.ts`) while its command runs
  */
 import type { CommandResult } from "./run.ts";
 import { INFRA_EXIT, passed } from "./state.ts";

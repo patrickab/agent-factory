@@ -1,20 +1,13 @@
 /**
  * The waves a Pi session declared, as the lines of the widget above its editor (`pi/index.ts`). Pure: no I/O.
- *
- * - Header: `Factory · <n> active[ · <m> needs you][ · <k> cards to rule on]` and the active waves' cost; with no
- *   active wave `Factory · <n> finished`. No waves and no card to rule on: no lines (the widget goes)
- * - Cards to rule on (`cardsToRule`): the session's attention notices that no later notice of the same task, wave,
- *   scout or proof replaced and no later decision answered
- * - Active (not `merged`, not `cancelled`): those that need the supervisor first (`rejected`, `blocked`,
- *   `waiting_approve`, interrupted, building with tasks that can never start, whether a runner lives or not, queued
- *   after a cancelled wave), then newest first. A queued wave that can still start shows `queued`
- * - Finished: one line `<n> finished` while closed; open (`showFinished`), that line carries their cost and every
- *   finished wave follows, newest first
- * - A row: mark, tag, title, done/total, state, cost. Only the title gives way to the width. Tag and title go through
- *   the agent view's `scrub` (no paths, no long ids)
+ * - No waves and no card to rule on: no lines (the widget goes)
+ * - Active waves that need the supervisor first, then newest first; finished ones fold into one line until opened
+ * - Only the title gives way to the width. Tag and title go through the agent view's `scrub` (no paths, no long ids)
  */
-import { neverStarts, scrub, unreachableTasks } from "./agent-view.ts";
-import type { WaveView } from "./waves.ts";
+import { scrub } from "./agent-view.ts";
+import { unreachableTasks } from "./cards.ts";
+import { dollars } from "./util.ts";
+import { waveFinal, type WaveView } from "./waves.ts";
 
 export interface SessionWidgetOptions {
   showFinished: boolean;
@@ -62,20 +55,15 @@ export function cardsToRule(branch: Iterable<unknown>): number {
   return [...open.values()].filter(Boolean).length;
 }
 
-const FINISHED_STAGES: readonly string[] = ["merged", "cancelled"];
-const ATTENTION_STAGES: readonly string[] = ["rejected", "blocked", "waiting_approve"];
 const ELLIPSIS = "…";
 
-/**
- * Building with tasks that can never start, or queued after a cancelled wave: the agent view's and `tasks.wait`'s
- * notion, whatever `running` says.
- */
+/** `WaveView.stuck`, or building with tasks that can never start even while another task still runs: the user sees it early. */
 function stuck(view: WaveView): boolean {
-  return (view.stage === "building" && unreachableTasks(view.tasks).length > 0) || neverStarts(view);
+  return view.stuck || (view.stage === "building" && unreachableTasks(view.tasks).length > 0);
 }
 
 function needsYou(view: WaveView): boolean {
-  return view.interrupted || ATTENTION_STAGES.includes(view.stage) || stuck(view);
+  return view.attention || stuck(view);
 }
 
 function state(view: WaveView): string {
@@ -91,7 +79,7 @@ function mark(view: WaveView): string {
 }
 
 function money(cost: number | null): string {
-  return cost === null ? "" : `$${cost.toFixed(2)}`;
+  return cost === null ? "" : dollars(cost);
 }
 
 function totalCost(views: readonly WaveView[]): number | null {
@@ -155,8 +143,8 @@ function rows(views: readonly WaveView[], width: number): string[] {
 export function sessionWidget(waves: readonly WaveView[], { showFinished, width, rulings = 0 }: SessionWidgetOptions): string[] {
   const toRule = rulings > 0 ? ` · ${rulings} ${rulings === 1 ? "card" : "cards"} to rule on` : "";
   if (waves.length === 0) return toRule === "" ? [] : [truncate(`Factory${toRule}`, width)];
-  const active = waves.filter((view) => !FINISHED_STAGES.includes(view.stage));
-  const finished = waves.filter((view) => FINISHED_STAGES.includes(view.stage)).sort(newestFirst);
+  const active = waves.filter((view) => !waveFinal(view.stage));
+  const finished = waves.filter((view) => waveFinal(view.stage)).sort(newestFirst);
   active.sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)) || newestFirst(a, b));
   const finishedCost = showFinished ? money(totalCost(finished)) : "";
   if (active.length === 0) {

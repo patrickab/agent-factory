@@ -1,21 +1,16 @@
 /**
- * The repo's side of a factory task.
- *
- * - Consumes `factory.yaml` (the keys the plugin runs: `hooks.after_create`, `hooks.after_code`, `hooks.after_merge`,
- *   `gates`, `merge_gates`, `task_gates`, `protected`, `lockfiles`)
- *   and the role prompts `.factory/agents/<role>.md`, all as the task's base commit holds them. The working tree is
- *   the coder's to edit, so it is never the source of the rules the coder is held to
- * - Provides `TaskFiles` (`loadTaskFiles`), `FactoryConfig` (`parseFactoryYaml` for a file read elsewhere: `launch.ts`
- *   runs `hooks.after_create` from the new worktree's copy), the protected-path match and the role prompt text
+ * The repo's side of a factory task: `factory.yaml` and the role prompts `.factory/agents/<role>.md`, as the task's
+ * base commit holds them. The working tree is the coder's to edit, so it is never the source of the rules the coder
+ * is held to.
  * - `preview` belongs to the backend and is not read here
  */
-import { git, LOCKFILES } from "./git.ts";
+import { git } from "./git.ts";
 import type { Exec } from "./run.ts";
 import { errorText, isRecord } from "./util.ts";
 
 export interface FactoryConfig {
   /** `after_create`: once, in a new task worktree (`launch.ts`). */
-  hooks: { after_create: string[][]; after_code: string[][]; after_merge: string[][] };
+  hooks: { after_create: string[][]; after_merge: string[][] };
   /** After every coder turn: cheap checks (lint, types). */
   gates: string[][];
   /**
@@ -29,17 +24,12 @@ export interface FactoryConfig {
    */
   task_gates: string[][];
   protected: string[];
-  /**
-   * File names (no directory) whose change makes a merge run `hooks.after_merge`; their bodies go last in the review's
-   * patch. Default `LOCKFILES`.
-   */
-  lockfiles: string[];
 }
 
 export const DEFAULT_PROTECTED = ["factory.yaml", ".factory/**"];
 
 /** The top-level keys of `factory.yaml`; any other is an error (a misspelt `task_gates` must not pass unnoticed). `preview` belongs to the backend. */
-const KNOWN_KEYS = ["hooks", "gates", "merge_gates", "task_gates", "protected", "lockfiles", "preview"];
+const KNOWN_KEYS = ["hooks", "gates", "merge_gates", "task_gates", "protected", "preview"];
 
 function argvList(value: unknown, key: string): string[][] {
   if (value === undefined || value === null) return [];
@@ -53,7 +43,7 @@ function argvList(value: unknown, key: string): string[][] {
 /** `raw` is the parsed YAML document. A missing or empty file (`undefined`, `null`) means no hooks and no gates. */
 export function parseFactoryConfig(raw: unknown): FactoryConfig {
   if (raw === undefined || raw === null) {
-    return { hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED, lockfiles: LOCKFILES };
+    return { hooks: { after_create: [], after_merge: [] }, gates: [], merge_gates: [], task_gates: [], protected: DEFAULT_PROTECTED };
   }
   if (!isRecord(raw)) throw new Error("factory.yaml: the document must be a mapping");
   const unknown = Object.keys(raw).filter((key) => !KNOWN_KEYS.includes(key));
@@ -64,21 +54,15 @@ export function parseFactoryConfig(raw: unknown): FactoryConfig {
   if (!Array.isArray(globs) || !globs.every((glob) => typeof glob === "string" && glob !== "")) {
     throw new Error("factory.yaml: protected must be a list of globs");
   }
-  const lockfiles = raw.lockfiles ?? LOCKFILES;
-  if (!Array.isArray(lockfiles) || !lockfiles.every((name) => typeof name === "string" && name !== "" && !name.includes("/"))) {
-    throw new Error("factory.yaml: lockfiles must be a list of file names without a slash");
-  }
   return {
     hooks: {
       after_create: argvList(hooks.after_create, "hooks.after_create"),
-      after_code: argvList(hooks.after_code, "hooks.after_code"),
       after_merge: argvList(hooks.after_merge, "hooks.after_merge"),
     },
     gates: argvList(raw.gates, "gates"),
     merge_gates: raw.merge_gates === undefined ? argvList(raw.gates, "gates") : argvList(raw.merge_gates, "merge_gates"),
     task_gates: argvList(raw.task_gates, "task_gates"),
     protected: globs,
-    lockfiles,
   };
 }
 
@@ -93,35 +77,10 @@ export function parseFactoryYaml(text: string): FactoryConfig {
   return parseFactoryConfig(raw);
 }
 
-/**
- * A glob over repo-relative paths with git's `glob` pathspec rules: `*` and `?` stay inside one path segment,
- * a `**` segment spans any number of them.
- */
-export function globToRegExp(glob: string): RegExp {
-  let source = "";
-  for (let index = 0; index < glob.length; index += 1) {
-    const char = glob[index];
-    if (glob.startsWith("**/", index) && (index === 0 || glob[index - 1] === "/")) {
-      source += "(?:.*/)?";
-      index += 2;
-    } else if (glob.startsWith("**", index)) {
-      source += ".*";
-      index += 1;
-    } else if (char === "*") {
-      source += "[^/]*";
-    } else if (char === "?") {
-      source += "[^/]";
-    } else {
-      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-    }
-  }
-  return new RegExp(`^${source}$`);
-}
-
 /** The paths of `paths` that a protected glob matches. */
 export function protectedPaths(paths: string[], globs: string[]): string[] {
-  const patterns = globs.map(globToRegExp);
-  return paths.filter((path) => patterns.some((pattern) => pattern.test(path)));
+  const patterns = globs.map((glob) => new Bun.Glob(glob));
+  return paths.filter((path) => patterns.some((pattern) => pattern.match(path)));
 }
 
 /** A role file's prompt: its text without a leading YAML frontmatter block. */

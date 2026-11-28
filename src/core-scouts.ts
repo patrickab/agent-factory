@@ -1,31 +1,27 @@
 /**
- * The core's scout actions (`scouts.*`, `core.ts` maps them) over `scouts.ts`.
- *
- * - `scouts.start`: the caller is the task whose worktree holds `cwd` (a coder), else the wave whose review worktree
- *   holds it (its reviewer), else the calling session (`origin`). The store is the task's or wave's `plan`, else the
- *   `store` param; none, or one memory-store does not know: `refused`. A scout starts no scout
- * - The scout runs on the project's small model: the wave's, else the repository's stored one, else `defaults.yaml`'s
- *   when it is on the factory models list, else Pi's default
- * - `wait: true` answers once the scout ended, after 15 minutes at the latest with what it wrote so
- *   far (`timedOut`); an abort ends the wait early. `wait: false` answers at once
+ * The core's scout actions (`scouts.*`) over `scouts.ts`.
+ * - `scouts.start`: the caller is the task whose worktree holds `cwd`, else the wave whose review worktree holds it,
+ *   else the calling session. The store is the caller's `plan`, else the `store` param
+ * - The scout runs on the project's small model: the wave's, else the repository's, else `defaults.yaml`'s when it is
+ *   on the factory models list, else Pi's default
  */
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import { FactoryError, nonEmpty, primaryOf, repoPath, stringsParam, type Handler } from "./core-shared.ts";
+import { ls, memoryStoreOnPath } from "./store.ts";
+import { byId, nonEmpty, primaryOf, repoPath, stringsParam, type Handler } from "./core-shared.ts";
 import { defaultSmallModel } from "./core-settings.ts";
 import { waveReviewWorktree } from "./core-waves.ts";
 import { git } from "./git.ts";
 import { runCommand } from "./run.ts";
-import { cancelScouts, findScoutDir, FINAL_SCOUT_STATES, SCOUT_ID_ENV, scoutDirs, scoutView, startScout, type ScoutCaller, type ScoutView } from "./scouts.ts";
+import { cancelScouts, scoutDirs, FINAL_SCOUT_STATES, SCOUT_ID_ENV, scoutView, startScout, type ScoutCaller, type ScoutView } from "./scouts.ts";
 import { loadSettings } from "./settings.ts";
 import { listTasks } from "./tasks.ts";
-import { errorText } from "./util.ts";
+import { errorText, FactoryError } from "./util.ts";
 import { listWaves } from "./waves.ts";
 
 export { cancelScouts };
 
-/** 15 minutes; `FACTORY_SCOUT_WAIT_MS` for tests. */
-const scoutWaitMs = () => Number(process.env.FACTORY_SCOUT_WAIT_MS) || 15 * 60_000;
+const SCOUT_WAIT_MS = 15 * 60_000;
 const WAIT_POLL_MS = 200;
 
 function realPath(path: string): string {
@@ -60,13 +56,12 @@ async function smallModel(repo: string, waveId: string | null): Promise<string |
 }
 
 async function requireStore(store: string, cwd: string): Promise<void> {
-  const result = await runCommand(["memory-store", "ls", store], { cwd });
-  if (result.exitCode === null) throw new FactoryError("failed", "memory-store could not run: a scout needs it on PATH");
-  if (result.exitCode !== 0) throw new FactoryError("refused", `memory store ${store} does not exist: a scout writes the map of an existing store`);
+  if (!memoryStoreOnPath()) throw new FactoryError("failed", "memory-store could not run: a scout needs it on PATH");
+  if ((await ls(store, undefined, cwd)) === null) throw new FactoryError("refused", `memory store ${store} does not exist: a scout writes the map of an existing store`);
 }
 
 async function waitForScout(dir: string, signal: AbortSignal | undefined): Promise<{ scout: ScoutView; timedOut: boolean }> {
-  const deadline = Date.now() + scoutWaitMs();
+  const deadline = Date.now() + SCOUT_WAIT_MS;
   for (;;) {
     const scout = await scoutView(dir);
     if (FINAL_SCOUT_STATES.includes(scout.state) || scout.interrupted || signal?.aborted) return { scout, timedOut: false };
@@ -76,12 +71,7 @@ async function waitForScout(dir: string, signal: AbortSignal | undefined): Promi
 }
 
 async function scoutDirOf(id: unknown): Promise<string> {
-  const wanted = nonEmpty(id)?.trim();
-  if (wanted === undefined) throw new FactoryError("invalid", "the id of a scout must not be empty");
-  const found = await findScoutDir(wanted);
-  if ("dir" in found) return found.dir;
-  if (found.error === "not_found") throw new FactoryError("not_found", `no scout has an id starting with "${wanted}"`);
-  throw new FactoryError("invalid", `"${wanted}" matches ${found.matches} scouts, give more of the id`);
+  return byId(await scoutDirs(), (dir) => dir.split("/").at(-1) ?? "", id, "scout");
 }
 
 export const SCOUT_HANDLERS = {
@@ -114,18 +104,4 @@ export const SCOUT_HANDLERS = {
   },
 
   "scouts.get": async (params) => ({ scout: await scoutView(await scoutDirOf(params.id)) }),
-
-  "scouts.list": async (params, { cwd }) => {
-    const repo = params.repo === undefined ? undefined : await primaryOf(params.repo as string, cwd);
-    const wanted = nonEmpty(params.caller)?.trim();
-    const scouts: ScoutView[] = [];
-    for (const dir of await scoutDirs()) {
-      const scout = await scoutView(dir).catch(() => undefined);
-      if (scout === undefined || (repo !== undefined && scout.repo !== repo)) continue;
-      if (wanted !== undefined && !(scout.caller.id ?? "").startsWith(wanted)) continue;
-      scouts.push(scout);
-    }
-    scouts.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    return { scouts };
-  },
 } satisfies Record<string, Handler>;

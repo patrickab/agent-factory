@@ -2,30 +2,38 @@
  * Factory task state, without Pi, git or I/O.
  *
  * - Provides the entry shapes the extension writes (`factory-task`, `-round`, `-gate`, `-review`, `-merge-intent`,
- *   `-merge`, `-state`, `-commit-message`, `-spawn`, `-question`)
+ *   `-merge`, `-state`, `-commit-message`, `-question`)
  * - Provides the reducer that rebuilds a task from those entries (`rebuild`), the same one that tracks it live (`applyEntry`)
  * - Provides the round budget, the `/factory start` payload check and the feedback texts the coder reads
  */
 import type { CommitMessage } from "./commitmsg.ts";
 import type { CommandResult } from "./run.ts";
-import { isRecord } from "./util.ts";
-import type { FeedbackEntry } from "./feedback.ts";
+import type { Usage } from "./util.ts";
 
 /**
  * `waiting_answer`: the coder asked the supervisor (`factory-question`); the next message answers it. `reviewing`: a
- * task of a wave with `reviewEach` passed its gates and waits for the wave's reviewer (`review-each.ts`), whose
+ * task of a wave passed its gates and waits for the wave's reviewer (`review-each.ts`), whose
  * verdict comes as `/factory reviewed`.
  */
 export type State = "running" | "waiting_approve" | "waiting_answer" | "blocked" | "merging" | "done" | "cancelled" | "reviewing";
-/** A task in one of these states does nothing until someone sends it a command or a message. */
-export const RESTING_STATES: readonly State[] = ["waiting_approve", "waiting_answer", "blocked", "done", "cancelled", "reviewing"];
-/** Resting states whose next step is the factory's, not someone's: no attention, and a watcher does not count them as rest. */
-export const FACTORY_TURN_STATES: readonly State[] = ["reviewing"];
-export type GatePhase = "hooks" | "gates" | "merge_gates" | "after_merge";
-export type Trigger = "start" | "hooks" | "gates" | "review" | "protected" | "message" | "retry" | "conflict";
+/** `factoryTurn`: resting, but the next step is the factory's (a watcher does not count it as rest). */
+const STATES: Record<State, { rests: boolean; factoryTurn?: true; final?: true }> = {
+  running: { rests: false },
+  waiting_approve: { rests: true },
+  waiting_answer: { rests: true },
+  blocked: { rests: true },
+  merging: { rests: false },
+  done: { rests: true, final: true },
+  cancelled: { rests: true, final: true },
+  reviewing: { rests: true, factoryTurn: true },
+};
+export const isResting = (state: State): boolean => STATES[state].rests;
+export const isFactoryTurn = (state: State): boolean => STATES[state].factoryTurn === true;
+export const isFinal = (state: State): boolean => STATES[state].final === true;
+export type GatePhase = "gates" | "merge_gates" | "after_merge";
+export type Trigger = "start" | "gates" | "review" | "protected" | "message" | "retry" | "conflict";
 export type Severity = "blocker" | "major" | "minor";
-/** `timeout`: only in entries written while the reviewer had a time limit; a review no longer times out. */
-export type ReviewStatus = "ok" | "malformed" | "timeout" | "aborted" | "failed" | "no_diff";
+export type ReviewStatus = "ok" | "malformed" | "aborted" | "failed" | "no_diff";
 
 export interface Settings {
   /** The branch the task's worktree starts from, is rebased onto and merges into. */
@@ -33,12 +41,8 @@ export interface Settings {
   merge: "auto" | "review";
   maxRounds: number;
   review: boolean;
-  /**
-   * The models this task's roles run with (`coder`, `reviewer`), as before; a role without a model runs with the
-   * session's. Added names: `big`, an alias of `coder` (always equal; a wave's `small` task carries none), and `small`,
-   * the project's model for a wave's easy tasks. Old task records carry only `coder` and `reviewer`.
-   */
-  models: { small?: string; big?: string; coder?: string; reviewer?: string };
+  /** The models this task's roles run with (`taskModels`); a role without one runs with the session's. */
+  models: { coder?: string; reviewer?: string };
 }
 
 export interface StartPayload {
@@ -56,17 +60,7 @@ export interface Task extends StartPayload {
   mainBranch: string;
   /** HEAD at start. */
   baseSha: string;
-  /** `PROTOCOL_VERSION` of the plugin that started the task. Absent on tasks started before it was written. */
-  protocol?: number;
-  /**
-   * Only in the entry of an old merge request (written while they existed): it keeps its old limits (invariant 7), no
-   * approve and no retry, from its own session too; it can only be removed.
-   */
-  kind?: "merge_request";
 }
-
-/** The version of the entry protocol, written into every new `factory-task` entry. */
-export const PROTOCOL_VERSION = 2;
 
 export interface RoundData {
   round: number;
@@ -103,26 +97,8 @@ export interface MinorFinding {
   task?: string;
 }
 
-/** The minor findings of a review's `findings` as stored; malformed entries of old records are skipped. */
-export function minorFindings(round: number, findings: unknown): MinorFinding[] {
-  if (!Array.isArray(findings)) return [];
-  const minors: MinorFinding[] = [];
-  for (const raw of findings) {
-    if (typeof raw !== "object" || raw === null) continue;
-    const finding = raw as Record<string, unknown>;
-    if (finding.severity !== "minor" || typeof finding.file !== "string" || typeof finding.text !== "string") continue;
-    const line = typeof finding.line === "number" ? finding.line : null;
-    minors.push({ round, file: finding.file, line, text: finding.text });
-  }
-  return minors;
-}
-
-export interface ReviewUsage {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cost: number;
+export function minorFindings(round: number, findings: readonly Finding[]): MinorFinding[] {
+  return findings.filter((finding) => finding.severity === "minor").map(({ file, line, text }) => ({ round, file, line, text }));
 }
 
 export interface ReviewData {
@@ -132,7 +108,7 @@ export interface ReviewData {
   findings: Finding[];
   model: string | null;
   sessionFile: string | null;
-  usage: ReviewUsage;
+  usage: Usage;
   wallMs: number;
 }
 
@@ -150,14 +126,6 @@ export interface MergeData {
 export interface MergeIntentData {
   commit: string;
   before: string;
-  /** The message of the merge commit. Absent on entries written before it existed. */
-  message?: CommitMessage;
-}
-
-/** A task the coder started with `factory_new_task` from a follow-up of this one. */
-export interface SpawnData {
-  id: string;
-  title: string;
 }
 
 /** What the coder asked the supervisor with `factory_ask_supervisor`. */
@@ -182,10 +150,18 @@ export interface Snapshot {
    */
   runFirstRound: number;
   reason: string;
+  /** The timestamp of the last `factory-state` entry, null before one. */
+  at: string | null;
   /** Written by a merge that has not recorded its `factory-merge` entry yet. */
   mergeIntent: MergeIntentData | null;
-  /** The error of the last merge, when it failed. */
-  mergeError: string | null;
+  /** Why the current round failed: its failed gate (`<argv> (exit N)` and output tail) or failed merge; a new round clears it. */
+  failure: string | null;
+  /** The last review, null before one. */
+  review: Pick<ReviewData, "round" | "status" | "approved" | "findings"> | null;
+  /** The minor findings of every review, oldest first. */
+  minors: MinorFinding[];
+  /** The `flaky` names of the gate records, in order, each once. */
+  flaky: string[];
   /** The commit the last successful merge landed for the task (`MergeData.commit`). */
   mergedCommit: string | null;
   /** The coder's commit message for the next merge (`factory-commit-message`), null when the task title is used; a successful merge clears it. */
@@ -212,9 +188,7 @@ export interface EntryData {
   "factory-merge": MergeData;
   "factory-state": StateData;
   "factory-commit-message": CommitMessage;
-  "factory-spawn": SpawnData;
   "factory-question": QuestionData;
-  "factory-feedback": FeedbackEntry;
 }
 
 export type EntryType = keyof EntryData;
@@ -247,51 +221,51 @@ export type Draft = EntryDraft | FeedbackDraft | CommitAskDraft;
 
 const RUN_TRIGGERS: readonly Trigger[] = ["start", "message", "retry"];
 
-type Reducer<K extends EntryType> = (snapshot: Snapshot | undefined, data: EntryData[K]) => Snapshot | undefined;
+type Reducer<K extends EntryType> = (snapshot: Snapshot | undefined, data: EntryData[K], at: string) => Snapshot | undefined;
+
+/** A failed gate as `<argv> (exit N)` and its output tail; null for a passed one. */
+function failedGateText(gate: GateData): string | null {
+  if (gate.exitCode === 0 && !gate.killed) return null;
+  const tail = gate.outputTail.trimEnd();
+  return `${gate.argv.join(" ")} (${gate.killed ? "killed" : `exit ${String(gate.exitCode)}`})${tail === "" ? "" : `\n${tail}`}`;
+}
 
 const REDUCERS: { [K in EntryType]: Reducer<K> } = {
-  "factory-task": (_snapshot, task) => ({ task, state: "running", round: 0, runFirstRound: 1, reason: "", mergeIntent: null, mergeError: null, mergedCommit: null, commitMessage: null }),
+  "factory-task": (_snapshot, task) => ({ task, state: "running", round: 0, runFirstRound: 1, reason: "", at: null, mergeIntent: null, failure: null, review: null, minors: [], flaky: [], mergedCommit: null, commitMessage: null }),
   "factory-round": (snapshot, { round, trigger }) => {
     if (!snapshot) return undefined;
     const opensRun = RUN_TRIGGERS.includes(trigger) || (trigger === "conflict" && snapshot.state !== "running" && snapshot.state !== "merging");
-    return { ...snapshot, round, runFirstRound: opensRun ? round : snapshot.runFirstRound };
+    return { ...snapshot, round, runFirstRound: opensRun ? round : snapshot.runFirstRound, failure: null };
   },
-  "factory-gate": (snapshot) => snapshot,
-  "factory-review": (snapshot) => snapshot,
+  "factory-gate": (snapshot, gate) =>
+    snapshot && { ...snapshot, failure: failedGateText(gate) ?? snapshot.failure, flaky: [...new Set([...snapshot.flaky, ...(gate.flaky ?? [])])] },
+  "factory-review": (snapshot, { round, status, approved, findings }) =>
+    snapshot && { ...snapshot, review: { round, status, approved, findings }, minors: [...snapshot.minors, ...minorFindings(round, findings)] },
   "factory-merge-intent": (snapshot, mergeIntent) => snapshot && { ...snapshot, mergeIntent },
   "factory-merge": (snapshot, { ok, error, commit }) =>
-    snapshot && {
-      ...snapshot,
-      mergeIntent: null,
-      mergeError: ok ? null : error,
-      mergedCommit: ok && commit ? commit : snapshot.mergedCommit,
-      // A message is the merge's own: a follow-up on the merged task gets asked for a new one.
-      commitMessage: ok ? null : snapshot.commitMessage,
-    },
-  "factory-state": (snapshot, { state, reason }) =>
-    snapshot && { ...snapshot, state, reason, mergeIntent: null, question: state === "waiting_answer" ? snapshot.question : undefined },
+    snapshot && { ...snapshot, mergeIntent: null, failure: ok ? null : (snapshot.failure ?? error), mergedCommit: ok && commit ? commit : snapshot.mergedCommit },
+  "factory-state": (snapshot, { state, round, reason }, at) =>
+    snapshot && { ...snapshot, state, round, reason, at, mergeIntent: null, question: state === "waiting_answer" ? snapshot.question : undefined },
   "factory-commit-message": (snapshot, commitMessage) => snapshot && { ...snapshot, commitMessage },
-  "factory-spawn": (snapshot) => snapshot,
   "factory-question": (snapshot, { text }) => snapshot && { ...snapshot, question: text },
-  "factory-feedback": (snapshot) => snapshot,
 };
 
 export function isEntryType(value: string): value is EntryType {
   return Object.hasOwn(REDUCERS, value);
 }
 
-export function applyEntry<K extends EntryType>(snapshot: Snapshot | undefined, customType: K, data: EntryData[K]): Snapshot | undefined {
+export function applyEntry<K extends EntryType>(snapshot: Snapshot | undefined, customType: K, data: EntryData[K], at = new Date().toISOString()): Snapshot | undefined {
   const reduce: Reducer<K> = REDUCERS[customType];
-  return reduce(snapshot, data);
+  return reduce(snapshot, data, at);
 }
 
 /** The task of a session branch, or undefined when the branch holds no `factory-task` entry. Unknown `factory-*` entries are skipped. */
-export function rebuild(entries: Iterable<{ type: string }>): Snapshot | undefined {
+export function rebuild(entries: Iterable<{ type?: unknown }>): Snapshot | undefined {
   let snapshot: Snapshot | undefined;
   for (const entry of entries) {
     if (entry.type !== "custom") continue;
-    const { customType, data } = entry as { type: string; customType?: unknown; data?: unknown };
-    if (typeof customType === "string" && isEntryType(customType)) snapshot = applyEntry(snapshot, customType, data as EntryData[EntryType]);
+    const { customType, data, timestamp } = entry as { customType?: unknown; data?: unknown; timestamp?: string };
+    if (typeof customType === "string" && isEntryType(customType)) snapshot = applyEntry(snapshot, customType, data as EntryData[EntryType], timestamp ?? "");
   }
   return snapshot;
 }
@@ -341,11 +315,6 @@ export function followUpMessages(entries: Iterable<{ type: string }>): string[] 
 
 export function roundsUsed(snapshot: Snapshot): number {
   return snapshot.round - snapshot.runFirstRound + 1;
-}
-
-/** A run is active only inside the process that started it, so a task loaded as `running` or `merging` was interrupted. */
-export function wasInterrupted(snapshot: Snapshot): boolean {
-  return snapshot.state === "running" || snapshot.state === "merging";
 }
 
 export function customDraft<K extends EntryType>(customType: K, data: EntryData[K]): CustomEntry<K> {
@@ -410,100 +379,24 @@ export function conflictFeedback(round: number, branch: string, files: string[],
 
 /** The next round's feedback: the blocker and major findings only, minor ones never reach the coder as a round. */
 export function reviewFeedback(round: number, findings: Finding[]): string {
-  const lines = findings
-    .filter((finding) => finding.severity !== "minor")
-    .map((finding) => `- [${finding.severity}] ${finding.file}${finding.line === null ? "" : `:${finding.line}`}: ${finding.text}`);
-  return `Round ${round}: the review found problems. Fix every blocker and major finding, then stop.\n\n${lines.join("\n")}`;
+  return `Round ${round}: the review found problems. Fix every blocker and major finding, then stop.\n\n${rejectingLines(findings)}`;
 }
 
-/** The highest `maxRounds` a task may run with. */
-export const MAX_ROUNDS_LIMIT = 20;
+/** The blocker and major findings, one line each. */
+export function rejectingLines(findings: readonly Finding[]): string {
+  return findings
+    .filter((finding) => finding.severity !== "minor")
+    .map((finding) => `- [${finding.severity}] ${finding.file}${finding.line === null ? "" : `:${finding.line}`}: ${finding.text}`)
+    .join("\n");
+}
+
 /** The roles a task runs a model for. */
 export const ROLES = ["coder", "reviewer"] as const;
-/** The two models a project names: `big` is the alias of `coder`, `small` for a wave's easy tasks. */
-export const MODEL_SIZES = ["small", "big"] as const;
-export type ModelSize = (typeof MODEL_SIZES)[number];
-/** Every name `Settings.models` reads: the sizes and the roles. */
-const MODEL_NAMES = [...MODEL_SIZES, ...ROLES] as const;
 
-/** A project's models as stored or passed (`settings.set`, overrides): `coder` and `big` equal, both or neither. */
-export type ModelChoice = Settings["models"];
-
-/**
- * `big` and `coder` made equal (`coder` wins when both are given and differ: an old client edits only `coder`);
- * `small` and `reviewer` as given. Nothing else is implied: no reviewer from `big`.
- */
-export function normalizeModels(models: Settings["models"]): ModelChoice {
-  const coder = models.coder ?? models.big;
-  const choice: ModelChoice = {};
-  if (models.small !== undefined) choice.small = models.small;
-  if (coder !== undefined) {
-    choice.coder = coder;
-    choice.big = coder;
-  }
-  if (models.reviewer !== undefined) choice.reviewer = models.reviewer;
-  return choice;
-}
-
-/**
- * The settings keys of `raw`, checked, unknown keys dropped; an absent key stays absent. Shared by the `/factory start`
- * payload and the stored settings (`settings.ts`). Throws an `Error` naming the first wrong key after `prefix`.
- */
-export function parseSettingsFields(raw: Record<string, unknown>, prefix = ""): Partial<Settings> {
-  const fields: Partial<Settings> = {};
-  const { branch, merge, maxRounds, review, models } = raw;
-  if (branch !== undefined) {
-    if (typeof branch !== "string" || branch.trim() === "") throw new Error(`${prefix}branch must be a non-empty string`);
-    fields.branch = branch;
-  }
-  if (merge !== undefined) {
-    if (merge !== "auto" && merge !== "review") throw new Error(`${prefix}merge must be "auto" or "review"`);
-    fields.merge = merge;
-  }
-  if (maxRounds !== undefined) {
-    if (typeof maxRounds !== "number" || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > MAX_ROUNDS_LIMIT) {
-      throw new Error(`${prefix}maxRounds must be an integer from 1 to ${MAX_ROUNDS_LIMIT}`);
-    }
-    fields.maxRounds = maxRounds;
-  }
-  if (review !== undefined) {
-    if (typeof review !== "boolean") throw new Error(`${prefix}review must be a boolean`);
-    fields.review = review;
-  }
-  if (models !== undefined) {
-    if (!isRecord(models)) throw new Error(`${prefix}models must be an object`);
-    const named: Settings["models"] = {};
-    for (const name of MODEL_NAMES) {
-      const model = models[name];
-      if (model === undefined) continue;
-      if (typeof model !== "string" || !model.includes("/")) throw new Error(`${prefix}models.${name} must be "provider/model"`);
-      named[name] = model;
-    }
-    fields.models = named;
-  }
-  return fields;
-}
-
-/** The payload of `/factory start <json>`. Throws an `Error` that names the first wrong field. */
+/** The payload of `/factory start <json>`, which `launchTask` wrote from resolved settings. Throws on a wrong one. */
 export function parseStartPayload(text: string): StartPayload {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    throw new Error("payload is not JSON");
-  }
-  if (!isRecord(raw)) throw new Error("payload is not an object");
+  const raw = JSON.parse(text) as Partial<StartPayload> | null;
+  if (typeof raw?.request !== "string" || raw.request.trim() === "" || typeof raw.title !== "string" || raw.title.trim() === "" || !raw.settings) throw new Error("the payload needs a request, a title and settings");
   const { request, title, settings, prefix } = raw;
-  if (prefix !== undefined && typeof prefix !== "string") throw new Error("prefix must be a string");
-  if (typeof request !== "string" || request.trim() === "") throw new Error("request must be a non-empty string");
-  if (typeof title !== "string" || title.trim() === "") throw new Error("title must be a non-empty string");
-  if (!isRecord(settings)) throw new Error("settings must be an object");
-  const { branch, merge, maxRounds, review, models } = parseSettingsFields(settings, "settings.");
-  // Every key is required here: the absent ones get the message of a wrong one.
-  if (branch === undefined) throw new Error("settings.branch must be a non-empty string");
-  if (merge === undefined) throw new Error('settings.merge must be "auto" or "review"');
-  if (maxRounds === undefined) throw new Error(`settings.maxRounds must be an integer from 1 to ${MAX_ROUNDS_LIMIT}`);
-  if (review === undefined) throw new Error("settings.review must be a boolean");
-  if (models === undefined) throw new Error("settings.models must be an object");
-  return { request, title, settings: { branch, merge, maxRounds, review, models }, ...(typeof prefix === "string" && prefix.trim() !== "" ? { prefix } : {}) };
+  return { request, title, settings, ...(prefix?.trim() ? { prefix } : {}) };
 }

@@ -69,7 +69,7 @@ def sum_counts(waves: list[dict]) -> dict:
 
 
 def styled(state: str | None) -> Text:
-    state = state or "new"
+    state = state or "starting"
     return Text(state, style=STAGE_STYLE.get(state, "cyan"))
 
 
@@ -114,7 +114,8 @@ WAVE_SHAPE = {
     "id": str, "repo": str, "tag": str, "title": str, "stage": str, "createdAt": str, "tasks": list
 }  # fmt: skip
 # A queued wave has no branch yet (null): it is cut when the wave starts.
-TASK_SHAPE = {"id": str, "repo": str, "title": str, "state": str, "createdAt": str}
+# A task has no state (null) until its first state entry: shown as starting.
+TASK_SHAPE = {"id": str, "repo": str, "title": str, "state": (str, type(None)), "createdAt": str}
 
 
 def shape_problem(record: Any, shape: dict[str, Any]) -> str | None:
@@ -123,7 +124,7 @@ def shape_problem(record: Any, shape: dict[str, Any]) -> str | None:
         return "not an object"
     for key, kind in shape.items():
         if not isinstance(record.get(key), kind) or isinstance(record.get(key), bool):
-            return f"{key} is not {kind.__name__ if isinstance(kind, type) else 'a number'}"
+            return f"{key} is not {kind.__name__ if isinstance(kind, type) else 'the expected type'}"
     return None
 
 
@@ -469,12 +470,6 @@ class FactoryView(App[None]):
             merge = wave["merge"]
             text.append("\nmerge\n", style="bold")
             text.append(f"  {merge['from'][:10]}..{merge['to'][:10]}  {merge['at']}\n")
-        remote = wave.get("remote")
-        if remote and (remote.get("url") or remote.get("error")):
-            text.append("\nremote\n", style="bold")
-            text.append(f"  {remote.get('url') or ''}\n")
-            if remote.get("error"):
-                text.append(f"  {remote['error']}\n", style="red")
         return text
 
     @staticmethod

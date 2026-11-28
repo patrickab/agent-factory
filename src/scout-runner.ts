@@ -1,17 +1,12 @@
 /**
  * `bun scout-runner.ts <scout dir>`: one scout's detached runner (`scouts.ts` spawns it).
- *
- * - Queues while `SCOUT_LIMIT` scouts of its caller run (the caller's `queue.lock` around the count and the `running`
- *   event), then runs `pi -p` in the caller's working directory on the scout's model with the tools `read`, `grep`,
- *   `find`, `ls` and `map_write` (the extension `pi/scout-map-write.ts`), no other extension, skill or template
+ * - Queues while `SCOUT_LIMIT` scouts of its caller run, then runs `pi -p` with read-only tools and `map_write`, no
+ *   other extension, skill or template
  * - Every assistant message appends the running usage totals: a killed scout's cost stays in its record
- * - The last assistant text is the report (`report.md`), the scout `done`; a failed child `failed`. A cancel (the
- *   `cancelled` event, then SIGTERM to the runner's group, the child in it) ends it without a report
  * - Imports only Bun, `node:` and plain plugin modules
  */
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { runCommand } from "./run.ts";
 import { SCOUT_COMMIT_ENV, SCOUT_DIR_ENV, SCOUT_STORE_ENV } from "./scout-map.ts";
 import {
   appendScoutEvent,
@@ -21,15 +16,16 @@ import {
   runningScouts,
   SCOUT_EXTENSION_PATH,
   SCOUT_LIMIT,
+  scoutLockPath,
   scoutsDir,
   ScoutOutput,
   type ScoutDeclaration,
 } from "./scouts.ts";
-import { lockFile, TaskBusyError, unlockFile } from "./tasks.ts";
+import { unlockFile, withLock } from "./lock.ts";
 import { errorText } from "./util.ts";
-import { memoryStoreRoot } from "./archive.ts";
+import { ls, memoryStoreRoot } from "./store.ts";
 
-const POLL_MS = Number(process.env.FACTORY_SCOUT_POLL_MS) || 1_000;
+const POLL_MS = 1_000;
 
 /** The scout's brief: the concern, the map, the rules and the report's shape. */
 export function scoutPrompt(declaration: ScoutDeclaration, listing: string, mapDir: string): string {
@@ -81,21 +77,13 @@ async function finalState(dir: string): Promise<boolean> {
 async function takeSlot(dir: string, declaration: ScoutDeclaration): Promise<boolean> {
   const lock = join(scoutsDir(), callerKey(declaration.caller), "queue.lock");
   for (;;) {
-    if (await finalState(dir)) return false;
-    let locked = false;
-    try {
-      await lockFile(lock, "the scout queue is busy");
-      locked = true;
-      if ((await runningScouts(declaration.caller)) < SCOUT_LIMIT) {
-        if (await finalState(dir)) return false;
-        await appendScoutEvent(dir, { kind: "state", state: "running" });
-        return true;
-      }
-    } catch (error) {
-      if (!(error instanceof TaskBusyError)) throw error;
-    } finally {
-      if (locked) await unlockFile(lock);
-    }
+    const taken = await withLock(lock, "the scout queue is busy", Infinity, async () => {
+      if (await finalState(dir)) return false;
+      if ((await runningScouts(declaration.caller)) >= SCOUT_LIMIT) return undefined;
+      await appendScoutEvent(dir, { kind: "state", state: "running" });
+      return true;
+    });
+    if (taken !== undefined) return taken;
     await Bun.sleep(POLL_MS);
   }
 }
@@ -111,10 +99,10 @@ async function main(dir: string): Promise<void> {
   });
   if (!(await takeSlot(dir, declaration))) return;
 
-  const listing = await runCommand(["memory-store", "ls", declaration.store, "map"], { cwd: declaration.cwd, maxStdoutChars: 200_000 });
+  const listing = await ls(declaration.store, "map", declaration.cwd);
   const mapDir = join(memoryStoreRoot(), declaration.store, "map");
   const promptFile = join(dir, "prompt.md");
-  await writeFile(promptFile, scoutPrompt(declaration, listing.exitCode === 0 ? listing.stdout : "", mapDir));
+  await writeFile(promptFile, scoutPrompt(declaration, listing?.text ?? "", mapDir));
   const argv = ["pi", "--mode", "json", "-p", "--tools", "read,grep,find,ls,map_write", "-ne", "-e", SCOUT_EXTENSION_PATH];
   argv.push("--no-skills", "--no-prompt-templates", "--no-themes", "--session-dir", join(dir, "session"));
   if (declaration.model !== null) argv.push("--model", declaration.model);
@@ -152,12 +140,14 @@ async function main(dir: string): Promise<void> {
 
 if (import.meta.main) {
   const dir = process.argv[2];
-  try {
-    await main(dir);
-  } catch (error) {
-    console.error(`scout runner: ${errorText(error)}`);
-    await appendScoutEvent(dir, { kind: "state", state: "failed", error: errorText(error) }).catch(() => undefined);
-    process.exit(1);
-  }
-  process.exit(0);
+  const failed = await main(dir).then(
+    () => false,
+    async (error: unknown) => {
+      console.error(`scout runner: ${errorText(error)}`);
+      await appendScoutEvent(dir, { kind: "state", state: "failed", error: errorText(error) }).catch(() => undefined);
+      return true;
+    },
+  );
+  await unlockFile(scoutLockPath(dir));
+  process.exit(failed ? 1 : 0);
 }

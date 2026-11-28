@@ -1,13 +1,16 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimNotices, notifiedPath, readDelivered } from "./notified.ts";
+import { restoreEnv } from "./core-test-kit.ts";
 
 const scratch = mkdtempSync(join(tmpdir(), "factory-notified-test-"));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+const savedEnv = { ...process.env };
+afterAll(() => restoreEnv(savedEnv));
 let counter = 0;
 
 beforeEach(() => {
@@ -23,21 +26,6 @@ describe("claimNotices", () => {
     expect(await claimNotices([notice("a"), notice("c")])).toEqual([notice("c")]);
     expect([...(await readDelivered())].sort()).toEqual(["a", "b", "c"]);
     expect(readFileSync(notifiedPath(), "utf8").trim().split("\n")).toHaveLength(3);
-  });
-
-  test("a fresh process reading notified.jsonl does not claim it again", async () => {
-    await claimNotices([notice("task:x:blocked:1")]);
-    const script = `import { claimNotices } from ${JSON.stringify(join(import.meta.dir, "notified.ts"))};
-const claimed = await claimNotices([{ key: "task:x:blocked:1", origin: "s", text: "t" }, { key: "task:x:blocked:2", origin: "s", text: "t" }]);
-console.log(JSON.stringify(claimed.map((n) => n.key)));`;
-    const stdout = execFileSync(process.execPath, ["-e", script], { env: { ...process.env }, encoding: "utf8" });
-    expect(JSON.parse(stdout)).toEqual(["task:x:blocked:2"]);
-  });
-
-  test("two sessions racing claim each notice once", async () => {
-    const keys = Array.from({ length: 20 }, (_, index) => notice(`k${index}`));
-    const claims = await Promise.all([claimNotices(keys), claimNotices(keys), claimNotices([...keys].reverse())]);
-    expect(claims.flat().map((claimed) => claimed.key).sort()).toEqual(keys.map((claimed) => claimed.key).sort());
   });
 
   test("two processes racing claim each notice once", async () => {

@@ -1,43 +1,111 @@
 /**
  * Per-repository task settings the plugin owns, so a task can start without a caller supplying them.
- *
- * - Provides `factoryHome` (the plugin's data directory under Pi's agent dir, found without Pi: `PI_CODING_AGENT_DIR`,
- *   else `~/.pi/agent`, as Pi's `getAgentDir` does)
- * - Provides the settings of a repository, one YAML file per repository named after its URI-encoded path, read and
- *   written (`loadSettings`, `saveSettings`) with the checks a `/factory start` payload has (`parseSettingsFields`)
- *   plus `preview`, a boolean the plugin stores for its clients and never acts on, and `remote`, whether a wave of the
- *   repository is shown on its forge (`remote.ts`; `waves.start` stores it resolved in the wave's declaration), and
- *   `squash`, whether a wave of the repository lands as one commit, its task commits kept under a ref (`merge.ts`;
- *   stored in the wave's declaration only when on). The
- *   file is the repository's registration (`registeredRepos`, `unregisterRepo`)
- * - Provides the default models, `defaults.yaml` at the package root (`loadDefaults`, `defaultModels`): a broken or
- *   missing file throws naming its path. Only a wave's task that asks for `small` where nothing names one reads it
- *   (`core.ts`); no setting resolves over it, so nothing stored still means Pi's session model
- * - Provides `resolveSettings`: defaults < stored < overrides, models merged per name: `coder` and `reviewer` as
- *   before, `big` the alias of `coder`, `small` added
+ * - `SETTINGS` is the one table of the settings: schema, default and the scopes it may be given in (`repo` stored,
+ *   `task` and `wave` overrides). `preview` is stored for clients and never acted on
+ * - One YAML file per repository, named after its URI-encoded path, is also its registration (`registeredRepos`)
+ * - `defaults.yaml` is read only for a wave task's `small` model where nothing names one; no setting resolves over it,
+ *   so nothing stored still means Pi's session model
  */
 import { readFileSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { MODEL_SIZES, normalizeModels, parseSettingsFields, type ModelChoice, type ModelSize, type Settings } from "./state.ts";
-import { errorText, isRecord } from "./util.ts";
+import { join } from "node:path";
+import type { Schema } from "./feature.ts";
+import type { Settings } from "./state.ts";
+import { errorText, FactoryError, ifMissing, isRecord, writeAtomic } from "./util.ts";
 
-/** `Settings` as stored or passed: every key optional, `branch` absent = the repository's default branch; `models` normalized (`normalizeModels`). */
-export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: ModelChoice; preview?: boolean; remote?: boolean; squash?: boolean };
+export const MAX_ROUNDS_LIMIT = 20;
+/** The two models a project names: `big` for coders, `small` for a wave's easy tasks. */
+export const MODEL_SIZES = ["small", "big"] as const;
+export type ModelSize = (typeof MODEL_SIZES)[number];
 
-/** The task's `coder` (with its alias `big`) and `reviewer`, and the project's `small`, each only when set: an absent role runs with Pi's session model. */
-export type ResolvedModels = Settings["models"];
+export type Scope = "repo" | "task" | "wave";
+const MODEL: Schema = { type: "string", pattern: "^[^/\\s]+/\\S+$", description: "provider/model; absent: Pi's session model" };
+const ALL: Scope[] = ["repo", "task", "wave"];
 
-/** The settings a task gets. */
-export type TaskSettings = Settings;
+/** Every setting, once: its schema, its default (none: resolved elsewhere), the scopes that take it. */
+export const SETTINGS: Record<string, { schema: Schema; default?: unknown; scopes: Scope[] }> = {
+  branch: { schema: { type: "string", minLength: 1, description: "The branch the task starts from and merges into" }, scopes: ALL },
+  merge: { schema: { type: "string", enum: ["auto", "review"], description: "auto: merge a passed round. review: wait for approve" }, default: "auto", scopes: ALL },
+  maxRounds: { schema: { type: "integer", minimum: 1, maximum: MAX_ROUNDS_LIMIT }, default: 2, scopes: ALL },
+  review: { schema: { type: "boolean", description: "Run the reviewer on every round" }, default: false, scopes: ALL },
+  models: {
+    schema: { type: "object", properties: { big: MODEL, small: { ...MODEL, description: "provider/model for a wave's easy tasks (model small)" }, reviewer: MODEL } },
+    default: {},
+    scopes: ALL,
+  },
+  preview: { schema: { type: "boolean" }, default: false, scopes: ["repo"] },
+  squash: {
+    schema: { type: "boolean", description: "Land a wave as one commit (its title, its commits' subjects), its task commits kept under refs/factory/waves/<tag>-<id>" },
+    default: false,
+    scopes: ["repo", "wave"],
+  },
+  extensions: {
+    schema: {
+      type: "array",
+      items: { type: "string", minLength: 1 },
+      description:
+        "Extension sources the coder's Pi loads, as Pi's -e takes them (npm:pi-lens, a path, builtin:codemode). Absent: every user extension. Set, an empty list too: Pi starts with the factory's plugin and these only, and without skills, prompt templates and themes; the built-in extensions (mcp, llama.cpp, codemode, tool-search) are off unless listed as builtin:<name>",
+    },
+    scopes: ["repo"],
+  },
+};
 
-/** The settings a repository's task gets, with `preview` (absent = `false`), which only clients read, `remote` and `squash` (absent = `false`). */
-export type ResolvedSettings = TaskSettings & { preview: boolean; remote: boolean; squash: boolean };
+export type SizeModels = Partial<Record<ModelSize | "reviewer", string>>;
+/** Settings as stored or given: every key optional, `branch` absent = the repository's default branch. */
+export type StoredSettings = Partial<Omit<Settings, "models">> & { models?: SizeModels; preview?: boolean; squash?: boolean; extensions?: string[] };
+export type ResolvedSettings = Required<Omit<StoredSettings, "extensions">> & Pick<StoredSettings, "extensions">;
 
-export const DEFAULT_SETTINGS: Readonly<Omit<ResolvedSettings, "branch" | "models">> = { merge: "auto", maxRounds: 2, review: false, preview: false, remote: false, squash: false };
+/** The table's schemas of `scope`, for an action's parameters. */
+export function schemaOf(scope: Scope): Record<string, Schema> {
+  return Object.fromEntries(Object.entries(SETTINGS).flatMap(([key, row]) => (row.scopes.includes(scope) ? [[key, row.schema]] : [])));
+}
 
-/** `defaults.yaml` at the root of the package. */
+/**
+ * `value` checked against `schema` (type, integer bounds, enum, pattern, `minLength`, items, an object's `properties`);
+ * an object with `properties` loses unknown and absent keys. Throws `invalid` as `<name> must be ...`.
+ */
+export function checkValue(schema: Schema, value: unknown, name: string): unknown {
+  const fail = (what: string): never => {
+    throw new FactoryError("invalid", `${name} must be ${what}`);
+  };
+  if (schema.type === "boolean" && typeof value !== "boolean") fail("a boolean");
+  if (schema.type === "integer") {
+    const { minimum: min, maximum: max } = schema as { minimum?: number; maximum?: number };
+    if (typeof value !== "number" || !Number.isInteger(value) || (min !== undefined && value < min) || (max !== undefined && value > max)) {
+      fail(`an integer${min !== undefined && max !== undefined ? ` from ${min} to ${max}` : min !== undefined ? ` of at least ${min}` : max !== undefined ? ` of at most ${max}` : ""}`);
+    }
+  }
+  if (schema.type === "string") {
+    const allowed = schema.enum as string[] | undefined;
+    if (allowed !== undefined && !allowed.includes(value as string)) fail(allowed.map((one) => JSON.stringify(one)).join(" or "));
+    if (typeof value !== "string") fail("a string");
+    if (schema.minLength === 1 && (value as string).trim() === "") fail("a non-empty string");
+    // The table's only pattern is a model's.
+    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value as string)) fail('"provider/model"');
+  }
+  if (schema.type === "array") {
+    if (!Array.isArray(value)) fail("an array");
+    return isRecord(schema.items) ? (value as unknown[]).map((item, index) => checkValue(schema.items as Schema, item, `${name}[${index}]`)) : value;
+  }
+  if (schema.type !== "object") return value;
+  if (!isRecord(value)) return fail("an object");
+  if (schema.properties === undefined) return value;
+  const checked: Record<string, unknown> = {};
+  for (const [key, inner] of Object.entries(schema.properties as Record<string, Schema>)) {
+    if (value[key] !== undefined) checked[key] = checkValue(inner, value[key], `${name}.${key}`);
+  }
+  return checked;
+}
+
+/** The keys of `raw` that `scope` takes, checked; others dropped. Nothing is `{}`. `prefix` goes before a wrong key's name. */
+export function checkSettings(raw: unknown, scope: Scope, prefix = ""): StoredSettings {
+  if (raw === null || raw === undefined) return {};
+  const keys = Object.keys(SETTINGS).filter((key) => SETTINGS[key].scopes.includes(scope));
+  const schema = { type: "object", properties: Object.fromEntries(keys.map((key) => [key, SETTINGS[key].schema])) };
+  return checkValue(schema, raw, prefix === "" ? "settings" : prefix.slice(0, -1)) as StoredSettings;
+}
+
 export const DEFAULTS_PATH = join(import.meta.dirname, "..", "defaults.yaml");
 
 /** The project models every repository's settings resolve over. */
@@ -50,9 +118,7 @@ export function loadDefaults(path = DEFAULTS_PATH): DefaultModels {
     if (!isRecord(raw) || !isRecord(raw.models)) throw new Error("models must be a mapping of small and big");
     const models: Partial<DefaultModels> = {};
     for (const size of MODEL_SIZES) {
-      const model = raw.models[size];
-      if (typeof model !== "string" || !/^[^/\s]+\/\S+$/.test(model)) throw new Error(`models.${size} must be "provider/model"`);
-      models[size] = model;
+      models[size] = checkValue(MODEL, raw.models[size], `models.${size}`) as string;
     }
     return models as DefaultModels;
   } catch (error) {
@@ -89,58 +155,20 @@ function settingsPath(repo: string): string {
   return join(reposDir(), `${encodeURIComponent(repo)}.yaml`);
 }
 
-/** Checks a stored settings value, drops unknown keys. Throws an `Error` naming the first wrong key. */
-export function parseStoredSettings(raw: unknown): StoredSettings {
-  if (raw === null || raw === undefined) return {};
-  if (!isRecord(raw)) throw new Error("settings must be a mapping");
-  const { models, ...fields } = parseSettingsFields(raw);
-  const settings: StoredSettings = models === undefined ? fields : { ...fields, models: normalizeModels(models) };
-  for (const key of ["preview", "remote", "squash"] as const) {
-    if (raw[key] === undefined) continue;
-    if (typeof raw[key] !== "boolean") throw new Error(`${key} must be a boolean`);
-    settings[key] = raw[key];
-  }
-  return settings;
-}
-
 /** The repositories that have a settings file, sorted. */
 export async function registeredRepos(): Promise<string[]> {
-  let names: string[];
-  try {
-    names = await readdir(reposDir());
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  return names
+  return (await ifMissing(readdir(reposDir()), []))
     .filter((name) => name.endsWith(".yaml"))
     .map((name) => decodeURIComponent(name.slice(0, -".yaml".length)))
     .sort();
 }
 
-/** Removes the repository's settings file; `false` when it had none. */
-export async function unregisterRepo(repo: string): Promise<boolean> {
-  try {
-    await rm(settingsPath(repo));
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-}
-
 /** A missing file is `{}`. An invalid file throws an `Error` naming the file and the wrong key. */
 export async function loadSettings(repo: string): Promise<StoredSettings> {
   const path = settingsPath(repo);
-  let text: string;
+  const text = await ifMissing(readFile(path, "utf8"), "");
   try {
-    text = await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw error;
-  }
-  try {
-    return parseStoredSettings(Bun.YAML.parse(text));
+    return checkSettings(Bun.YAML.parse(text), "repo");
   } catch (error) {
     throw new Error(`${path}: ${errorText(error)}`);
   }
@@ -151,70 +179,27 @@ export async function saveSettings(repo: string, settings: StoredSettings): Prom
   const path = settingsPath(repo);
   let checked: StoredSettings;
   try {
-    checked = parseStoredSettings(settings);
+    checked = checkSettings(settings, "repo");
   } catch (error) {
     throw new Error(`${path}: ${errorText(error)}`);
   }
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, `${Bun.YAML.stringify(checked, null, 2).trimEnd()}\n`, "utf8");
-    await rename(temp, path);
-  } catch (error) {
-    await rm(temp, { force: true });
-    throw error;
-  }
+  await writeAtomic(path, `${Bun.YAML.stringify(checked, null, 2).trimEnd()}\n`);
 }
 
-/** `resolveSettings` with the stored `preview`, `remote` and `squash`. */
-export function resolveRepoSettings(stored: StoredSettings, overrides: StoredSettings, branch: string): ResolvedSettings {
-  return {
-    ...resolveSettings(stored, overrides, branch),
-    preview: stored.preview ?? DEFAULT_SETTINGS.preview,
-    remote: overrides.remote ?? stored.remote ?? DEFAULT_SETTINGS.remote,
-    squash: overrides.squash ?? stored.squash ?? DEFAULT_SETTINGS.squash,
-  };
-}
-
-/**
- * Defaults < stored < overrides; models merged per name (`resolveModels`). `branch` is used when neither sets one.
- * `size` `small` (a wave's easy task) makes the coder's model `small`. Mutates nothing.
- */
-export function resolveSettings(stored: StoredSettings, overrides: StoredSettings, branch: string, size: ModelSize = "big"): TaskSettings {
-  return {
-    branch: overrides.branch ?? stored.branch ?? branch,
-    merge: overrides.merge ?? stored.merge ?? DEFAULT_SETTINGS.merge,
-    maxRounds: overrides.maxRounds ?? stored.maxRounds ?? DEFAULT_SETTINGS.maxRounds,
-    review: overrides.review ?? stored.review ?? DEFAULT_SETTINGS.review,
-    models: resolveModels([stored.models, overrides.models], size),
-  };
-}
-
-/**
- * `layers` merged per name, lowest first (`big` read as `coder`). `coder` and `reviewer` as before: each the layers'
- * own, else absent (Pi's session model); `big` = `coder`. `size` `small`: `coder` = `small` (absent when no layer names
- * one) and no `big`. A name no layer sets stays absent: `defaults.yaml` is never read here.
- */
-export function resolveModels(layers: readonly (ModelChoice | undefined)[], size: ModelSize = "big"): ResolvedModels {
-  const merged: ModelChoice = {};
-  for (const layer of layers) {
-    const normalized = normalizeModels(layer ?? {});
-    for (const name of ["small", "coder", "reviewer"] as const) {
-      const model = normalized[name];
-      if (model !== undefined) merged[name] = model;
+/** Each key: the last layer that sets it, else the table's default; `branch` when none sets one. Models merged per name. */
+export function resolveSettings(layers: readonly StoredSettings[], branch: string): ResolvedSettings {
+  const resolved: Record<string, unknown> = { branch };
+  for (const [key, row] of Object.entries(SETTINGS)) {
+    if ("default" in row) resolved[key] = structuredClone(row.default);
+    for (const layer of layers as Record<string, unknown>[]) {
+      if (layer[key] !== undefined) resolved[key] = key === "models" ? { ...(resolved.models as object), ...(layer.models as object) } : layer[key];
     }
   }
-  if (size === "big") return normalizeModels(merged);
-  const resolved: ResolvedModels = {};
-  if (merged.small !== undefined) {
-    resolved.small = merged.small;
-    resolved.coder = merged.small;
-  }
-  if (merged.reviewer !== undefined) resolved.reviewer = merged.reviewer;
-  return resolved;
+  return resolved as ResolvedSettings;
 }
 
-/** The stored form of models resolved for `big`: `coder` (= `big`), `small` and `reviewer` as set. */
-export function modelChoice(models: ResolvedModels): ModelChoice {
-  return normalizeModels({ small: models.small, coder: models.coder, reviewer: models.reviewer });
+/** The one rule from sizes to roles: the coder runs `size`'s model (`small` where none is named: `big`), the reviewer its own. */
+export function taskModels(models: SizeModels, size: ModelSize = "big"): Settings["models"] {
+  const coder = (size === "small" ? models.small : undefined) ?? models.big;
+  return { ...(coder === undefined ? {} : { coder }), ...(models.reviewer === undefined ? {} : { reviewer: models.reviewer }) };
 }

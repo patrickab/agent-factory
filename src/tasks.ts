@@ -1,24 +1,14 @@
 /**
- * The factory's own list of tasks, kept outside any Pi session.
- *
- * - Provides `TaskRecord`, one JSON file per task in `<factoryHome>/tasks/<id>.json`, written atomically
- *   (`writeTask`), read back (`listTasks`) and removed with its runner log and lock (`removeTask`). Only a file named
- *   after the task id in it, of the shape `crypto.randomUUID` makes, counts as a task
- * - Provides the task lock `<id>.lock` (`lockTask`, `handTaskLock`, `unlockTask`): whoever checks a task's state and
- *   then acts on it (spawns a runner, deletes the task) holds it, and a spawned runner holds it until it exits. The
- *   file holds `<pid> <start time>` of its holder; a holder that no longer runs (`hostLiveness`) leaves a stale lock
- *   the next `lockTask` takes over; a lock a live process holds is a `TaskBusyError`
- * - A record written before `tag`, `plan`, `wave` and `origin` existed reads with their defaults (`systemUser()`, null,
- *   null, null).
- *   Of the `kind` field of older records only `merge_request` is kept (`kind`), so such a task keeps its old limits:
- *   its branch is its source, never the task's own; no coder runs it again
+ * The factory's own list of tasks, kept outside any Pi session: one JSON file per task, `<factoryHome>/tasks/<id>.json`.
+ * - The task lock `<id>.lock` (`lock.ts`): whoever checks a task's state and then acts on it holds it, and a spawned
+ *   runner holds it until it exits
  */
-import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { dirname, join } from "node:path";
-import { hostLiveness, procStart } from "./queue.ts";
+import { join } from "node:path";
+import { lockFile } from "./lock.ts";
 import { factoryHome } from "./settings.ts";
-import { errorText, isRecord } from "./util.ts";
+import { errorText, ifMissing, writeAtomic } from "./util.ts";
 
 export interface TaskRecord {
   id: string;
@@ -42,11 +32,6 @@ export interface TaskRecord {
   /** The Pi session that started the task (a wave's task: the wave's), notified when it needs attention; null otherwise. */
   origin: string | null;
   /**
-   * Only on a record written while merge requests existed (`kind: "merge_request"`): its `branch` is the source branch
-   * it merged, which it never owned. Internal: no `TaskView` shows it.
-   */
-  kind?: "merge_request";
-  /**
    * A wave's task with contracts (`contracts.ts`): each contract's stamp (its hash and its facts' hashes) as the task
    * last saw it. Absent: no contracts.
    */
@@ -58,18 +43,6 @@ export interface TaskRecord {
 /** A contract as a task saw it: the hash of the whole and of each fact (by its path in the store). */
 export type ContractStamp = { hash: string; facts: Record<string, string> };
 
-function parseStamps(raw: unknown): Record<string, ContractStamp> {
-  const bad = () => new Error("contracts must map names to {hash, facts}");
-  if (!isRecord(raw)) throw bad();
-  const stamps: Record<string, ContractStamp> = {};
-  for (const [name, stamp] of Object.entries(raw)) {
-    if (!isRecord(stamp) || typeof stamp.hash !== "string" || !isRecord(stamp.facts) || !Object.values(stamp.facts).every((hash) => typeof hash === "string")) throw bad();
-    stamps[name] = { hash: stamp.hash, facts: { ...(stamp.facts as Record<string, string>) } };
-  }
-  return stamps;
-}
-
-const RECORD_KEYS = ["id", "repo", "worktree", "branch", "title", "sessionId", "sessionDir", "createdAt"] as const;
 /** The shape of `crypto.randomUUID()`: a task id never holds a path separator. */
 const TASK_ID = /^[0-9a-f-]{36}$/;
 const TAG = /^[A-Za-z0-9._@+-]+(\/[A-Za-z0-9._@+-]+)*$/;
@@ -110,42 +83,8 @@ export function taskLockPath(id: string): string {
   return join(tasksDir(), `${id}.lock`);
 }
 
-export function parseTaskRecord(raw: unknown, id: string): TaskRecord {
-  if (!isRecord(raw)) throw new Error("the record is not an object");
-  for (const key of RECORD_KEYS) {
-    if (typeof raw[key] !== "string" || raw[key] === "") throw new Error(`${key} must be a non-empty string`);
-  }
-  if (raw.id !== id) throw new Error(`id ${String(raw.id)} is not the file's name`);
-  // A defaulted tag is not checked: an odd user name must not hide every old task.
-  const tag = raw.tag ?? systemUser();
-  if (typeof tag !== "string" || (raw.tag != null && !isTaskTag(tag))) throw new Error(`tag ${JSON.stringify(tag)} is not segments of A-Z a-z 0-9 . _ @ + - joined by /`);
-  const plan = raw.plan ?? null;
-  if (plan !== null && (typeof plan !== "string" || plan.trim() === "")) throw new Error("plan must be a non-empty string or null");
-  const wave = raw.wave ?? null;
-  if (wave !== null && (typeof wave !== "string" || wave === "")) throw new Error("wave must be a non-empty string or null");
-  const origin = raw.origin ?? null;
-  if (origin !== null && (typeof origin !== "string" || origin === "")) throw new Error("origin must be a non-empty string or null");
-  const fields = {} as Record<(typeof RECORD_KEYS)[number], string>;
-  for (const key of RECORD_KEYS) fields[key] = raw[key] as string;
-  const contracts = raw.contracts == null ? {} : { contracts: parseStamps(raw.contracts) };
-  const notes = raw.contractNotes;
-  if (notes != null && (!Array.isArray(notes) || !notes.every((note) => typeof note === "string"))) throw new Error("contractNotes must be an array of strings");
-  const contractNotes = notes == null || notes.length === 0 ? {} : { contractNotes: [...(notes as string[])] };
-  return { ...fields, tag, plan, wave, origin, ...(raw.kind === "merge_request" ? { kind: "merge_request" as const } : {}), ...contracts, ...contractNotes };
-}
-
-/** Temp file in the same directory + rename: a reader sees the old record or the new one, never half of one. */
 export async function writeTask(record: TaskRecord): Promise<void> {
-  await mkdir(tasksDir(), { recursive: true });
-  const path = taskPath(record.id);
-  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, "utf8");
-    await rename(temp, path);
-  } catch (error) {
-    await rm(temp, { force: true });
-    throw error;
-  }
+  await writeAtomic(taskPath(record.id), `${JSON.stringify(record, null, 2)}\n`);
 }
 
 /** The record in `<id>.json`. Throws an `Error` naming the file when `id` is no task id or the file is invalid. */
@@ -153,7 +92,9 @@ export async function readTask(id: string): Promise<TaskRecord> {
   const path = taskPath(id);
   if (!TASK_ID.test(id)) throw new Error(`${path}: ${id} is not a task id`);
   try {
-    return parseTaskRecord(JSON.parse(await readFile(path, "utf8")), id);
+    const record = JSON.parse(await readFile(path, "utf8")) as TaskRecord;
+    if (record.id !== id) throw new Error(`id ${String(record.id)} is not the file's name`);
+    return record;
   } catch (error) {
     throw new Error(`${path}: ${errorText(error)}`);
   }
@@ -161,20 +102,23 @@ export async function readTask(id: string): Promise<TaskRecord> {
 
 /** Every task, oldest first; only those of `repo` when given. Files that are no valid task record are skipped. */
 export async function listTasks(repo?: string): Promise<TaskRecord[]> {
-  let names: string[];
-  try {
-    names = await readdir(tasksDir());
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
   const records: TaskRecord[] = [];
-  for (const name of names) {
+  for (const name of await ifMissing(readdir(tasksDir()), [])) {
     if (!name.endsWith(".json")) continue;
     const record = await readTask(name.slice(0, -".json".length)).catch(() => undefined);
     if (record !== undefined && (repo === undefined || record.repo === repo)) records.push(record);
   }
   return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/** Every task record by its id. */
+export async function tasksById(): Promise<Map<string, TaskRecord>> {
+  return new Map((await listTasks()).map((record) => [record.id, record]));
+}
+
+/** The record of the task whose Pi session is `sessionId`. */
+export async function sessionTask(sessionId: string): Promise<TaskRecord | undefined> {
+  return (await listTasks()).find((task) => task.sessionId === sessionId);
 }
 
 /** Removes the record, its runner log and its lock. The worktree, branch and session file stay. */
@@ -184,72 +128,7 @@ export async function removeTask(id: string): Promise<void> {
   await rm(taskLockPath(id), { force: true });
 }
 
-/** `lockTask` found the lock held by a live process. */
-export class TaskBusyError extends Error {}
-
-async function lockOwner(pid: number): Promise<string> {
-  return `${pid} ${(await procStart(pid)) ?? "0"}\n`;
-}
-
-/** Whether the lock file's holder still runs; a missing or unreadable file has none. */
-async function lockHeld(path: string): Promise<boolean> {
-  const text = await readFile(path, "utf8").catch(() => "");
-  const [pid = "", start = ""] = text.trim().split(" ");
-  return pid !== "" && (await hostLiveness(Number(pid), start));
-}
-
-/** Takes the task's lock for this process. Throws a `TaskBusyError` of one sentence while a live process holds it. */
+/** Takes the task's lock for this process. Throws a `busy` FactoryError of one sentence while a live process holds it. */
 export async function lockTask(id: string): Promise<void> {
   await lockFile(taskLockPath(id), `task ${id.slice(0, 8)} is busy: another factory action or its runner holds it, try again once it has ended`);
-}
-
-/** Takes the lock file `path` for this process (a task's, a wave's). Throws a `TaskBusyError` `busy` while a live process holds it. */
-export async function lockFile(path: string, busy: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  // Written in full first, then linked: `link` fails on an existing lock, and no reader sees a half-written one.
-  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  await writeFile(temp, await lockOwner(process.pid), "utf8");
-  try {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        await link(temp, path);
-        return;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      }
-      if (await lockHeld(path)) break;
-      await rm(path, { force: true });
-    }
-  } finally {
-    await rm(temp, { force: true });
-  }
-  throw new TaskBusyError(busy);
-}
-
-/** Passes the lock this process holds to the process `pid` (a runner it spawned), which removes it when it exits. */
-export async function handTaskLock(id: string, pid: number): Promise<void> {
-  await handLockFile(taskLockPath(id), pid);
-}
-
-/** `handTaskLock` by the lock file's path (a runner knows only `FACTORY_TASK_LOCK`). */
-export async function handLockFile(path: string, pid: number): Promise<void> {
-  const temp = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, await lockOwner(pid), "utf8");
-    await rename(temp, path);
-  } catch (error) {
-    await rm(temp, { force: true });
-    throw error;
-  }
-}
-
-/** Removes the task's lock if this process holds it; a lock handed to a runner stays. */
-export async function unlockTask(id: string): Promise<void> {
-  await unlockFile(taskLockPath(id));
-}
-
-/** Removes the lock file `path` if this process holds it. */
-export async function unlockFile(path: string): Promise<void> {
-  const text = await readFile(path, "utf8").catch(() => "");
-  if (text.split(" ")[0] === String(process.pid)) await rm(path, { force: true });
 }

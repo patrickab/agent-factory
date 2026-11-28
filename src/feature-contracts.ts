@@ -23,40 +23,24 @@ export const CONTRACTS = feature({
       },
       ["store", "name", "op"],
       true,
+      (params, result: { name: string; changed: string[]; notified: ContractTask[]; kept: ContractTask[]; done: ContractTask[] }) => {
+        const keys = (tasks: ContractTask[]) => tasks.map((task) => `${task.tag}:${task.key}`).join(", ");
+        const op = (params.op ?? {}) as Record<string, unknown>;
+        const body = [op.text, op.content, op.body].find((value): value is string => typeof value === "string");
+        const title = result.changed.length === 0 ? `contract ${result.name}: nothing changed` : `contract ${result.name}: ${plural(result.changed.length, "fact")} changed`;
+        return decision(card("contract", "quiet", ""), title, body, [
+          ...(typeof op.op === "string" ? [{ label: op.op, text: typeof op.path === "string" ? op.path : result.name }] : []),
+          ...result.changed.map((path) => ({ label: "changed", text: path })),
+          ...(result.notified.length > 0 ? [{ label: "told", text: keys(result.notified) }] : []),
+          ...(result.kept.length > 0 ? [{ label: "next turn", text: keys(result.kept) }] : []),
+          ...(result.done.length > 0 ? [{ label: "done, may need a follow-up task", text: keys(result.done) }] : []),
+        ]);
+      },
+      (params) => contractCause(params.store, params.name),
     ),
   },
   get handlers(): Handlers {
     return CONTRACT_HANDLERS;
-  },
-  renderers: {
-    "contracts.apply": (_params, result: { name: string; changed: string[]; notified: ContractTask[]; kept: ContractTask[]; done: ContractTask[] }) => {
-      const keys = (tasks: ContractTask[]) => tasks.map((task) => `${task.tag}:${task.key}`).join(", ");
-      if (result.changed.length === 0) return `contract ${result.name}: nothing changed`;
-      return [
-        `contract ${result.name}: ${plural(result.changed.length, "fact")} changed`,
-        ...(result.notified.length > 0 ? [`told: ${keys(result.notified)}`] : []),
-        ...(result.kept.length > 0 ? [`next turn: ${keys(result.kept)}`] : []),
-        ...(result.done.length > 0 ? [`done, may need a follow-up task: ${keys(result.done)}`] : []),
-      ].join(" · ");
-    },
-  },
-  decides: {
-    "contracts.apply": (params) => contractCause(params.store, params.name),
-  },
-  cards: {
-    "contracts.apply": (params, result: { name: string; changed: string[]; notified: ContractTask[]; kept: ContractTask[]; done: ContractTask[] }) => {
-      const keys = (tasks: ContractTask[]) => tasks.map((task) => `${task.tag}:${task.key}`).join(", ");
-      const op = (params.op ?? {}) as Record<string, unknown>;
-      const body = [op.text, op.content, op.body].find((value): value is string => typeof value === "string");
-      const title = result.changed.length === 0 ? `contract ${result.name}: nothing changed` : `contract ${result.name}: ${plural(result.changed.length, "fact")} changed`;
-      return decision(card("contract", "quiet", ""), title, body, [
-        ...(typeof op.op === "string" ? [{ label: op.op, text: typeof op.path === "string" ? op.path : result.name }] : []),
-        ...result.changed.map((path) => ({ label: "changed", text: path })),
-        ...(result.notified.length > 0 ? [{ label: "told", text: keys(result.notified) }] : []),
-        ...(result.kept.length > 0 ? [{ label: "next turn", text: keys(result.kept) }] : []),
-        ...(result.done.length > 0 ? [{ label: "done, may need a follow-up task", text: keys(result.done) }] : []),
-      ]);
-    },
   },
   toolBlurb: '"contracts.apply" changes one fact of a contract the waves list and tells their tasks.',
 });

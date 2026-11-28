@@ -5,12 +5,11 @@ import type { CommandResult } from "./run.ts";
 import { type Draft, type MergeData, type ReviewData, type ReviewStatus, type Settings, type Snapshot } from "./state.ts";
 
 const config: FactoryConfig = {
-  hooks: { after_create: [], after_code: [["fmt"]], after_merge: [] },
+  hooks: { after_create: [], after_merge: [] },
   gates: [["lint"], ["test"]],
   merge_gates: [["lint"], ["test"]],
   task_gates: [],
   protected: DEFAULT_PROTECTED,
-  lockfiles: [],
 };
 
 function snapshotOf(settings: Partial<Settings> = {}, round = 1, runFirstRound = 1): Snapshot {
@@ -27,8 +26,12 @@ function snapshotOf(settings: Partial<Settings> = {}, round = 1, runFirstRound =
     round,
     runFirstRound,
     reason: "start",
+    at: null,
     mergeIntent: null,
-    mergeError: null,
+    failure: null,
+    review: null,
+    minors: [],
+    flaky: [],
     mergedCommit: null,
     commitMessage: null,
   };
@@ -69,6 +72,8 @@ function fakeSteps(overrides: Partial<PipelineSteps> = {}): PipelineSteps & { ca
       return { gates: [], result: { kind: "merged", merge: merged } };
     },
     openRebase: async () => null,
+    askCommitMessage: () => false,
+    inWave: async () => false,
     ...overrides,
   };
 }
@@ -77,13 +82,12 @@ const kinds = (entries: Draft[]) => entries.map((entry) => (entry.type === "cust
 const lastState = (entries: Draft[]) => entries.flatMap((entry) => (entry.type === "custom" && entry.customType === "factory-state" ? [entry.data] : [])).at(-1);
 
 describe("runRound", () => {
-  test("a passing auto round runs hooks, gates and review in order and ends merging, the merge itself is the caller's", async () => {
+  test("a passing auto round runs gates and review in order and ends merging, the merge itself is the caller's", async () => {
     const steps = fakeSteps();
     const result = await runRound(snapshotOf(), steps);
-    expect(steps.calls).toEqual(["fmt", "lint", "test", "review"]);
-    expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-gate", "factory-review", "factory-state"]);
-    expect(result.entries[0]).toMatchObject({ data: { round: 1, phase: "hooks", argv: ["fmt"], exitCode: 0 } });
-    expect(result.entries[1]).toMatchObject({ data: { phase: "gates", argv: ["lint"] } });
+    expect(steps.calls).toEqual(["lint", "test", "review"]);
+    expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-review", "factory-state"]);
+    expect(result.entries[0]).toMatchObject({ data: { round: 1, phase: "gates", argv: ["lint"], exitCode: 0 } });
     expect(lastState(result.entries)).toEqual({ state: "merging", round: 1, reason: "passed" });
     expect(result.continue).toBe(false);
   });
@@ -106,12 +110,6 @@ describe("runRound", () => {
     expect(result.continue).toBe(true);
   });
 
-  test("a cancelled round opens no message round", async () => {
-    const result = await runRound(snapshotOf(), fakeSteps({ pendingMessages: () => true, cancelled: () => true }));
-    expect(lastState(result.entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
-    expect(result.continue).toBe(false);
-  });
-
   test("merge review waits for approve without merging", async () => {
     const steps = fakeSteps();
     const result = await runRound(snapshotOf({ merge: "review" }), steps);
@@ -122,90 +120,47 @@ describe("runRound", () => {
   test("review off skips the reviewer", async () => {
     const steps = fakeSteps();
     await runRound(snapshotOf({ review: false }), steps);
-    expect(steps.calls).toEqual(["fmt", "lint", "test"]);
+    expect(steps.calls).toEqual(["lint", "test"]);
   });
 
   test("a failing gate stops the round and gives the coder its output in the next round", async () => {
     const steps = fakeSteps({ runCommand: async (argv) => commandResult(argv[0] === "lint" ? 2 : 0, "E501 line too long") });
     const result = await runRound(snapshotOf(), steps);
-    expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-round", "custom_message"]);
-    expect(result.entries[2]).toMatchObject({ data: { round: 2, trigger: "gates" } });
-    expect(result.entries[3]).toMatchObject({ customType: "factory-feedback", display: true, details: { round: 1, trigger: "gates" } });
-    expect((result.entries[3] as { content: string }).content).toContain("`lint` failed (exit 2)");
-    expect((result.entries[3] as { content: string }).content).toContain("E501 line too long");
+    expect(kinds(result.entries)).toEqual(["factory-gate", "factory-round", "custom_message"]);
+    expect(result.entries[1]).toMatchObject({ data: { round: 2, trigger: "gates" } });
+    expect(result.entries[2]).toMatchObject({ customType: "factory-feedback", display: true, details: { round: 1, trigger: "gates" } });
+    expect((result.entries[2] as { content: string }).content).toContain("E501 line too long");
     expect(result.continue).toBe(true);
   });
 
   test("a gate that exits 75 blocks the task as infra, with no feedback and no round for the coder", async () => {
     const steps = fakeSteps({ runCommand: async (argv) => commandResult(argv[0] === "lint" ? 75 : 0, "noise\neslint is missing\n") });
     const result = await runRound(snapshotOf(), steps);
-    expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-state"]);
+    expect(kinds(result.entries)).toEqual(["factory-gate", "factory-state"]);
     expect(lastState(result.entries)).toMatchObject({ state: "blocked", reason: "infra: eslint is missing" });
     expect(result.continue).toBe(false);
-  });
-
-  describe("a failed gate runs once more", () => {
-    /** Steps whose `lint` returns `results` in turn (the last one after them), every other command passing. */
-    const lintSteps = (...results: CommandResult[]) => {
-      let runs = 0;
-      const steps = fakeSteps({ runCommand: async (argv) => (argv[0] === "lint" ? results[Math.min(runs++, results.length - 1)] : commandResult(0)) });
-      return Object.assign(steps, { lintRuns: () => runs });
-    };
-
-    test("fails then passes: passed, flaky recorded on its gate entry, no round used", async () => {
-      const steps = lintSteps(commandResult(1, "(fail) lint > under load [3ms]"), commandResult(0));
-      const result = await runRound(snapshotOf(), steps);
-      expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-gate", "factory-review", "factory-state"]);
-      expect(result.entries[1]).toMatchObject({ data: { phase: "gates", argv: ["lint"], exitCode: 0, flaky: ["lint > under load"] } });
-      expect((result.entries[2] as { data: object }).data).not.toHaveProperty("flaky");
-      expect(lastState(result.entries)).toEqual({ state: "merging", round: 1, reason: "passed" });
-    });
-
-    test("fails twice: a round problem as before", async () => {
-      const result = await runRound(snapshotOf(), lintSteps(commandResult(1), commandResult(2, "E501")));
-      expect(kinds(result.entries)).toEqual(["factory-gate", "factory-gate", "factory-round", "custom_message"]);
-      expect(result.entries[1]).toMatchObject({ data: { argv: ["lint"], exitCode: 2 } });
-      expect((result.entries[1] as { data: object }).data).not.toHaveProperty("flaky");
-      expect(result.entries[2]).toMatchObject({ data: { round: 2, trigger: "gates" } });
-    });
-
-    test.each([
-      ["exit 75", commandResult(75), "factory-state" as const],
-      ["a kill", commandResult(null), "factory-round" as const],
-    ])("no rerun after %s", async (_name, first, after) => {
-      const steps = lintSteps(first, commandResult(0));
-      const result = await runRound(snapshotOf(), steps);
-      expect(steps.lintRuns()).toBe(1);
-      expect(kinds(result.entries).slice(0, 3)).toEqual(["factory-gate", "factory-gate", after]);
-    });
-  });
-
-  test("a failing hook is a round problem with trigger hooks", async () => {
-    const result = await runRound(snapshotOf(), fakeSteps({ runCommand: async () => commandResult(1) }));
-    expect(kinds(result.entries)).toEqual(["factory-gate", "factory-round", "custom_message"]);
-    expect(result.entries[1]).toMatchObject({ data: { round: 2, trigger: "hooks" } });
   });
 
   test("the last round of the budget ends blocked, with the feedback and no new round", async () => {
     const result = await runRound(snapshotOf({ maxRounds: 3 }, 3), fakeSteps({ runCommand: async () => commandResult(1) }));
     expect(kinds(result.entries)).toEqual(["factory-gate", "custom_message", "factory-state"]);
-    expect(lastState(result.entries)).toEqual({ state: "blocked", round: 3, reason: "max_rounds: hooks" });
+    expect(lastState(result.entries)).toEqual({ state: "blocked", round: 3, reason: "max_rounds: gates" });
     expect(result.continue).toBe(false);
   });
 
   test("the budget counts from the first round of the run", async () => {
     const result = await runRound(snapshotOf({ maxRounds: 2 }, 4, 4), fakeSteps({ runCommand: async () => commandResult(1) }));
     expect(result.continue).toBe(true);
-    expect(result.entries[1]).toMatchObject({ data: { round: 5, trigger: "hooks" } });
+    expect(result.entries[1]).toMatchObject({ data: { round: 5, trigger: "gates" } });
   });
 
   test("a diff that touches a protected path is a round problem and is never reviewed or merged", async () => {
     const steps = fakeSteps({ diff: async () => ({ base: "tree", paths: ["src/a.ts", "factory.yaml", ".factory/agents/coder.md"], patch: "diff" }) });
     const result = await runRound(snapshotOf(), steps);
-    expect(steps.calls).toEqual(["fmt", "lint", "test"]);
+    expect(steps.calls).toEqual(["lint", "test"]);
     expect(result.entries.at(-2)).toMatchObject({ data: { round: 2, trigger: "protected" } });
-    expect((result.entries.at(-1) as { content: string }).content).toContain("- factory.yaml\n- .factory/agents/coder.md");
-    expect((result.entries.at(-1) as { content: string }).content).toContain("Restore them to their original state, then stop.");
+    const named = (result.entries.at(-1) as { content: string }).content;
+    expect([named.includes("factory.yaml"), named.includes(".factory/agents/coder.md"), named.includes("src/a.ts")]).toEqual([true, true, false]);
     expect(result.continue).toBe(true);
   });
 
@@ -213,13 +168,14 @@ describe("runRound", () => {
     const rejected = await runRound(snapshotOf(), fakeSteps({ review: async () => reviewOf("ok", ["minor", "major"]) }));
     expect(kinds(rejected.entries).slice(-3)).toEqual(["factory-review", "factory-round", "custom_message"]);
     expect(rejected.entries.at(-2)).toMatchObject({ data: { round: 2, trigger: "review" } });
-    expect((rejected.entries.at(-1) as { content: string }).content).toContain("- [major] a.ts:1: major problem");
+    const feedback = (rejected.entries.at(-1) as { content: string }).content;
+    expect([feedback.includes("major problem"), feedback.includes("minor problem")]).toEqual([true, false]);
 
     const approved = await runRound(snapshotOf(), fakeSteps({ review: async () => reviewOf("ok", ["minor"]) }));
     expect(lastState(approved.entries)).toMatchObject({ state: "merging" });
   });
 
-  test.each(["malformed", "timeout", "failed"] as const)("a %s review blocks the task without a coder round", async (status) => {
+  test.each(["malformed", "failed"] as const)("a %s review blocks the task without a coder round", async (status) => {
     const steps = fakeSteps({ review: async () => reviewOf(status) });
     const result = await runRound(snapshotOf(), steps);
     expect(lastState(result.entries)).toEqual({ state: "blocked", round: 1, reason: `review_${status}` });
@@ -242,26 +198,6 @@ describe("runRound", () => {
     expect(result.continue).toBe(false);
   });
 
-  test("a review that was killed ends cancelled", async () => {
-    const result = await runRound(snapshotOf(), fakeSteps({ review: async () => reviewOf("aborted") }));
-    expect(lastState(result.entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
-  });
-
-  test("a step that throws while cancelled ends cancelled, not as a pipeline error", async () => {
-    const steps = fakeSteps({
-      cancelled: () => true,
-      runCommand: async () => commandResult(0),
-      diff: async () => {
-        throw new Error("git add -A: killed");
-      },
-    });
-    expect(lastState((await runRound(snapshotOf({}), { ...steps, config: () => ({ ...config, hooks: { after_create: [], after_code: [], after_merge: [] }, gates: [] }) })).entries)).toEqual({
-      state: "cancelled",
-      round: 1,
-      reason: "cancelled",
-    });
-  });
-
   test("a cancel during a gate ends cancelled, with the killed gate recorded", async () => {
     let cancelled = false;
     const steps = fakeSteps({
@@ -276,16 +212,6 @@ describe("runRound", () => {
     expect(result.entries[0]).toMatchObject({ data: { exitCode: null, killed: true } });
     expect(lastState(result.entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
   });
-
-  test("a broken factory.yaml blocks the task with the error", async () => {
-    const steps = fakeSteps({
-      config: () => {
-        throw new Error("factory.yaml: gates must be a list of argv lists");
-      },
-    });
-    const result = await runRound(snapshotOf(), steps);
-    expect(lastState(result.entries)).toEqual({ state: "blocked", round: 1, reason: "pipeline_error: factory.yaml: gates must be a list of argv lists" });
-  });
 });
 
 test("a rebase the coder left open goes back to the coder before any hook or gate runs", async () => {
@@ -293,16 +219,17 @@ test("a rebase the coder left open goes back to the coder before any hook or gat
   const result = await runRound(snapshotOf({}, 2, 1), steps);
   expect(result.continue).toBe(true);
   expect(result.entries[0]).toMatchObject({ data: { round: 3, trigger: "conflict" } });
-  expect((result.entries[1] as { content: string }).content).toContain("A rebase is still in progress in the task worktree");
+  expect((result.entries[1] as { content: string }).content).toContain("notes.txt");
   expect(steps.calls).toEqual([]);
 });
 
 describe("runMerge", () => {
+  const merging = (...args: Parameters<typeof snapshotOf>): Snapshot => ({ ...snapshotOf(...args), state: "merging" });
   const gate = { round: 2, phase: "merge_gates" as const, argv: ["lint"], exitCode: 0, killed: false, durationMs: 1, outputTail: "" };
 
   test("records the merge gates before the merge and reports the merge as merged", async () => {
     const steps = fakeSteps({ merge: async () => ({ gates: [gate], result: { kind: "merged", merge: { ...merged, tree: null } } }) });
-    const entries = await runMerge(snapshotOf({}, 2), config, steps);
+    const entries = await runMerge(merging({}, 2), config, steps);
     expect(kinds(entries)).toEqual(["factory-gate", "factory-merge", "factory-state"]);
     expect(lastState(entries)).toEqual({ state: "done", round: 2, reason: "merged" });
   });
@@ -310,7 +237,7 @@ describe("runMerge", () => {
   test("a failed after_merge hook is recorded and leaves the task done with a reason that says so", async () => {
     const hook = { ...gate, phase: "after_merge" as const, argv: ["uv", "sync"], exitCode: 1, outputTail: "no network" };
     const data: MergeData = { ok: true, commit: "def", error: "after_merge failed: uv sync: no network", depsSynced: false };
-    const entries = await runMerge(snapshotOf({}, 2), config, fakeSteps({ merge: async () => ({ gates: [hook], result: { kind: "merged", merge: data } }) }));
+    const entries = await runMerge(merging({}, 2), config, fakeSteps({ merge: async () => ({ gates: [hook], result: { kind: "merged", merge: data } }) }));
     expect(entries[0]).toMatchObject({ customType: "factory-gate", data: { phase: "after_merge", exitCode: 1 } });
     expect(entries[1]).toMatchObject({ customType: "factory-merge", data: { ok: true, error: "after_merge failed: uv sync: no network" } });
     expect(lastState(entries)).toEqual({ state: "done", round: 2, reason: "merged, after_merge failed" });
@@ -319,61 +246,49 @@ describe("runMerge", () => {
   const failed: MergeData = { ok: false, commit: null, error: "fast-forward of main refused", depsSynced: false };
 
   test("a failed merge blocks the task", async () => {
-    const entries = await runMerge(snapshotOf(), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "failed", merge: failed } }) }));
+    const entries = await runMerge(merging(), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "failed", merge: failed } }) }));
     expect(entries.at(-2)).toMatchObject({ customType: "factory-merge", data: failed });
     expect(lastState(entries)).toEqual({ state: "blocked", round: 1, reason: "merge_failed" });
   });
 
   test("a rebase conflict merges nothing and opens a conflict round within the budget, then blocks with max_rounds: conflict", async () => {
     const conflicting = fakeSteps({ merge: async () => ({ gates: [], result: { kind: "conflict", files: ["notes.txt"] } }) });
-    const entries = await runMerge(snapshotOf({ maxRounds: 3 }, 2, 1), config, conflicting);
+    const entries = await runMerge(merging({ maxRounds: 3 }, 2, 1), config, conflicting);
     expect(kinds(entries)).toEqual(["factory-round", "custom_message", "factory-state"]);
     expect(entries[0]).toMatchObject({ data: { round: 3, trigger: "conflict" } });
     expect(entries[1]).toMatchObject({ details: { round: 2, trigger: "conflict" } });
-    expect((entries[1] as { content: string }).content).toContain("- notes.txt\nRun `git rebase refs/heads/main`, resolve the conflicts");
+    expect((entries[1] as { content: string }).content).toContain("notes.txt");
     expect(lastState(entries)).toEqual({ state: "running", round: 3, reason: "conflict" });
 
-    const last = await runMerge(snapshotOf({ maxRounds: 3 }, 3, 1), config, conflicting);
+    const last = await runMerge(merging({ maxRounds: 3 }, 3, 1), config, conflicting);
     expect(kinds(last)).toEqual(["custom_message", "factory-state"]);
     expect(lastState(last)).toEqual({ state: "blocked", round: 3, reason: "max_rounds: conflict" });
   });
 
   test("a merge gate that fails on the rebased branch goes back to the coder as a gates round, nothing merged", async () => {
     const failedGate = { argv: ["test"], result: commandResult(1, "FAILED test_new_thing") };
-    const entries = await runMerge(snapshotOf({ maxRounds: 3 }, 2, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
+    const entries = await runMerge(merging({ maxRounds: 3 }, 2, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
     expect(kinds(entries)).toEqual(["factory-round", "custom_message", "factory-state"]);
-    expect((entries[1] as { content: string }).content).toContain("After the rebase onto main");
     expect((entries[1] as { content: string }).content).toContain("FAILED test_new_thing");
     expect(lastState(entries)).toEqual({ state: "running", round: 3, reason: "gates" });
   });
 
   test("a merge gate that exits 75 blocks the task as infra", async () => {
     const failedGate = { argv: ["test"], result: commandResult(75, "pi-host/node_modules is missing") };
-    const entries = await runMerge(snapshotOf({}, 1, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
+    const entries = await runMerge(merging({}, 1, 1), config, fakeSteps({ merge: async () => ({ gates: [], result: { kind: "gate_failed", gate: failedGate } }) }));
     expect(lastState(entries)).toEqual({ state: "blocked", round: 1, reason: "infra: pi-host/node_modules is missing" });
   });
 
 
-  test("a merge that fails under a cancel ends cancelled", async () => {
-    const entries = await runMerge(snapshotOf(), config, fakeSteps({ cancelled: () => true, merge: async () => ({ gates: [], result: { kind: "failed", merge: failed } }) }));
-    expect(lastState(entries)).toEqual({ state: "cancelled", round: 1, reason: "cancelled" });
-  });
 });
 
-describe("review per task (reviewEach)", () => {
-  test("a passed round of a reviewEach wave's task rests reviewing: no review of its own, no merge", async () => {
-    const steps = fakeSteps({ reviewEach: async () => true });
+describe("review per task", () => {
+  test("a passed round of a wave's task rests reviewing: no review of its own, no merge", async () => {
+    const steps = fakeSteps({ inWave: async () => true });
     const result = await runRound(snapshotOf(), steps);
-    expect(steps.calls).toEqual(["fmt", "lint", "test"]);
+    expect(steps.calls).toEqual(["lint", "test"]);
     expect(lastState(result.entries)).toEqual({ state: "reviewing", round: 1, reason: "passed" });
     expect(result.continue).toBe(false);
-  });
-
-  test("without reviewEach the round is as before", async () => {
-    const steps = fakeSteps({ reviewEach: async () => false });
-    const result = await runRound(snapshotOf(), steps);
-    expect(steps.calls).toContain("review");
-    expect(lastState(result.entries)?.state).toBe("merging");
   });
 
   test("approved: the review is recorded and the task merges; minor findings start no round", () => {

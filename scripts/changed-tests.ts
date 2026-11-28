@@ -1,16 +1,11 @@
 #!/usr/bin/env bun
 /**
- * The test gate (`task_gates` and `merge_gates` in `factory.yaml`): runs the test files a change reaches, several at once.
- *
- * - The change starts at `$FACTORY_BASE` (a wave's task), else at the merge base with the default branch (a merge gate, a
- *   local run); `--all`, or no base at all, runs every test file
- * - Changed: `git diff --name-only $FACTORY_BASE` (committed and uncommitted) and untracked files
- * - Reached: a changed `*.test.ts`, the test next to a changed source (`x.ts` -> `x.test.ts`), and every test that
- *   imports a changed file, transitively over relative imports (`./`, `../`)
- * - Runs them one `bun test` process per file, the cores but two at once (`FACTORY_TEST_JOBS` overrides), at low priority.
- *   A failed file runs once more alone and passes as flaky when it passes then. Nothing reached: exit 0
- * - Every file it reran is named in the gate helper's trailer, its output's last line (`gateMarks`): a flaky one is
- *   recorded `flaky`, and the helper does not run the whole step again
+ * The test gate (`task_gates`, `merge_gates`): runs the test files a change reaches, one `bun test` process per file,
+ * several at once. The change starts at `$FACTORY_BASE`, else at the merge base with the default branch; `--all`, or
+ * no base, runs every test file.
+ * - Reached: a changed test, the test next to a changed source, every test that imports a changed file (transitively)
+ * - A failed file runs once more alone and passes as flaky; every rerun file is named in the gate helper's trailer
+ *   (the output's last line), so the helper does not run the whole step again
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
@@ -88,7 +83,6 @@ export function defaultBase(root: string): string | null {
   return null;
 }
 
-/** Every test file of the checkout at `root`. */
 export function allTests(root: string): string[] {
   return [...git(root, ["ls-files", "-z"]), ...git(root, ["ls-files", "-z", "--others", "--exclude-standard"])].filter((path) => TEST.test(path) && existsSync(join(root, path))).sort();
 }

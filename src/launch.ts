@@ -1,47 +1,37 @@
 /**
- * Starts a factory task without an interactive session.
- *
- * - Consumes the primary checkout of a repo, a title, a request and settings overrides
- * - Provides `launchTask`: resolves the settings and the target branch (it must hold a committed `factory.yaml`),
- *   creates the task's worktree on a new branch
- *   (`agent-worktree` when it is on PATH, else `git worktree add`), runs the repo's `hooks.after_create` in it, writes
- *   the `TaskRecord` and starts the detached runner with `/factory start <json>`. A failing or aborted step undoes the
- *   earlier ones, through git only. A missing target branch or `factory.yaml` throws a `LaunchRefusedError`
- * - Provides `sendCommand`: one more message to a task's session, through a new detached runner (the caller's `env`;
- *   `runnerSpawn` puts it in a systemd user scope when `systemd-run` is on PATH) that takes over the task lock its caller holds;
- *   `messageTask`: a message to the coder in any state but merging (`taskInboxPath` of a live runner, else a new
- *   runner); a state refusal is a `MessageRefusedError`
- * - Provides `defaultBranch`, `localBranchExists` and `startCommand` (the payload `parseStartPayload` accepts)
- * - Provides `liveRunners`/`stopRunners` (a task's runner processes: `pgrep -f`, then the session id as a whole argument
- *   of the command line and the caller's marker, `ownRunner` of `spawn.ts`), `unmergedWork` and
- *   `deleteTask` (worktree, branch, record, log and inbox, removed through git: the task's own branch, never another;
- *   an old merge request's record names its source branch, which stays)
- * - The detached spawn itself (`runnerSpawn`, `spawnDetached`) lives in `spawn.ts`, shared with the wave runner's poke
+ * Starts a factory task without an interactive session, and sends its session more messages.
+ * - `launchTask`: worktree on a new branch, `hooks.after_create`, the `TaskRecord`, the detached runner with
+ *   `/factory start`, the wait until it wrote its first state. A failing or aborted step undoes the earlier ones,
+ *   through git only
+ * - `sendCommand` and `messageTask` reach the session through a new runner that takes over the task lock, or through
+ *   the inbox of a live one
+ * - `deleteTask` removes through git only the task's own branch, never another
  */
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
 import { contractsForLaunch } from "./contracts.ts";
 import { git, primaryCheckout } from "./git.ts";
-import { inboxReadPath, lastFactoryState, taskMainBranch } from "./runner.ts";
+import { CODER_EXTENSIONS_ENV, CODER_MODEL_ENV, inboxReadPath, lastFactoryState, readFactoryStates, readInboxOffset, takeInboxLine } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
-import { factoryHome, loadSettings, resolveSettings, type StoredSettings } from "./settings.ts";
-import type { ModelSize, Settings, StartPayload } from "./state.ts";
-import { onPath, ownRunners, runnerSpawn, signalRunner, spawnDetached, type RunnerEnv } from "./spawn.ts";
-import { handTaskLock, lockTask, removeTask, systemUser, TaskBusyError, taskLockPath, taskLogPath, tasksDir, unlockTask, writeTask, type TaskRecord } from "./tasks.ts";
-import { removeSyncState } from "./sync.ts";
-import { TASK_WAVE_ENV, type RunnerSnapshot } from "./wave-poke.ts";
-import { outputTail } from "./util.ts";
+import { factoryHome, loadSettings, resolveSettings, taskModels, type ModelSize, type StoredSettings } from "./settings.ts";
+import { isFinal, type Settings, type StartPayload } from "./state.ts";
+import { lockRunner, startRunner, unlockFile } from "./lock.ts";
+import { onPath, stopProcesses, type RunnerEnv } from "./spawn.ts";
+import { lockTask, removeTask, systemUser, taskLockPath, taskLogPath, tasksDir, writeTask, type TaskRecord } from "./tasks.ts";
+import { TASK_WAVE_ENV, waveDir } from "./wave-poke.ts";
+import { FactoryError, isBusy, outputTail, short } from "./util.ts";
 
 // `import.meta.dirname`, not Bun's `import.meta.dir`: inside Pi the latter is not this directory, and a runner would not start.
 const RUNNER_PATH = join(import.meta.dirname, "runner.ts");
 const SLUG_MAX_CHARS = 40;
 const HOOK_TIMEOUT_MS = 10 * 60_000;
-/** How long `stopRunners` waits for a runner to end after SIGTERM, then after SIGKILL. */
-const STOP_WAIT_MS = 10_000;
+const INBOX_POLL_MS = 100;
+/** How long a start, or a cancel or retry of an interrupted task, waits for its runner to write a state or end. */
+const RUNNER_START_WAIT_MS = 15_000;
 
-export { runnerSpawn, type RunnerEnv };
+export type { RunnerEnv };
 
 export async function localBranchExists(repo: string, branch: string): Promise<boolean> {
   const result = await runCommand(["git", "show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo });
@@ -55,11 +45,25 @@ export async function defaultBranch(repo: string): Promise<string> {
   for (const branch of candidates) {
     if (branch !== "" && (await localBranchExists(repo, branch))) return branch;
   }
-  throw new Error(`${repo}: no default branch (origin/HEAD, main and master do not exist locally)`);
+  throw new FactoryError("refused", `${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
+}
+
+/**
+ * The target branch of a repository: `given`, else the stored one, else the default branch. Unless `config` is false
+ * it must also exist locally and hold a committed `factory.yaml`; `config: false` only resolves it.
+ */
+export async function targetOf(repo: string, given?: string, { config = true }: { config?: boolean } = {}): Promise<string> {
+  const branch = given ?? (await loadSettings(repo)).branch ?? (await defaultBranch(repo));
+  if (!config) return branch;
+  if (!(await localBranchExists(repo, branch))) throw new FactoryError("not_found", `${repo} has no local branch ${branch}`);
+  if ((await runCommand(["git", "cat-file", "-e", `refs/heads/${branch}:factory.yaml`], { cwd: repo })).exitCode !== 0) {
+    throw new FactoryError("refused", `${repo}: branch ${branch} has no factory.yaml (write one with /factory init or the config.write action, and commit it)`);
+  }
+  return branch;
 }
 
 /** The prompt that starts a task in its session; `prefix` (its contracts) goes before the request in the coder's first message only. */
-export function startCommand(title: string, request: string, settings: Settings, prefix?: string): string {
+function startCommand(title: string, request: string, settings: Settings, prefix?: string): string {
   const payload: StartPayload = { request, title, settings, ...(prefix === undefined ? {} : { prefix }) };
   return `/factory start ${JSON.stringify(payload)}`;
 }
@@ -92,11 +96,6 @@ async function removeWorktree(repo: string, path: string | undefined, branch: st
   if (path !== undefined && existsSync(path)) await runCommand(["git", "worktree", "remove", "--force", path], { cwd: repo });
   await runCommand(["git", "worktree", "prune"], { cwd: repo });
   if (branch !== undefined && (await localBranchExists(repo, branch))) await runCommand(["git", "branch", "-D", branch], { cwd: repo });
-}
-
-/** The task's own branch: none for an old merge request, whose `branch` is the source it merged (invariant 7). */
-function ownBranch(record: Pick<TaskRecord, "branch" | "kind">): string | undefined {
-  return record.kind === "merge_request" ? undefined : record.branch;
 }
 
 /** Where a worktree named `name` of `repo` lies when `agent-worktree` does not choose. */
@@ -135,12 +134,6 @@ export async function runAfterCreate(exec: Exec, worktree: string, hooks?: strin
   }
 }
 
-/** A launch the repository's branches forbid: the target branch is missing or has no committed `factory.yaml`. */
-export class LaunchRefusedError extends Error {}
-
-/** A message `messageTask` refuses for the task's state (merging, not started). */
-export class MessageRefusedError extends Error {}
-
 export interface LaunchInput {
   /** A path in the repository; the task records its primary checkout. */
   repo: string;
@@ -150,9 +143,8 @@ export interface LaunchInput {
   /** Default: `systemUser()`. */
   tag?: string;
   plan?: string | null;
-  /** Aborting it before the runner is started kills the running hook and undoes the launch. */
+  /** Aborting it before the runner wrote its first state kills the running hook or runner and undoes the launch. */
   signal?: AbortSignal;
-  /** The runner's environment. */
   env?: RunnerEnv;
   /** Which of the resolved models the coder runs with; default `big`. */
   size?: ModelSize;
@@ -182,18 +174,9 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
   // A wave's task runs with the wave's models only (its declaration's, passed as overrides), never the stored ones.
   const stored = input.wave === undefined ? loaded : { ...loaded, models: undefined };
   const overrides = input.overrides ?? {};
-  const explicit = overrides.branch ?? stored.branch;
-  const fallback =
-    explicit ??
-    (await defaultBranch(repo).catch(() => {
-      throw new LaunchRefusedError(`${repo} has no default branch (origin/HEAD, main and master do not exist locally)`);
-    }));
-  const settings = resolveSettings(stored, overrides, fallback, input.size);
-  if (!(await localBranchExists(repo, settings.branch))) throw new LaunchRefusedError(`${repo}: branch ${settings.branch} does not exist locally`);
-  const config = await runCommand(["git", "cat-file", "-e", `refs/heads/${settings.branch}:factory.yaml`], { cwd: repo });
-  if (config.exitCode !== 0) {
-    throw new LaunchRefusedError(`${repo}: branch ${settings.branch} has no factory.yaml (write one with /factory init or the config.write action, and commit it)`);
-  }
+  const target = await targetOf(repo, overrides.branch ?? stored.branch);
+  const { branch, merge, maxRounds, review, models } = resolveSettings([stored, overrides], target);
+  const settings: Settings = { branch, merge, maxRounds, review, models: taskModels(models, input.size) };
   const contracts = input.contracts !== undefined && input.contracts.length > 0 && input.plan ? await contractsForLaunch(input.plan, input.contracts) : undefined;
 
   const id = input.id ?? crypto.randomUUID();
@@ -207,19 +190,19 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
     const worktree = await createWorktree(commands.run, repo, name, settings.branch).catch((error: unknown) => {
       throw aborted() ? new Error("the start was aborted") : error;
     });
-    let recorded = false;
+    let record: TaskRecord | undefined;
     try {
       await runAfterCreate(commands.run, worktree);
       if (aborted()) throw new Error("the start was aborted");
       await input.beforeRecord?.(settings.branch, worktree);
-      const record: TaskRecord = {
+      record = {
         id,
         repo,
         worktree,
         branch: name,
         title: input.title,
         sessionId: crypto.randomUUID(),
-        sessionDir: join(factoryHome(), "sessions", repoDirName(repo)),
+        sessionDir: input.wave === undefined ? join(factoryHome(), "sessions", repoDirName(repo)) : join(waveDir(input.wave), "sessions"),
         createdAt: new Date().toISOString(),
         tag: input.tag ?? systemUser(),
         plan: input.plan ?? null,
@@ -228,12 +211,18 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
         ...(contracts === undefined ? {} : { contracts: contracts.stamps }),
       };
       await writeTask(record);
-      recorded = true;
       await lockTask(id);
-      await sendCommand(record, startCommand(input.title, input.request, settings, contracts?.prefix), input.env);
+      const coder = settings.models.coder;
+      await sendCommand(record, startCommand(input.title, input.request, settings, contracts?.prefix), { ...(input.env ?? process.env), ...(coder ? { [CODER_MODEL_ENV]: coder } : {}) });
+      // A runner whose `pi` exits before it answers (missing, broken, no plugin) leaves a task without any state.
+      await requireRunnerStarted(record, 0, input.signal);
+      if (aborted()) throw new Error("the start was aborted");
       return record;
     } catch (error) {
-      if (recorded) await removeTask(id).catch(() => undefined);
+      if (record !== undefined) {
+        await stopRunners(record).catch(() => undefined);
+        await removeTask(id).catch(() => undefined);
+      }
       await removeWorktree(repo, worktree, name).catch(() => undefined);
       throw aborted() ? new Error("the start was aborted") : error;
     }
@@ -243,25 +232,48 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
 }
 
 /**
- * Starts `bun runner.ts` for `message` in its own process group, detached, output appended to the task's log, with
- * `env` (default `process.env`) plus the lock path and the task's wave (`TASK_WAVE_ENV`, which the runner pokes when
- * it ends with the task at rest). The caller holds the task lock (`lockTask`): it passes to the runner, which removes
- * it when it exits.
+ * After a command that starts the task's runner: waits until the session has more than `statesBefore` `factory-state`
+ * entries (the runner runs) or the runner ended without one (`failed`, naming the last line of its log). A runner still
+ * alive after `RUNNER_START_WAIT_MS` counts as started; `signal` ends the wait.
+ */
+export async function requireRunnerStarted(record: TaskRecord, statesBefore: number, signal?: AbortSignal): Promise<void> {
+  const deadline = Date.now() + RUNNER_START_WAIT_MS;
+  const wroteState = async () => (await readFactoryStates(record.sessionDir, record.sessionId)).count > statesBefore;
+  while (Date.now() < deadline && signal?.aborted !== true) {
+    if (await wroteState()) return;
+    if ((await liveRunners(record)).length === 0) {
+      if (await wroteState()) return;
+      const log = await readFile(taskLogPath(record.id), "utf8").catch(() => "");
+      const last = log.trim().split("\n").at(-1)?.trim().slice(0, 300) ?? "";
+      throw new FactoryError("failed", `the runner of task ${short(record.id)} ended before it ran${last === "" ? "" : ` (${last})`}`);
+    }
+    await Bun.sleep(100);
+  }
+}
+
+/**
+ * Starts `bun runner.ts` for `message` (`startRunner`), output appended to the task's log, with `env` (default
+ * `process.env`) plus the lock path, the task's wave (`TASK_WAVE_ENV`, which the runner pokes when it ends with the
+ * task at rest) and the repository's `extensions` setting (`CODER_EXTENSIONS_ENV`). The caller holds the task lock
+ * (`lockTask`): it passes to the runner, which removes it when it exits.
  */
 export async function sendCommand(record: TaskRecord, message: string, env: RunnerEnv = process.env): Promise<void> {
-  const bun = onPath("bun");
-  if (bun === null) throw new Error("bun is not on PATH: the task runner needs it");
-  await mkdir(tasksDir(), { recursive: true });
   await mkdir(record.sessionDir, { recursive: true });
-  const { [TASK_WAVE_ENV]: _wave, ...base } = env;
-  const pid = await spawnDetached(
-    [bun, RUNNER_PATH, record.worktree, record.sessionDir, record.sessionId, taskInboxPath(record.id), message],
+  const { extensions } = await loadSettings(record.repo);
+  await startRunner({
+    lock: taskLockPath(record.id),
+    argv: [RUNNER_PATH, record.worktree, record.sessionDir, record.sessionId, taskInboxPath(record.id), message],
+    env,
     // A task runs without pauses, so the default short prompt cache is enough and the dearer long cache writes are not.
-    { ...base, FACTORY_TASK_LOCK: taskLockPath(record.id), PI_CACHE_RETENTION: "short", ...(record.wave === null ? {} : { [TASK_WAVE_ENV]: record.wave }) },
-    taskLogPath(record.id),
-    dirname(RUNNER_PATH),
-  );
-  if (pid !== undefined) await handTaskLock(record.id, pid);
+    vars: {
+      FACTORY_TASK_LOCK: taskLockPath(record.id),
+      PI_CACHE_RETENTION: "short",
+      [CODER_EXTENSIONS_ENV]: extensions === undefined ? undefined : JSON.stringify(extensions),
+      ...(record.wave === null ? {} : { [TASK_WAVE_ENV]: record.wave }),
+    },
+    log: taskLogPath(record.id),
+    cwd: dirname(RUNNER_PATH),
+  });
 }
 
 /** The messages for a task's live runner, one JSON `{"text"}` per line; the runner stores how far it sent them in `<inbox>.read`. */
@@ -269,95 +281,85 @@ export function taskInboxPath(id: string): string {
   return join(tasksDir(), `${id}.inbox`);
 }
 
+export const MERGING_REFUSAL = "is merging, send the message when the merge has ended";
+/** A done task takes no message: its work is merged, more work is a new task. */
+export const DONE_REFUSAL = "is done: give the work to its wave with waves.add, or start a new task";
+
 /**
  * A message for the task's coder. A live runner holds the task: one line in its inbox, which it sends to Pi as a
- * follow-up. Resting or interrupted: takes the task lock and starts a runner with `text` as the prompt and `env`, the
- * lock handed to it. Throws a `MessageRefusedError` of one sentence while the task merges or before it has a state, a
- * `TaskBusyError` while another holds its lock.
+ * follow-up. A runner that closed Pi's stdin before the line came ends without sending it, so this waits until the
+ * line is sent or the runner is gone, and then delivers it itself. With no runner (at rest, interrupted, or ended with
+ * lines unsent): takes the task lock and starts a runner with `env` and the first unsent inbox line as its prompt, else
+ * `text`, the lock handed to it; that runner sends the lines after it. While the task merges the runner sends nothing but
+ * keeps Pi open for a line it holds, so a line already in the inbox is left there and the call returns. Refuses
+ * (`refused`, one sentence) while the task merges (line not yet appended), before it has a state, or when it is final
+ * (a line appended meanwhile is taken back), a `busy` FactoryError while another holds its lock; a line already appended is never
+ * refused, it goes with the next runner.
  */
 export async function messageTask(record: TaskRecord, text: string, env?: RunnerEnv): Promise<void> {
-  const refuseState = async () => {
-    const state = await lastFactoryState(record.sessionDir, record.sessionId);
-    if (state === undefined) throw new MessageRefusedError(`task ${record.id.slice(0, 8)} has not started yet, send the message once it runs`);
-    if (state.state === "merging") throw new MessageRefusedError(`task ${record.id.slice(0, 8)} is merging, send the message when the merge has ended`);
-  };
-  const toInbox = async () => {
-    await mkdir(tasksDir(), { recursive: true });
-    await appendFile(taskInboxPath(record.id), `${JSON.stringify({ text })}\n`, "utf8");
-  };
-  await refuseState();
-  if ((await liveRunners(record)).length > 0) return toInbox();
-  await lockTask(record.id);
-  try {
-    await refuseState();
-    if ((await liveRunners(record)).length > 0) throw new TaskBusyError(`task ${record.id.slice(0, 8)} is busy: its last runner is still ending, try again in a few seconds`);
-    if ((await lastFactoryState(record.sessionDir, record.sessionId))?.state === "done") await restoreWorktree(record);
-    await sendCommand(record, text, env);
-  } finally {
-    await unlockTask(record.id);
+  const inbox = taskInboxPath(record.id);
+  /** The inbox's size once `text` is in it; 0 before. */
+  let end = 0;
+  for (;;) {
+    if ((await liveRunners(record)).length > 0) {
+      // The runner sends nothing while the task merges: it keeps Pi open for a line it holds, so the line waits in the inbox.
+      const merging = (await lastFactoryState(record.sessionDir, record.sessionId))?.state === "merging";
+      if (end === 0 && merging) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${MERGING_REFUSAL}`);
+      if (end === 0) {
+        await mkdir(tasksDir(), { recursive: true });
+        await appendFile(inbox, `${JSON.stringify({ text })}\n`, "utf8");
+        end = (await stat(inbox)).size;
+      }
+      while (
+        (await readInboxOffset(inbox)) < end &&
+        (await liveRunners(record)).length > 0 &&
+        (await lastFactoryState(record.sessionDir, record.sessionId))?.state !== "merging"
+      ) {
+        await Bun.sleep(INBOX_POLL_MS);
+      }
+      if ((await readInboxOffset(inbox)) >= end || (await liveRunners(record)).length > 0) return;
+    }
+    const locked = await lockTask(record.id).then(
+      () => true,
+      (error: unknown) => {
+        // Another sender's runner may be starting with the line: look again.
+        if (end === 0 || !isBusy(error)) throw error;
+        return false;
+      },
+    );
+    if (locked) {
+      try {
+        // The caller checked `refusal(view, "tasks.message")` before the lock; the state may have moved since.
+        const state = await lastFactoryState(record.sessionDir, record.sessionId);
+        if (end > 0) {
+          if (state !== undefined && isFinal(state.state)) {
+            await takeInboxLine(inbox);
+            throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${DONE_REFUSAL}`);
+          }
+          const first = state === undefined || state.state === "merging" ? undefined : await takeInboxLine(inbox);
+          if (first !== undefined) await sendCommand(record, first, env);
+          return;
+        }
+        if (state === undefined) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} has not started yet, send the message once it runs`);
+        if (state.state === "merging") throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${MERGING_REFUSAL}`);
+        return await sendCommand(record, text, env);
+      } finally {
+        await unlockFile(taskLockPath(record.id));
+      }
+    }
+    await Bun.sleep(INBOX_POLL_MS);
   }
 }
 
-/**
- * The worktree of a done task that is gone, made again before a runner starts in it: on the task branch when that
- * still exists, else on a new one off the target branch. `git worktree prune` first drops the stale entry.
- */
-export async function restoreWorktree(record: TaskRecord): Promise<void> {
-  if (existsSync(record.worktree)) return;
-  const target = await taskMainBranch(record.sessionDir, record.sessionId);
-  await git(runCommand, record.repo, ["worktree", "prune"]);
-  if (await localBranchExists(record.repo, record.branch)) await git(runCommand, record.repo, ["worktree", "add", "--quiet", record.worktree, record.branch]);
-  else if (target !== undefined) await git(runCommand, record.repo, ["worktree", "add", "--quiet", "-b", record.branch, record.worktree, `refs/heads/${target}`]);
-  else throw new Error(`the worktree ${record.worktree} is gone and the task's target branch is unknown`);
+/** The task's live runner: the holder of its lock (`lockRunner`), named by the task's session id; as a list. */
+export async function liveRunners(record: Pick<TaskRecord, "id" | "sessionId">): Promise<number[]> {
+  const pid = await lockRunner(taskLockPath(record.id), record.sessionId);
+  return pid === null ? [] : [pid];
 }
 
-/**
- * The pids of this factory's runners of a task still alive, found by their command line (`runner.ts ... <sessionId> ...`):
- * `pgrep` finds the candidates, then the session id must be a whole argument after `runner.ts` (`/proc/<pid>/cmdline`),
- * so a short id never matches another task's runner nor a wave's (`wave-runner.ts`), and the runner must carry the
- * caller's marker (`ownRunner`, invariant 16). Among `snapshot` (`runnerSnapshot`) when given.
- */
-export async function liveRunners(record: Pick<TaskRecord, "sessionId">, snapshot?: RunnerSnapshot): Promise<number[]> {
-  if (snapshot !== undefined) return snapshot.filter(({ args }) => runnerOf(args, record.sessionId)).map(({ pid }) => pid);
-  const pattern = `(^|[ /])runner\\.ts .*${record.sessionId.replace(/[^A-Za-z0-9_-]/g, ".")}`;
-  const result = await runCommand(["pgrep", "-f", pattern], { cwd: "/", maxStdoutChars: 10_000 });
-  // Exit 1 is "no match"; anything else (pgrep missing or failing) would hide a live runner.
-  if (result.exitCode === 1) return [];
-  if (result.exitCode !== 0) throw new Error(`pgrep, which finds a task's runner, failed (exit ${result.exitCode}): ${outputTail(result.output)}`);
-  const pids = result.stdout.split("\n").filter((line) => line.trim() !== "").map(Number);
-  const runs = await Promise.all(pids.map((pid) => runsSession(pid, record.sessionId)));
-  return ownRunners(pids.filter((_, index) => runs[index]));
-}
-
-/** Whether process `pid` is a task runner (`runner.ts`) with `sessionId` as one of its arguments; false once it ended. */
-async function runsSession(pid: number, sessionId: string): Promise<boolean> {
-  const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
-  return runnerOf(cmdline.split("\0"), sessionId);
-}
-
-/** Whether `args` are a task runner's (`runner.ts`) with `sessionId` as one of its arguments. */
-function runnerOf(args: readonly string[], sessionId: string): boolean {
-  const script = args.findIndex((arg) => basename(arg) === "runner.ts");
-  return script >= 0 && args.slice(script + 1).includes(sessionId);
-}
-
-async function runnersEnded(record: Pick<TaskRecord, "sessionId">, waitMs: number): Promise<boolean> {
-  const deadline = Date.now() + waitMs;
-  while ((await liveRunners(record)).length > 0) {
-    if (Date.now() > deadline) return false;
-    await Bun.sleep(100);
-  }
-  return true;
-}
-
-/** Ends the task's runners: SIGTERM (the runner closes Pi's stdin), SIGKILL when that is not enough. */
-export async function stopRunners(record: Pick<TaskRecord, "sessionId">): Promise<void> {
-  const pids = await liveRunners(record);
-  if (pids.length === 0) return;
-  for (const pid of pids) signalRunner(pid, "SIGTERM");
-  if (await runnersEnded(record, STOP_WAIT_MS)) return;
-  for (const pid of await liveRunners(record)) signalRunner(pid, "SIGKILL");
-  if (!(await runnersEnded(record, STOP_WAIT_MS))) throw new Error(`the runner of task ${record.sessionId} does not end`);
+/** Ends the task's runners (SIGTERM: the runner closes Pi's stdin). */
+export function stopRunners(record: Pick<TaskRecord, "id" | "sessionId">): Promise<void> {
+  return stopProcesses(() => liveRunners(record), `the runner of task ${record.sessionId}`);
 }
 
 /** What removing the task would drop: commits on its branch that `target` lacks, uncommitted changes in its worktree. */
@@ -368,12 +370,11 @@ export interface UnmergedWork {
 
 /**
  * The task's unmerged work. Without a `target` (the task never recorded one) its commits are those no other local
- * branch has. A worktree whose status cannot be read counts as dirty. An old merge request's commits stay on its
- * source branch, which removing it keeps: none count.
+ * branch has. A worktree whose status cannot be read counts as dirty.
  */
 export async function unmergedWork(record: TaskRecord, target: string | undefined): Promise<UnmergedWork> {
   let commits = 0;
-  if (ownBranch(record) !== undefined && (await localBranchExists(record.repo, record.branch))) {
+  if (await localBranchExists(record.repo, record.branch)) {
     const range =
       target !== undefined && (await localBranchExists(record.repo, target))
         ? [`refs/heads/${target}..refs/heads/${record.branch}`]
@@ -390,18 +391,17 @@ export async function unmergedWork(record: TaskRecord, target: string | undefine
 }
 
 /**
- * Removes the task's worktree, its own branch (through git; an old merge request's source branch stays), its record,
- * its runner log, its lock, its inbox and its sync state (`sync.ts`). The session file stays; the archive (`archive.ts`) is the caller's step before it.
+ * Removes the task's worktree, its own branch (through git), its record,
+ * its runner log, its lock and its inbox. The session file stays.
  */
 export async function deleteTask(record: TaskRecord): Promise<void> {
-  const branch = ownBranch(record);
+  const { branch } = record;
   await removeWorktree(record.repo, record.worktree, branch);
   if (existsSync(record.worktree)) throw new Error(`${record.worktree}: the worktree could not be removed`);
-  if (branch !== undefined && (await localBranchExists(record.repo, branch))) throw new Error(`${record.repo}: the branch ${branch} could not be deleted`);
+  if (await localBranchExists(record.repo, branch)) throw new Error(`${record.repo}: the branch ${branch} could not be deleted`);
   await removeTask(record.id);
   await rm(taskInboxPath(record.id), { force: true });
   await rm(inboxReadPath(taskInboxPath(record.id)), { force: true });
-  await removeSyncState(runCommand, record.repo, record.id);
 }
 
 /** Pi's directory name of a path (`/a/b` -> `--a-b--`): one sessions folder per repository, as pi-host names it. */

@@ -1,43 +1,20 @@
 /**
- * The factory core: every factory feature as one action over plain JSON. Clients (the `factory` tool, pi-host, a UI)
- * import only this module and render what it returns.
- *
- * - Provides `ACTIONS` (name -> summary, JSON schema of the params, whether it changes anything) and `callAction`
- * - Every failure is a `FactoryError` of one sentence with a code: `invalid` (the params), `not_found` (repo, branch,
- *   task), `busy` (another action or a runner holds the task), `refused` (the task's state or work forbids it),
- *   `failed` (anything else)
- * - A `repo` param is a path inside the repository, relative to the caller's `cwd` (absolute without one); an action
- *   that needs one and gets none uses `cwd`. The repository is its primary checkout. A task `id` may be a unique prefix
- * - The models a task or repository may use are one user-level list (`models.ts`): `models.get`/`models.set`.
- *   `tasks.start` and `settings.set` refuse a model not on it, and anything while it is empty; reads never check it
- * - `hostOnly` actions are for the host (pi-host), never offered to an agent: `tasks.import`
- * - `tasks.wait` polls the watched tasks and waves until they rest (no runner lives and the state is a resting one, or
- *   it is interrupted; a wave: `merged`, `cancelled`) or one needs attention (a task resting and not `done`; a wave
- *   `rejected`, `blocked`, `waiting_approve` or interrupted): a supervisor's completion signal
- * - The wave actions (`waves.*`) build on `waves.ts` (the log and its fold) and `wave-poke.ts` (the runner): a stage
- *   change is a compare-and-append on the log, then a poke; `WaveView.actions` holds the same predicates
+ * The factory core, the one module clients import: `ACTIONS` and `callAction`, plain JSON in and out. The actions
+ * come from the features (`features.ts`); this module checks the params and runs the handler.
  * - Runners an action starts get the caller's `env` (default `process.env`): the host passes one without its secrets
- * - A task that checks its state and then acts on it holds the task lock (`tasks.ts`) from the check on; a runner it
- *   spawns takes the lock over until it exits. `cancel` stops a live runner first: two Pi processes never share a session
- * - Reads a task's session file for its state, settings, usage (assistant messages plus recorded reviews) and
- *   timeline (by byte offset, so a client polls with `next`)
  * - Imports only Bun, `node:` modules and plugin modules that do the same: the deployed plugin has no `node_modules`
- * - The actions come from the features (`features.ts`): each registers its specs, handlers and views (`feature.ts`)
- * - Cut by area, this module keeps `ACTIONS`, the params check and `callAction`, and re-exports what clients import:
- *   `core-shared.ts` (`FactoryError`, the params' helpers), `core-settings.ts` (models, repos, branches, settings,
- *   config), `core-tasks.ts` (`tasks.*`, `TaskView`), `core-wait.ts` (`tasks.wait`), `core-waves.ts` (`waves.*`,
- *   `WaveView`, what the wave's runner asks)
  */
-import { FactoryError, oneLine, type Handler, type Params } from "./core-shared.ts";
+import { oneLine, type Handler, type Params } from "./core-shared.ts";
 import type { ActionSpec, Feature } from "./feature.ts";
 import { FEATURES } from "./features.ts";
-import { TaskBusyError } from "./tasks.ts";
-import { errorText, isRecord } from "./util.ts";
+import { checkValue } from "./settings.ts";
+import { errorText, FactoryError, isRecord } from "./util.ts";
 
-export { FactoryError, oneLine, type FactoryErrorCode, type FactoryErrorDetail } from "./core-shared.ts";
+export { oneLine } from "./core-shared.ts";
+export { FactoryError, type FactoryErrorCode, type FactoryErrorDetail } from "./util.ts";
 export type { ActionSpec } from "./feature.ts";
 export type { TaskActionName, TaskView, TimelineEntry, TimelineKind } from "./core-tasks.ts";
-export { noticeInputs, pokeQueuedAfter, queueLook, startQueuedWave, startWaveTasks, taskWave, waveBranchName, waveMergeRefusal, waveReviewsEach, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
+export { noticeInputs, pokeQueuedAfter, startQueuedWave, sessionWave, startWaveTasks, waveBranchName, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
 
 /** Every feature's actions (`features.ts`), in the features' order. Two features naming one action fail on load. */
 export const ACTIONS = Object.freeze(
@@ -69,15 +46,7 @@ function isActionName(name: string): name is ActionName {
   return Object.hasOwn(ACTIONS, name);
 }
 
-const TYPE_CHECKS: Record<string, (value: unknown) => boolean> = {
-  string: (value) => typeof value === "string",
-  boolean: (value) => typeof value === "boolean",
-  integer: (value) => typeof value === "number" && Number.isInteger(value),
-  object: (value) => isRecord(value),
-  array: (value) => Array.isArray(value),
-};
-
-/** The params checked against the action's schema (top-level keys only; unknown keys are dropped). */
+/** The params checked against the action's schema: required keys and the default `repo`, each value by `checkValue`; unknown keys dropped. */
 function checkParams(name: ActionName, raw: unknown, cwd: string | undefined): Params {
   if (raw !== undefined && raw !== null && !isRecord(raw)) throw new FactoryError("invalid", `${name} needs its params as an object`);
   const { required, properties } = ACTIONS[name].params as ActionSpec["params"];
@@ -90,11 +59,7 @@ function checkParams(name: ActionName, raw: unknown, cwd: string | undefined): P
       if (required.includes(key)) throw new FactoryError("invalid", `${name} needs ${key}`);
       continue;
     }
-    const type = String(schema.type);
-    if (!TYPE_CHECKS[type](value)) throw new FactoryError("invalid", `${name}: ${key} must be ${type === "integer" || type === "array" ? `an ${type}` : `a ${type}`}`);
-    if (typeof schema.minimum === "number" && (value as number) < schema.minimum) throw new FactoryError("invalid", `${name}: ${key} must be at least ${schema.minimum}`);
-    if (typeof schema.maximum === "number" && (value as number) > schema.maximum) throw new FactoryError("invalid", `${name}: ${key} must be at most ${schema.maximum}`);
-    params[key] = value;
+    params[key] = checkValue(schema, value, `${name}: ${key}`);
   }
   return params;
 }
@@ -119,7 +84,6 @@ export async function callAction(name: string, params: unknown, options: CallOpt
     return await handlersByName()[name](checked, { cwd, signal, env, origin });
   } catch (error) {
     if (error instanceof FactoryError) throw error;
-    if (error instanceof TaskBusyError) throw new FactoryError("busy", error.message);
     throw new FactoryError("failed", oneLine(errorText(error)));
   }
 }

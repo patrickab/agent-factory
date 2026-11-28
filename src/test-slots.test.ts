@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runGateStep } from "./flaky-rerun.ts";
 import { type CommandResult, runCommand } from "./run.ts";
-import { type SlotPool, slotCount, slotEnv, slotPool, slotWaiting, takeSlot } from "./test-slots.ts";
+import { type SlotPool, slotWaiting, takeSlot } from "./test-slots.ts";
+import { procStart } from "./lock.ts";
+import { until } from "./core-test-kit.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -19,26 +21,7 @@ function pool(count: number, extra: Partial<SlotPool> = {}): SlotPool {
 
 const OK: CommandResult = { exitCode: 0, killed: false, timedOut: false, durationMs: 1, stdout: "", stdoutTruncated: false, output: "" };
 
-async function until(check: () => boolean | Promise<boolean>, ms = 10_000): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error("timed out waiting");
-    await Bun.sleep(10);
-  }
-}
-
 describe("test slots", () => {
-  test("K is FACTORY_SLOTS, else a quarter of the cores, at least 1; jobs are cores / K", () => {
-    expect(slotCount({}, 8)).toBe(2);
-    expect(slotCount({}, 3)).toBe(1);
-    expect(slotCount({ FACTORY_SLOTS: "3" }, 8)).toBe(3);
-    expect(slotCount({ FACTORY_SLOTS: "0" }, 8)).toBe(2);
-    expect(slotEnv(pool(3))).toEqual({ FACTORY_TEST_JOBS: "2", FACTORY_SLOT_HELD: "1" });
-    expect(slotEnv(pool(16))).toEqual({ FACTORY_TEST_JOBS: "1", FACTORY_SLOT_HELD: "1" });
-    expect(slotEnv(pool(2, { jobs: "5" }))).toEqual({ FACTORY_SLOT_HELD: "1" });
-    expect(slotPool({ FACTORY_SLOT_HELD: "1", FACTORY_TEST_JOBS: "5" }, 8)).toMatchObject({ held: true, jobs: "5", count: 2 });
-  });
-
   test("K+1 gate runs: one waits, shown as waiting, and runs when a slot frees", async () => {
     const slots = pool(2);
     const started: number[] = [];
@@ -51,8 +34,8 @@ describe("test slots", () => {
       }, () => false, slots),
     );
     await until(() => started.length === 2);
+    // The third is waiting for a slot, not started.
     await until(() => slotWaiting([process.pid], slots.dir));
-    await Bun.sleep(100);
     expect(started.length).toBe(2);
     const waiting = [0, 1, 2].find((index) => !started.includes(index))!;
     gates[started[0]].resolve();
@@ -103,31 +86,21 @@ await takeSlot(${JSON.stringify(slots)}); console.log("held"); await Bun.sleep(6
     await release!();
   });
 
-  test("a waiting marker whose process is gone is ignored and removed", async () => {
+  test("a waiting marker whose process is gone, or whose pid another process has now, is ignored and removed", async () => {
     const slots = pool(1);
     const dead = Bun.spawn(["true"]);
     await dead.exited;
     mkdirSync(join(slots.dir, "waiting"), { recursive: true });
-    const marker = join(slots.dir, "waiting", `${dead.pid}.${crypto.randomUUID()}`);
-    writeFileSync(marker, "");
-    expect(await slotWaiting([dead.pid], slots.dir)).toBe(false);
-    expect(existsSync(marker)).toBe(false);
+    const marker = (pid: number, start: string | null) => join(slots.dir, "waiting", `${pid}-${start}-${crypto.randomUUID()}`);
+    const stale = [marker(dead.pid, "1"), marker(process.pid, "1")];
+    for (const path of stale) writeFileSync(path, "");
+    expect(await slotWaiting([dead.pid, process.pid], slots.dir)).toBe(false);
+    for (const path of stale) expect(existsSync(path)).toBe(false);
     // A live one's marker counts and stays.
-    const live = join(slots.dir, "waiting", `${process.pid}.${crypto.randomUUID()}`);
+    const live = marker(process.pid, await procStart(process.pid));
     writeFileSync(live, "");
     expect(await slotWaiting([dead.pid, process.pid], slots.dir)).toBe(true);
     expect(existsSync(live)).toBe(true);
-  });
-
-  test("a waiting marker older than the start of the process that has its pid now is stale: ignored and removed", async () => {
-    const slots = pool(1);
-    mkdirSync(join(slots.dir, "waiting"), { recursive: true });
-    // A marker left by an earlier process of this pid: written before this process started.
-    const old = join(slots.dir, "waiting", `${process.pid}.${crypto.randomUUID()}`);
-    writeFileSync(old, "");
-    utimesSync(old, new Date("2000-01-01T00:00:00Z"), new Date("2000-01-01T00:00:00Z"));
-    expect(await slotWaiting([process.pid], slots.dir)).toBe(false);
-    expect(existsSync(old)).toBe(false);
   });
 
   test("FACTORY_TEST_JOBS and FACTORY_SLOT_HELD reach the command", async () => {

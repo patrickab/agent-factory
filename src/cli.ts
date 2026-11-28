@@ -1,30 +1,20 @@
 #!/usr/bin/env bun
 /**
  * `factory`: every core action (`core.ts`) on the command line. It only parses arguments, calls `callAction` and
- * prints one of the two views of the answer (`VIEWS.md`).
+ * prints the agent's text or, with `--json`, the full view. Also `factory actions`, `--help`, `--core-path` and
+ * `factory slot -- <command...>` (a command holding a test slot, `test-slots.ts`).
  *
- * - `factory <action> [<json params> | -] [--json]`: `-` reads the params from stdin, none means `{}`. stdout gets the
- *   agent view (`agent-view.ts`, text lines), or with `--json` (anywhere after the action) the full view: `callAction`'s
- *   result as JSON. The timelines (`tasks.timeline`, `waves.timeline`) always print JSON: programs replay them. Exit 0.
- *   `cwd` is the caller's directory. `hostOnly` actions are available: the CLI is the host
- * - A `FactoryError` goes to stderr as `factory: <code>: <message>`, exit 1 (`invalid`: exit 2); without `--json` the
- *   agent view's way out follows the message (` · next: ...`)
- * - `factory actions [<name>]`: one line per action, or one action's params in full; with `--json` the `ACTIONS` map
- *   (or the one action's spec) as JSON. `factory --core-path`: the absolute path of `core.ts`.
- *   `factory --help`: one line per action with its summary
- * - `factory slot -- <command...>`: runs the command holding a test slot (`test-slots.ts`), its exit code passed
- *   through; with `FACTORY_SLOT_HELD` set it runs it directly. For test runs outside the factory's gates
+ * - A `FactoryError` goes to stderr as `factory: <code>: <message>`, exit 1 (`invalid`: exit 2)
  */
 import { join } from "node:path";
-import { agentActions, agentError, agentView, hasAgentView } from "./agent-view.ts";
+import { agentActions, agentError } from "./agent-view.ts";
 import { ACTIONS, callAction, FactoryError } from "./core.ts";
+import { actionView, hasView } from "./factory-tool.ts";
 import { runInSlot } from "./test-slots.ts";
 import { errorText } from "./util.ts";
 
 const USAGE = "usage: factory <action> [<json params> | -] [--json] | factory actions [<name>] [--json] | factory slot -- <command...> | factory --core-path | factory --help";
 const JSON_FLAG = "--json";
-/** Actions whose answer is a log for programs: JSON, with or without `--json`. */
-const ALWAYS_JSON: readonly string[] = ["tasks.timeline", "waves.timeline"];
 
 function helpText(): string {
   const lines = Object.entries(ACTIONS).map(([name, spec]) => `${name}  ${spec.summary}`);
@@ -99,8 +89,8 @@ async function main(args: string[]): Promise<number> {
   try {
     const params = await readParams(positional[0]);
     const result = await callAction(first, params, { cwd: process.cwd(), signal: abort.signal });
-    if (json || ALWAYS_JSON.includes(first) || !hasAgentView(first)) printJson(result);
-    else process.stdout.write(`${agentView(first, params, result)}\n`);
+    if (json || !hasView(first)) printJson(result);
+    else process.stdout.write(`${actionView(first, params, result).text}\n`);
     return 0;
   } catch (error) {
     return fail(error, json);

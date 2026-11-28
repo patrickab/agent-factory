@@ -1,11 +1,10 @@
 /** `tasks.wait`: a supervisor's completion signal (`core-wait.ts`). */
-import { card, shortId, taskCardState, waveCardState } from "./cards.ts";
-import { plural } from "./agent-view.ts";
-import { waitView, type WaitResult } from "./agent-view.ts";
+import { card, proofCard, taskCard, taskState, waveCard, waveState } from "./cards.ts";
 import { WAIT_TIMEOUT_MS } from "./core-shared.ts";
-import { WAIT_HANDLERS } from "./core-wait.ts";
+import { WAIT_HANDLERS, type WaitAnswer } from "./core-wait.ts";
 import { feature, spec, TAG_FILTER } from "./feature.ts";
 import type { Handlers } from "./feature.ts";
+import { short } from "./util.ts";
 
 export const WAIT = feature({
   name: "wait",
@@ -19,30 +18,32 @@ export const WAIT = feature({
           description: "Watch the tasks and the waves whose tag is this one or lies under it, those started during the wait too; give exactly one of ids, tag and wave",
         },
         wave: { type: "string", description: "Watch this wave (id or unique prefix) and its tasks; give exactly one of ids, tag and wave" },
-        ignore: { type: "array", items: { type: "string" }, description: "Task or wave ids (or prefixes) left out of the watched ones" },
         timeoutMs: { type: "integer", minimum: WAIT_TIMEOUT_MS.minimum, maximum: WAIT_TIMEOUT_MS.maximum, description: `Default: ${WAIT_TIMEOUT_MS.default}` },
       },
       [],
       false,
+      // One row per watched subject, then the cards of those that need attention: the agent reads them in full.
+      (params, result: WaitAnswer) => {
+        const wanted = new Set(result.attention);
+        const proofs = result.proofs ?? [];
+        const shownWaves = new Set(result.waves.map((wave) => wave.id));
+        const rows = [
+          ...result.waves.map((wave) => ({ label: `wave ${short(wave.id)}`, text: `${waveState(wave)}  ${wave.counts.done}/${wave.counts.total}  ${wave.tag}` })),
+          ...result.tasks.filter((task) => task.wave === null || !shownWaves.has(task.wave)).map((task) => ({ label: `task ${short(task.id)}`, text: `${taskState(task)}  ${task.title}` })),
+          ...proofs.map((proof) => ({ label: `proof ${short(proof.id)}`, text: `${proof.interrupted ? "interrupted" : proof.state}  ${proof.branch}` })),
+        ];
+        const timeout = typeof params.timeoutMs === "number" ? params.timeoutMs : WAIT_TIMEOUT_MS.default;
+        const title = result.timedOut ? `the wait timed out after ${Math.round(timeout / 1000)} s` : wanted.size > 0 ? `${wanted.size} need${wanted.size === 1 ? "s" : ""} a ruling` : rows.length === 0 ? "nothing to wait for" : "everything rests";
+        return [
+          card("action", wanted.size > 0 ? "attention" : "quiet", title, { rows }),
+          ...result.waves.filter((wave) => wanted.has(wave.id)).map((wave) => waveCard(wave, `wave ${wave.tag}`, "attention")),
+          ...result.tasks.filter((task) => wanted.has(task.id)).map((task) => taskCard(task, `task ${short(task.id)}`, "attention")),
+          ...proofs.filter((proof) => wanted.has(proof.id)).map((proof) => proofCard(proof, `the gates of ${proof.branch}`, "attention")),
+        ];
+      },
     ),
   },
   get handlers(): Handlers {
     return WAIT_HANDLERS;
-  },
-  renderers: {
-    "tasks.wait": (params, result: WaitResult) => waitView(params, result),
-  },
-  cards: {
-    "tasks.wait": (_params, result: WaitResult) => {
-      const attention = new Set(result.attention);
-      const rows = [
-        ...result.waves.filter((wave) => attention.has(wave.id)).map((wave) => ({ label: `wave ${wave.tag}`, text: waveCardState(wave) })),
-        ...result.tasks.filter((task) => attention.has(task.id)).map((task) => ({ label: `task ${shortId(task.id)}`, text: taskCardState(task) })),
-        ...(result.proofs ?? []).filter((proof) => attention.has(proof.id)).map((proof) => ({ label: `proof ${shortId(proof.id)}`, text: proof.interrupted ? "interrupted" : proof.state })),
-        { label: "watched", text: [plural(result.waves.length, "wave"), plural(result.tasks.length, "task"), ...(result.proofs?.length ? [plural(result.proofs.length, "proof")] : [])].join(", ") },
-      ];
-      const title = result.timedOut ? "the wait timed out" : rows.length > 1 ? `${rows.length - 1} need${rows.length === 2 ? "s" : ""} a ruling` : "everything rests";
-      return card("action", rows.length > 1 ? "attention" : "quiet", title, { rows });
-    },
   },
 });

@@ -3,7 +3,7 @@
 # environment is broken (the task blocks as `infra`), anything else fails. Print a summary of the failure
 # (at most 50 lines) on stdout: that is all the coder gets back. Call the same commands from the repo's CI.
 #
-# Commands run in the task's worktree: after_create once it exists, after_code after every coder turn, and
+# Commands run in the task's worktree: after_create once it exists, and
 # after_merge in the main checkout after a merge that changed a lockfile.
 #
 # The factory makes some worktrees itself, not with agent-worktree: a wave's review worktree and the worktree of
@@ -12,7 +12,6 @@ hooks:
   after_create: []
   # after_create:
   #   - [bun, install, --frozen-lockfile]   # or [npm, ci], [uv, sync, --frozen]
-  after_code: []
   after_merge: []
 # Every gate command takes one of the machine's test slots (FACTORY_SLOTS, default cores / 4) and gets
 # FACTORY_TEST_JOBS = cores / slots as its parallelism; hooks take none. Run tests by hand with `factory slot -- <cmd>`.
@@ -26,6 +25,3 @@ merge_gates: []
 # merge_gates): the tests its change reaches. Env FACTORY_BASE is the commit
 # the rebased change sits on (diff FACTORY_BASE..HEAD). Unset: gates only.
 task_gates: []
-# File names (no directory) of lockfiles: a merge that changes one runs after_merge, and they go last in the
-# patch the reviewer reads. Unset means the list below.
-# lockfiles: [uv.lock, package-lock.json, bun.lock, bun.lockb]
