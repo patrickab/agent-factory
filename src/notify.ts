@@ -30,8 +30,9 @@ const TASK_EVENTS: Record<string, string> = {
 };
 
 function taskEvent(task: TaskView): string | null {
-  if (task.running || task.state === null) return null;
+  if (task.running) return null;
   if (task.interrupted) return "interrupted";
+  if (task.state === null) return null;
   return Object.hasOwn(TASK_EVENTS, task.state) ? task.state : null;
 }
 

@@ -126,6 +126,33 @@ describe("mergeTask", () => {
     expect(existsSync(join(repo(), "synced"))).toBe(false);
   });
 
+  // The user's uncommitted change to `lines.txt` in the primary checkout, the task's change to it (or none).
+  const lines = "1\n2\n3\n4\n5\n";
+  for (const [name, task, user, after, conflicts] of [
+    ["does not overlap", null, "1\n2\n3\n4\nuser\n", "1\n2\n3\n4\nuser\n", undefined],
+    ["overlaps and applies after the merge", "task\n2\n3\n4\n5\n", "1\n2\n3\n4\nuser\n", "task\n2\n3\n4\nuser\n", undefined],
+    ["conflicts with the merge", "task\n2\n3\n4\n5\n", "user\n2\n3\n4\n5\n", null, ["lines.txt"]],
+  ] as const) {
+    test(`an uncommitted change in the target's checkout that ${name}: merged, the change kept`, async () => {
+      writeFileSync(join(repo(), "lines.txt"), lines);
+      gitIn(repo(), "add", "-A");
+      gitIn(repo(), "commit", "--quiet", "-m", "lines");
+      const worktree = addWorktree("task-u");
+      writeFileSync(join(worktree, "feature.txt"), "feature\n");
+      if (task !== null) writeFileSync(join(worktree, "lines.txt"), task);
+      writeFileSync(join(repo(), "lines.txt"), user);
+
+      const outcome = await mergeTask(input(worktree, await taskIn(worktree), noGates));
+
+      expect(mergeData(outcome)).toMatchObject({ ok: true, commit: gitIn(repo(), "rev-parse", "HEAD") });
+      expect(mergeData(outcome).stashConflicts).toEqual(conflicts === undefined ? undefined : [...conflicts]);
+      expect(readFileSync(join(repo(), "feature.txt"), "utf8")).toBe("feature\n");
+      if (after !== null) expect(readFileSync(join(repo(), "lines.txt"), "utf8")).toBe(after);
+      expect(gitIn(repo(), "stash", "list") !== "").toBe(conflicts !== undefined);
+      if (conflicts !== undefined) expect(gitIn(repo(), "show", "stash@{0}:lines.txt")).toBe(user.trim());
+    });
+  }
+
   test("a squash of one commit lands as that commit, its ref on it", async () => {
     const worktree = addWorktree("wave-s");
     writeFileSync(join(worktree, "feature.txt"), "feature\n");
@@ -316,7 +343,7 @@ describe("mergeTask", () => {
   });
 
   for (const where of ["primary checkout", "other worktree"] as const) {
-    test(`uncommitted work in the ${where} holding the target that the merge would overwrite refuses it: nothing moved`, async () => {
+    test(`an untracked file in the ${where} holding the target that the merge would overwrite refuses it: nothing moved`, async () => {
       const worktree = addWorktree("task-q");
       const task = await taskIn(worktree);
       let holder = repo();
@@ -325,13 +352,14 @@ describe("mergeTask", () => {
         holder = join(scratch, `wt-${caseSerial()}-main`);
         gitIn(repo(), "worktree", "add", "--quiet", holder, "main");
       }
-      writeFileSync(join(worktree, "README.md"), "task version\n");
-      writeFileSync(join(holder, "README.md"), "user work\n");
+      writeFileSync(join(worktree, "new.txt"), "task version\n");
+      writeFileSync(join(holder, "new.txt"), "user work\n");
 
       const outcome = await mergeTask(input(worktree, task, noGates));
 
       expect(mergeData(outcome)).toMatchObject({ ok: false, commit: null });
-      expect(readFileSync(join(holder, "README.md"), "utf8")).toBe("user work\n");
+      expect(mergeData(outcome).error).toContain("new.txt");
+      expect(readFileSync(join(holder, "new.txt"), "utf8")).toBe("user work\n");
       expect(gitIn(repo(), "log", "--format=%s", "main")).toBe("base");
     });
   }

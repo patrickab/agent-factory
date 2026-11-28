@@ -3,7 +3,7 @@
  * The agent's text of a card holds no path, timestamp, session id, request or patch.
  */
 import { expect, test } from "bun:test";
-import { present, type FactoryCard } from "./cards.ts";
+import { present, waveCard, type FactoryCard } from "./cards.ts";
 import { ACTIONS, type TaskView } from "./core.ts";
 import { actionView, hasView } from "./factory-tool.ts";
 import type { ProofView } from "./gates-prove.ts";
@@ -88,4 +88,9 @@ test("every notice has a valid card: a ruling is attention, information is quiet
     for (const pattern of FORBIDDEN) expect(notices[0].text, notices[0].key).not.toMatch(pattern);
     expect(notices[0].card, notices[0].key).toMatchObject({ kind, tone });
   }
+});
+
+test("a wave's time row names the parts it spent time in, then the total", () => {
+  const time = { coding: 2_460_000, gates: 360_000, review: 0, merge: 180_000, waiting: 720_000, total: 3_960_000 };
+  expect(waveCard(wave({ time }), "w").rows?.find((row) => row.label === "time")?.text).toBe("coding 41m · gates 6m · merge 3m · waiting 12m · total 1h06m");
 });

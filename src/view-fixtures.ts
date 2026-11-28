@@ -50,6 +50,7 @@ export const waveTask = (key: string, state: WaveTask["state"], after: string[] 
   taskId: state === "pending" ? null : taskId,
   sessionId: state === "pending" ? null : SESSION,
   state,
+  interrupted: false,
   usage: state === "pending" ? null : { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 1 },
   id: taskId ?? `${key.padEnd(8, "0").slice(0, 8)}-1111-4222-8333-944445555666`,
 });
@@ -82,6 +83,7 @@ export function wave(over: Partial<WaveView> = {}): WaveView {
     minors: [],
     updates: [],
     usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, cost: 18.4 },
+    time: { coding: 2_460_000, gates: 360_000, review: 0, merge: 0, waiting: 0, total: 2_700_000 },
     actions: ["waves.add", "waves.cancel"],
     ...over,
   };

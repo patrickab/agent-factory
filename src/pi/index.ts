@@ -12,10 +12,10 @@ import { cardsToRule, sessionWidget } from "../session-widget.ts";
 import { registerCardRenderers } from "./cards-tui.ts";
 import type { WaveView } from "../waves.ts";
 import { registerFeedbackTool } from "./feedback-tool.ts";
-import { sessionWave } from "../core.ts";
-import { DONE_REFUSAL } from "../launch.ts";
+import { retitleSessionTask, sessionWave } from "../core.ts";
 import { snapshotTree } from "../git.ts";
 import { modelsCommand } from "../models.ts";
+import { isConventionalTitle, parseCommitMessage } from "../commitmsg.ts";
 import { commitAnswerDrafts, messageRoundDrafts, runRound, type RoundResult } from "../pipeline.ts";
 import {
   applyReviewed,
@@ -270,10 +270,6 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("factory: a merge is running, send the message when it has ended", "warning");
       return { action: "handled" };
     }
-    if (atRest.state === "done") {
-      ctx.ui.notify(`factory: the task ${DONE_REFUSAL}`, "warning");
-      return { action: "handled" };
-    }
     // The answer to the coder's question continues its round: no rebase, so the worktree stays as the coder left it.
     if (atRest.state === "waiting_answer") return;
     if (!isResting(atRest.state)) return;
@@ -341,7 +337,11 @@ export default function (pi: ExtensionAPI) {
         const { runner } = session;
         // The answer to the commit message ask, unless the coder changed files with it: then the round runs again.
         if (asked && (await snapshotTree(runner.run, ctx.cwd)) === asked.tree) {
-          result = commitAnswerDrafts(current, lastAssistantText(ctx.sessionManager.getBranch()), asked.passedInto, ctx.hasPendingMessages());
+          const answer = lastAssistantText(ctx.sessionManager.getBranch());
+          // The coder's subject becomes the title of a task dropped in plain words; a follow-up run keeps the first title.
+          const subject = parseCommitMessage(answer)?.title;
+          if (subject !== undefined && !isConventionalTitle(current.task.title) && current.mergedCommit == null) await retitleSessionTask(ctx.sessionManager.getSessionId(), subject);
+          result = commitAnswerDrafts(current, answer, asked.passedInto, ctx.hasPendingMessages());
         } else {
           result = await runRound(current, pipelineSteps(ops, task, await taskFiles(ops, task), false));
           if (result.commitAsk) commitAsk = { passedInto: result.commitAsk, tree: await snapshotTree(runner.run, ctx.cwd) };

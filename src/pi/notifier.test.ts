@@ -48,6 +48,7 @@ async function taskOf(n: number, origin: string | null, state: string): Promise<
     tag: "team/a",
     plan: null,
     wave: null,
+    start: "",
     origin,
   };
   mkdirSync(sessionDir, { recursive: true });

@@ -199,22 +199,21 @@ describe("a wave never waits silently (invariant 8)", () => {
     expect((await timeline()).at(-1)).toMatchObject({ kind: "tasks", dropped: ["c"] });
   }, 30_000);
 
-  test("a task that fails to launch blocks the wave (infra, the error in its stage event); waves.retry builds again", async () => {
-    const repo = await waveRepo();
-    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [{ key: "c", title: "Add d", request: "add d", after: ["a"], id: crypto.randomUUID() }] });
-    // The launch refuses before it creates anything: the wave's branch is gone.
-    const tip = git(repo, "rev-parse", BRANCH);
-    git(repo, "branch", "-D", BRANCH);
+  test("a task that fails to launch blocks the wave (infra, the error in its stage event), the one launched beside it stays; waves.retry builds again", async () => {
+    // The after_create hook fails in the worktree of a task titled "Fail ..." only.
+    const repo = await waveRepo('hooks:\n  after_create:\n    - ["sh", "-c", "case $PWD in *fail-*) exit 1;; esac"]\ngates:\n  - ["true"]\n');
+    const task = (key: string, title: string) => ({ key, title, request: title, after: ["a"], id: crypto.randomUUID() });
+    await appendWaveEvent(WAVE(), { kind: "tasks", tasks: [task("c", "Fail c"), task("d", "Add d")] });
     expect(await runWave(WAVE())).toBe(0);
     const wave = await getWave();
-    expect([wave.stage, wave.reason, wave.running, wave.tasks.map((task) => task.state)]).toEqual(["blocked", "infra", false, ["done", "done", "pending"]]);
+    expect([wave.stage, wave.reason, wave.running, wave.tasks.map((task) => task.state)]).toEqual(["blocked", "infra", false, ["done", "done", "pending", expect.any(String)]]);
+    expect(wave.tasks.map((task) => task.taskId !== null)).toEqual([true, true, false, true]);
     const last = (await timeline()).at(-1);
     expect(last).toMatchObject({ kind: "stage", stage: "blocked", reason: "infra", detail: expect.any(String) });
     expect(JSON.stringify(last)).not.toContain(repo);
     const waited = await waitWave(10_000);
     expect([waited.timedOut, waited.attention]).toEqual([false, [WAVE()]]);
-    // Fixed: a retry with a task not started builds again (not a review).
-    git(repo, "branch", BRANCH, tip);
+    // A retry with a task not started builds again (not a review).
     const retried = await holding(async () => ((await callAction("waves.retry", { id: WAVE() })) as { wave: WaveView }).wave);
     expect(retried.stage).toBe("building");
   }, 30_000);

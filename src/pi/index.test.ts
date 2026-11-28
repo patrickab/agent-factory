@@ -140,6 +140,8 @@ test("the answer to the commit message ask is the commit message", async () => {
   const branch: Entry[] = [];
   const worktree = addTaskWorktree();
   const pi = session(worktree, branch);
+  const { readTask, writeTask } = await import("../tasks.ts");
+  await writeTask({ id: "43000000-0000-4000-8000-0000000000aa", repo, worktree, branch: "task", title: "Add task file", sessionId: "test-session", sessionDir: scratch, createdAt: "2026-01-01T00:00:00.000Z", tag: "t/title", plan: null, wave: null, origin: null, start: "" });
   await pi.command(`start ${JSON.stringify({ request: "Add task.txt", title: "Add task file", settings: { branch: "main", merge: "review", maxRounds: 3, review: false, models: {} } })}`);
   writeFileSync(join(worktree, "task.txt"), "done\n");
   expect(await pi.boundary()).toBe(true);
@@ -147,6 +149,7 @@ test("the answer to the commit message ask is the commit message", async () => {
   branch.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "feat: add the task file\n\n- adds task.txt" }] } } as never);
   expect(await pi.boundary()).toBe(false);
   expect(pi.of("factory-commit-message")).toEqual([{ title: "feat: add the task file", body: "- adds task.txt" }]);
+  expect((await readTask("43000000-0000-4000-8000-0000000000aa")).title).toBe("feat: add the task file");
 });
 
 describe("/factory start", () => {
@@ -226,7 +229,7 @@ describe("how a run ends", () => {
       const worktree = addTaskWorktree();
       const sessionDir = join(factoryHome(), "sessions", "--each--");
       mkdirSync(sessionDir, { recursive: true });
-      await writeTask({ id: `43000000-${String(counter).padStart(4, "0")}-4000-8000-000000000001`, repo, worktree, branch: "task", title: "Each", sessionId: "test-session", sessionDir, createdAt: "2026-01-01T00:00:00.000Z", tag: "t/each", plan: null, wave, origin: null });
+      await writeTask({ id: `43000000-${String(counter).padStart(4, "0")}-4000-8000-000000000001`, repo, worktree, branch: "task", title: "Each", sessionId: "test-session", sessionDir, createdAt: "2026-01-01T00:00:00.000Z", tag: "t/each", plan: null, wave, origin: null, start: "" });
       const pi = session(worktree);
       (pi.sessionManager as { getSessionDir?: () => string }).getSessionDir = () => sessionDir;
       await pi.start();
@@ -287,8 +290,6 @@ describe("a task that waits for approve", () => {
 
     expect(pi.of("factory-merge")).toEqual([{ ok: true, commit: gitIn(repo, "rev-parse", "main"), error: null, depsSynced: false }]);
     expect(gitIn(repo, "log", "--format=%s", "main")).toBe("feat: add task file\nbase");
-    // A done task takes no message.
-    expect(await pi.emit("input", { text: "now" })).toEqual({ action: "handled" });
   });
 });
 

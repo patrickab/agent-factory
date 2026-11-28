@@ -45,7 +45,7 @@ export const SETTINGS: Record<string, { schema: Schema; default?: unknown; scope
       type: "array",
       items: { type: "string", minLength: 1 },
       description:
-        "Extension sources the coder's Pi loads, as Pi's -e takes them (npm:pi-lens, a path, builtin:codemode). Absent: every user extension. Set, an empty list too: Pi starts with the factory's plugin and these only, and without skills, prompt templates and themes; the built-in extensions (mcp, llama.cpp, codemode, tool-search) are off unless listed as builtin:<name>",
+        "Extension sources the coder's Pi loads, as Pi's -e takes them (npm:pi-lens, a path, builtin:codemode). Absent: every user extension. Set, an empty list too: Pi starts with the factory's plugin and these only, and without skills, prompt templates and themes; the built-in extensions (mcp, llama.cpp, codemode, tool-search) are off unless listed as builtin:<name>. An npm: source installed for the user (<agent dir>/npm/node_modules/<name>) is loaded from there, not installed at each start",
     },
     scopes: ["repo"],
   },

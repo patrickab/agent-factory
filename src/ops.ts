@@ -229,7 +229,8 @@ export function pipelineSteps(deps: OpsDeps, task: Task, taskFilesNow: TaskFiles
       return mergeTask({ exec: runner.run, cleanup: runner.cleanup, root, round, task, config, intent, status: mergeStatus, message, stop: () => runner.cancelled, ...gates });
     },
     openRebase: () => rebaseInProgress(runner.run, root),
-    askCommitMessage: () => !isConventionalTitle(task.title),
+    // A follow-up run on a done task is a commit of its own: the task title already named the first one.
+    askCommitMessage: () => !isConventionalTitle(task.title) || session.snapshot?.mergedCommit != null,
     inWave: async () => (await deps.wave()) !== null,
   };
 }

@@ -10,7 +10,7 @@
 import { mkdir, open, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MODEL_SIZES, type ModelSize, type StoredSettings } from "./settings.ts";
-import { isFactoryTurn, isFinal, isResting, type Finding, type MinorFinding, type State } from "./state.ts";
+import { closeSpan, isFactoryTurn, isFinal, isResting, type Finding, type MergeData, type MinorFinding, type Spent, type State } from "./state.ts";
 import { withLock } from "./lock.ts";
 import { errorText, FactoryError, ifMissing, isRecord, jsonLines, type Usage } from "./util.ts";
 import { isWaveId, waveDir, waveHome, waveLockPath, waveLogLockPath, waveLogPath, wavePath, wavePokePath, wavesDir } from "./wave-poke.ts";
@@ -111,7 +111,7 @@ export type WaveGate = { at: string; phase: "review" | "merge"; passed: boolean;
  * The commit range that reached the target. A `squash` wave's (one commit, `to`) also names `ref`, the ref that keeps
  * its task commits, and `commits`, how many; absent otherwise.
  */
-export type WaveMerge = { at: string; from: string; to: string; ref?: string; commits?: number };
+export type WaveMerge = { at: string; from: string; to: string; ref?: string; commits?: number } & Pick<MergeData, "stashConflicts">;
 /**
  * A rebase onto the target that conflicted (`wave-runner.ts`): the wave builds again with the task `key`,
  * whose worktree holds the wave's branch `head` merged onto the target's tip `onto` with the markers left
@@ -211,6 +211,8 @@ export interface WaveFold extends WaveDeclaration {
    * none: its merge runs them again only on another commit (the target moved since).
    */
   gatedCommit: string | null;
+  /** The wall time by stage (`Spent`), from its declaration on. */
+  spent: Spent<WaveStage>;
 }
 
 /** A wave as every client sees it (the contract's shape); the core builds it from the fold and the tasks. */
@@ -233,7 +235,7 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after" | 
   /** Its runner waits for a test slot (`test-slots.ts`) to run a merge gate; absent otherwise. */
   waitingForSlot?: true;
   /** `id`: the task's id, a pending one's too (declared with it). */
-  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: State | "pending"; usage: Usage | null; id: string }[];
+  tasks: { key: string; title: string; after: string[]; model: ModelSize; taskId: string | null; sessionId: string | null; state: State | "pending"; interrupted: boolean; usage: Usage | null; id: string }[];
   counts: { total: number; done: number };
   reviews: WaveReview[];
   /**
@@ -246,6 +248,8 @@ export interface WaveView extends Omit<WaveDeclaration, "overrides" | "after" | 
   /** What `tasks.update` and `waves.update` changed, oldest first. */
   updates: WaveUpdate[];
   usage: Usage | null;
+  /** Where its wall time went (`waveTime`), computed when read. */
+  time: WaveTime;
   actions: string[];
   /** What the agents reported (`feedback.ts`), oldest first; only `waves.get` reads the store. */
   feedback?: FeedbackEntry[];
@@ -346,7 +350,7 @@ export async function removeWave(id: string): Promise<void> {
 function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): WaveFold {
   const after = declaration.after ?? [];
   const stage: WaveStage = after.length > 0 ? "queued" : "building";
-  const fold: WaveFold = { ...declaration, after: [...after], started: after.length === 0, stage, reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, updates: [], conflicts: [], taskReviews: [], fixes: 0, reviewBegan: false, gatedCommit: null };
+  const fold: WaveFold = { ...declaration, after: [...after], started: after.length === 0, stage, reason: null, detail: null, tasks: [], reviews: [], gates: [], merge: null, updates: [], conflicts: [], taskReviews: [], fixes: 0, reviewBegan: false, gatedCommit: null, spent: { since: declaration.createdAt, ms: {} } };
   for (const event of events) {
     switch (event.kind) {
       case "tasks":
@@ -379,6 +383,7 @@ function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): W
         foldUpdate(fold, event);
         break;
       case "stage":
+        fold.spent = closeSpan(fold.spent, fold.stage, event.at);
         fold.stage = event.stage;
         fold.reason = event.stage === "blocked" ? event.reason : null;
         fold.detail = event.detail ?? null;
@@ -388,6 +393,7 @@ function foldWave(declaration: WaveDeclaration, events: readonly WaveEvent[]): W
         for (const task of fold.tasks) delete task.launching;
         break;
       case "start":
+        fold.spent = closeSpan(fold.spent, fold.stage, event.at);
         fold.started = true;
         fold.base = event.base;
         fold.stage = "building";
@@ -533,6 +539,29 @@ export function allCancelled(fold: WaveFold, states: TaskStates): boolean {
 export function waveCounts(fold: WaveFold, states: TaskStates): { total: number; done: number } {
   const all = fold.tasks.map((task) => waveTaskState(task, states));
   return { total: all.filter((state) => state !== "cancelled").length, done: all.filter((state) => state === "done").length };
+}
+
+/** Wall time in ms. Parallel tasks sum, so the parts may exceed `total` (from its first `building` to its end or now). */
+export type WaveTime = { coding: number; gates: number; review: number; merge: number; waiting: number; total: number };
+
+/**
+ * Where the wave's wall time went, until `now`. `tasks`: each started task's time by state (`spentUntil`). The wave's
+ * `reviewing` and `merging` time not spent in its gates or reviews is its rebase and landing (`merge`); `queued` counts nowhere.
+ */
+export function waveTime(fold: WaveFold, tasks: readonly Spent<State | "gates">["ms"][], interrupted: boolean, now: string): WaveTime {
+  const { queued: _queued, ...ms } = waveFinal(fold.stage) ? fold.spent.ms : closeSpan(fold.spent, interrupted ? "blocked" : fold.stage, now).ms;
+  const of = (stage: keyof typeof ms) => ms[stage] ?? 0;
+  const sum = (key: State | "gates") => tasks.reduce((total, task) => total + (task[key] ?? 0), 0);
+  const gates = fold.gates.reduce((total, gate) => total + gate.wallMs, 0);
+  const reviews = fold.reviews.reduce((total, review) => total + review.wallMs, 0);
+  return {
+    coding: sum("running"),
+    gates: sum("gates") + gates,
+    review: sum("reviewing") + reviews,
+    merge: sum("merging") + of("reviewing") + of("merging") - gates - reviews,
+    waiting: sum("waiting_answer") + sum("blocked") + of("blocked") + of("rejected") + of("waiting_approve"),
+    total: Object.values(ms).reduce((total, part) => total + part, 0),
+  };
 }
 
 // ---- validation ----

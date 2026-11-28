@@ -1,6 +1,6 @@
 /** The core's task actions and `TaskView` (`core-tasks.ts`), over the fixture of `core-test-kit.ts`. */
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { callAction } from "./core.ts";
 import type { TaskView, TimelineEntry } from "./core-tasks.ts";
@@ -186,6 +186,18 @@ describe("task actions", () => {
     await until(async () => (await lastFactoryState(record.sessionDir, record.sessionId))?.reason === "gates");
     await until(() => runnerEnded(record));
   }, 30_000);
+
+  test("a task without a session and without a runner is interrupted; retry starts it", async () => {
+    const repo = makeRepo();
+    const record = await restingTask(repo, "waiting_approve");
+    // As if its Pi had died before it answered: no session at all.
+    rmSync(record.sessionDir, { recursive: true });
+    const view = (await callAction("tasks.get", { id: record.id })) as TaskView;
+    expect([view.state, view.interrupted, view.actions.includes("tasks.retry")]).toEqual([null, true, true]);
+    await callAction("tasks.retry", { id: record.id });
+    await until(async () => (await stateOf(record)) === "waiting_approve");
+    expect(prompts().filter((line) => line === record.start)).toHaveLength(2);
+  }, 30_000);
 });
 
 describe("tasks.message", () => {
@@ -227,7 +239,7 @@ describe("tasks.message", () => {
     }
   }, 30_000);
 
-  test("a running task's live runner gets an inbox line; no state, merging and done are refused", async () => {
+  test("a running task's live runner gets an inbox line; no state and merging are refused", async () => {
     await writeTask(fakeRecord(ID_1, "/r"));
     await expectError(callAction("tasks.message", { id: ID_1, text: "hi" }), "refused");
     process.env.FAKE_PI_HOLD = "1";
@@ -239,12 +251,22 @@ describe("tasks.message", () => {
     expect(readFileSync(taskInboxPath(record.id), "utf8")).toBe('{"text":"also do c"}\n');
     expect(prompts()).not.toContain("also do c");
 
-    for (const state of ["merging", "done"]) {
-      const resting = fakeRecord(ID_2, "/r");
-      await writeTask(resting);
-      writeSession(resting, [TASK_ENTRY, { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state, round: 1, reason: "approved" } }]);
-      await expectError(callAction("tasks.message", { id: ID_2, text: "hi" }), "refused");
-    }
+    const merging = fakeRecord(ID_2, "/r");
+    await writeTask(merging);
+    writeSession(merging, [TASK_ENTRY, { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: "merging", round: 1, reason: "approved" } }]);
+    await expectError(callAction("tasks.message", { id: ID_2, text: "hi" }), "refused");
+  }, 30_000);
+
+  test("a done task whose worktree is gone and whose branch holds other work refuses a message and stays done", async () => {
+    const repo = makeRepo();
+    const record = { ...fakeRecord(ID_1, repo), branch: "taken" };
+    git(repo, "branch", "taken", git(repo, "commit-tree", "main^{tree}", "-p", "main", "-m", "other work"));
+    await writeTask(record);
+    writeSession(record, [TASK_ENTRY, { type: "custom", customType: "factory-state", timestamp: "2026-01-01T00:00:00.000Z", data: { state: "done", round: 1, reason: "merged" } }]);
+    await expectError(callAction("tasks.message", { id: ID_1, text: "more" }), "refused");
+    expect((await lastFactoryState(record.sessionDir, record.sessionId))?.state).toBe("done");
+    expect(existsSync(record.worktree)).toBe(false);
+    expect(prompts()).toEqual([]);
   }, 30_000);
 });
 

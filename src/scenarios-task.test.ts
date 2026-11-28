@@ -1,5 +1,8 @@
 /** A task end to end (`scenario-kit.ts`): real git, runners and `pi`; the model scripted. Outcome only. */
 import { expect } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { COMMIT_MESSAGE_PROMPT } from "./commitmsg.ts";
 import { events, scenario, verdict, write } from "./scenario-kit.ts";
 
 scenario(
@@ -58,5 +61,27 @@ scenario(
     const done = await c.act("tasks.get", { id: task.id });
     expect([done.state, done.round]).toEqual(["done", 1]);
     expect(events(c.notices)).toEqual([`task:${task.id}:waiting_answer`]);
+  },
+);
+
+scenario(
+  "S8 a message to a done task outside a wave: a new run on the target's tip merges again, the view sums both runs",
+  ({ prompt }) => (prompt.includes(COMMIT_MESSAGE_PROMPT) ? "feat: add c\n\n- c.txt" : [write(prompt.includes("FOLLOW-C") ? "c.txt" : "b.txt", "x\n")]),
+  async (c) => {
+    const task = await c.act("tasks.start", { title: "feat: add b", request: "add b.txt" });
+    await c.act("tasks.wait", { ids: [task.id], timeoutMs: 30_000 });
+    const first = await c.act("tasks.get", { id: task.id });
+    expect([first.state, first.actions.includes("tasks.message")]).toEqual(["done", true]);
+    // The target moves on and the worktree is gone: the follow-up starts from the target's tip.
+    writeFileSync(join(c.repo, "d.txt"), "d\n");
+    c.git("add", "d.txt");
+    c.git("commit", "--quiet", "-m", "chore: add d");
+    c.git("worktree", "remove", "--force", first.worktree);
+    await c.act("tasks.message", { id: task.id, text: "FOLLOW-C" });
+    await c.act("tasks.wait", { ids: [task.id], timeoutMs: 30_000 });
+    const done = await c.act("tasks.get", { id: task.id });
+    expect([done.state, done.round]).toEqual(["done", 2]);
+    expect(c.git("log", "--format=%s", "main")).toBe("feat: add c\nchore: add d\nfeat: add b\ninit");
+    expect(done.usage.cost).toBeGreaterThan(first.usage.cost);
   },
 );

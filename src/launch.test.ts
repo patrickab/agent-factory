@@ -149,7 +149,7 @@ describe("unmergedWork", () => {
     git(repo, "worktree", "add", "--quiet", "-b", "u", worktree);
     git(repo, "config", "status.showUntrackedFiles", "no");
     writeFileSync(join(worktree, "forgotten.txt"), "work\n");
-    const record = { id: "i", repo, worktree, branch: "u", title: "u", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, wave: null, origin: null };
+    const record = { id: "i", repo, worktree, branch: "u", title: "u", sessionId: "test-session-s", sessionDir: caseDir, createdAt: "x", tag: "t", plan: null, wave: null, origin: null, start: "" };
     expect(await unmergedWork(record, "main")).toEqual({ commits: 0, dirty: true });
   });
 });

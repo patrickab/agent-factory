@@ -32,6 +32,7 @@ import {
   type NewWaveEvent,
   type WaveDeclaration,
   type WaveFold,
+  type WaveMerge,
   type WaveReason,
   type WaveStage,
 } from "./waves.ts";
@@ -430,7 +431,7 @@ async function merge(fold: WaveFold): Promise<Chooser> {
   const task = waveTask(fold);
   const squash = fold.overrides.squash === true;
   /** The end of a landing: the branch gone (`squash`), the `merge` event. */
-  const landed = async (merge: { from: string; to: string; ref?: string; commits?: number }, gate: NewWaveEvent[]) => {
+  const landed = async (merge: Omit<WaveMerge, "at">, gate: NewWaveEvent[]) => {
     if (squash) await dropBranch(fold);
     // The target moved: that is recorded even when the runner stops, the merge is not run twice.
     return choice("merged", null, null, [...gate, { kind: "merge", ...merge }]);
@@ -477,7 +478,8 @@ async function merge(fold: WaveFold): Promise<Chooser> {
       const range = { from: before ?? result.merge.commit ?? "", to: result.merge.commit ?? "" };
       // The ref and the count from git: the commits the target's new tip stands for.
       const squashed = squash ? await landedSquash(fold).catch(() => null) : null;
-      return landed(squashed ?? range, gate);
+      const { stashConflicts } = result.merge;
+      return landed({ ...(squashed ?? range), ...(stashConflicts ? { stashConflicts } : {}) }, gate);
     }
     case "conflict":
       return conflicted(fold, "merge", result.files, gate);

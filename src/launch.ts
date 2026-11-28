@@ -1,7 +1,7 @@
 /**
  * Starts a factory task without an interactive session, and sends its session more messages.
- * - `launchTask`: worktree on a new branch, `hooks.after_create`, the `TaskRecord`, the detached runner with
- *   `/factory start`, the wait until it wrote its first state. A failing or aborted step undoes the earlier ones,
+ * - `launchTask`: worktree on a new branch, `hooks.after_create`, the detached runner with `/factory start`, the
+ *   `TaskRecord`, the wait until it wrote its first state. A failing or aborted step undoes the earlier ones,
  *   through git only
  * - `sendCommand` and `messageTask` reach the session through a new runner that takes over the task lock, or through
  *   the inbox of a live one
@@ -13,7 +13,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parseFactoryYaml } from "./config.ts";
 import { contractsForLaunch } from "./contracts.ts";
 import { git, primaryCheckout } from "./git.ts";
-import { CODER_EXTENSIONS_ENV, CODER_MODEL_ENV, inboxReadPath, lastFactoryState, readFactoryStates, readInboxOffset, takeInboxLine } from "./runner.ts";
+import { CODER_EXTENSIONS_ENV, inboxReadPath, lastFactoryState, readFactoryStates, readInboxOffset, takeInboxLine, taskMainBranch } from "./runner.ts";
 import { CommandRunner, runCommand, type Exec } from "./run.ts";
 import { factoryHome, loadSettings, resolveSettings, taskModels, type ModelSize, type StoredSettings } from "./settings.ts";
 import { isFinal, type Settings, type StartPayload } from "./state.ts";
@@ -208,12 +208,13 @@ export async function launchTask(input: LaunchInput): Promise<TaskRecord> {
         plan: input.plan ?? null,
         wave: input.wave ?? null,
         origin: input.origin ?? null,
+        start: startCommand(input.title, input.request, settings, contracts?.prefix),
         ...(contracts === undefined ? {} : { contracts: contracts.stamps }),
       };
-      await writeTask(record);
+      // The record only once its runner holds the task: a record without a state and without a runner reads interrupted.
       await lockTask(id);
-      const coder = settings.models.coder;
-      await sendCommand(record, startCommand(input.title, input.request, settings, contracts?.prefix), { ...(input.env ?? process.env), ...(coder ? { [CODER_MODEL_ENV]: coder } : {}) });
+      await sendCommand(record, record.start, input.env);
+      await writeTask(record);
       // A runner whose `pi` exits before it answers (missing, broken, no plugin) leaves a task without any state.
       await requireRunnerStarted(record, 0, input.signal);
       if (aborted()) throw new Error("the start was aborted");
@@ -282,8 +283,30 @@ export function taskInboxPath(id: string): string {
 }
 
 export const MERGING_REFUSAL = "is merging, send the message when the merge has ended";
-/** A done task takes no message: its work is merged, more work is a new task. */
+/** A done task of a wave takes no message: more work for the wave is `waves.add`; a cancelled one keeps what it did. */
 export const DONE_REFUSAL = "is done: give the work to its wave with waves.add, or start a new task";
+
+/**
+ * Before a follow-up run of a done task outside a wave: a worktree that is gone is made again on the task branch, new
+ * off the target's tip. A branch of that name that holds commits the target lacks is not the merged task's: refused.
+ */
+async function restoreWorktree(record: TaskRecord): Promise<void> {
+  if (existsSync(record.worktree)) return;
+  const target = `refs/heads/${await taskMainBranch(record.sessionDir, record.sessionId)}`;
+  await git(runCommand, record.repo, ["worktree", "prune"]);
+  const merged = async () => (await runCommand(["git", "merge-base", "--is-ancestor", record.branch, target], { cwd: record.repo })).exitCode === 0;
+  if ((await localBranchExists(record.repo, record.branch)) && !(await merged())) {
+    throw new FactoryError(
+      "refused",
+      `task ${short(record.id)} cannot run again: its worktree is gone and its branch ${record.branch} holds commits ${target} lacks; delete or rename that branch, or start a new task`,
+    );
+  }
+  await git(runCommand, record.repo, ["worktree", "add", "--quiet", "-B", record.branch, record.worktree, target]);
+  await runAfterCreate(runCommand, record.worktree).catch(async (error: unknown) => {
+    await removeWorktree(record.repo, record.worktree, record.branch).catch(() => undefined);
+    throw error;
+  });
+}
 
 /**
  * A message for the task's coder. A live runner holds the task: one line in its inbox, which it sends to Pi as a
@@ -293,8 +316,8 @@ export const DONE_REFUSAL = "is done: give the work to its wave with waves.add, 
  * `text`, the lock handed to it; that runner sends the lines after it. While the task merges the runner sends nothing but
  * keeps Pi open for a line it holds, so a line already in the inbox is left there and the call returns. Refuses
  * (`refused`, one sentence) while the task merges (line not yet appended), before it has a state, or when it is final
- * (a line appended meanwhile is taken back), a `busy` FactoryError while another holds its lock; a line already appended is never
- * refused, it goes with the next runner.
+ * (a line appended meanwhile is taken back), a `busy` FactoryError while another holds its lock; a line already
+ * appended is never refused, it goes with the next runner. A done task outside a wave is not final here: it runs again.
  */
 export async function messageTask(record: TaskRecord, text: string, env?: RunnerEnv): Promise<void> {
   const inbox = taskInboxPath(record.id);
@@ -331,8 +354,10 @@ export async function messageTask(record: TaskRecord, text: string, env?: Runner
       try {
         // The caller checked `refusal(view, "tasks.message")` before the lock; the state may have moved since.
         const state = await lastFactoryState(record.sessionDir, record.sessionId);
+        const followUp = state?.state === "done" && record.wave === null;
+        if (followUp) await restoreWorktree(record);
         if (end > 0) {
-          if (state !== undefined && isFinal(state.state)) {
+          if (state !== undefined && isFinal(state.state) && !followUp) {
             await takeInboxLine(inbox);
             throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${DONE_REFUSAL}`);
           }
@@ -342,6 +367,7 @@ export async function messageTask(record: TaskRecord, text: string, env?: Runner
         }
         if (state === undefined) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} has not started yet, send the message once it runs`);
         if (state.state === "merging") throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${MERGING_REFUSAL}`);
+        if (state.state === "done" && !followUp) throw new FactoryError("refused", `task ${record.id.slice(0, 8)} ${DONE_REFUSAL}`);
         return await sendCommand(record, text, env);
       } finally {
         await unlockFile(taskLockPath(record.id));

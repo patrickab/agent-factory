@@ -2,8 +2,10 @@
 import { describe, expect, test } from "bun:test";
 import { callAction } from "./core.ts";
 import type { TaskView } from "./core-tasks.ts";
-import { expectError, fakeRecord, ID_1, ID_2, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
-import { writeTask, type TaskRecord } from "./tasks.ts";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { caseDir, expectError, fakeRecord, ID_1, ID_2, runnerHolding, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
+import { taskLockPath, writeTask, type TaskRecord } from "./tasks.ts";
 import type { WaveView } from "./waves.ts";
 
 useCoreFixture();
@@ -11,11 +13,15 @@ useCoreFixture();
 describe("tasks.wait", () => {
   const stateEntry = (state: string) => ({ type: "custom", customType: "factory-state", timestamp: "t", data: { state, round: 1, reason: "r" } });
 
-  /** A task tagged `tag`: resting in `state`, or starting (no session file) without one. */
+  /** Its marker ends the runner of a starting task `id` (`waitTask`). */
+  const runnerEnd = (id: string) => join(caseDir, `end-${id}`);
+
+  /** A task tagged `tag`: resting in `state`, or without one starting (no session file, a live runner). */
   async function waitTask(id: string, tag: string, state?: string): Promise<TaskRecord> {
     const record = { ...fakeRecord(id, "/r"), tag };
     await writeTask(record);
     if (state !== undefined) writeSession(record, [TASK_ENTRY, stateEntry(state)]);
+    else await runnerHolding(taskLockPath(id), record.sessionId, { ...process.env, FAKE_RUNNER_END: runnerEnd(id) });
     return record;
   }
 
@@ -35,7 +41,10 @@ describe("tasks.wait", () => {
   test("returns when one task blocks while another has not finished", async () => {
     await waitTask(ID_1, "w");
     const blocking = await waitTask(ID_2, "w");
-    setTimeout(() => writeSession(blocking, [TASK_ENTRY, stateEntry("blocked")]), 300);
+    setTimeout(() => {
+      writeSession(blocking, [TASK_ENTRY, stateEntry("blocked")]);
+      writeFileSync(runnerEnd(ID_2), "");
+    }, 300);
     const result = await wait({ tag: "w", timeoutMs: 10_000 });
     expect(result.attention).toEqual([ID_2]);
     expect(result.timedOut).toBe(false);

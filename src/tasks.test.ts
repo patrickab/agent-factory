@@ -39,6 +39,7 @@ function record(id: string, overrides: Partial<TaskRecord> = {}): TaskRecord {
     plan: null,
     wave: null,
     origin: null,
+    start: "",
     ...overrides,
   };
 }

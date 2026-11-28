@@ -112,12 +112,14 @@ describe("sendCommand", () => {
     await until(() => !existsSync(taskLockPath(record.id)));
   }, 15_000);
 
-  test("the coder's Pi loads every user extension, or with the repository's `extensions` only the factory's plugin and those", async () => {
+  test("the coder's Pi loads every user extension, or with the repository's `extensions` only the factory's plugin and those, an installed npm one as its directory", async () => {
     const plugin = join(import.meta.dir, "pi", "index.ts");
+    const installed = join(process.env.PI_CODING_AGENT_DIR as string, "npm", "node_modules", "@scope", "ext");
+    mkdirSync(installed, { recursive: true });
     for (const [id, extensions, sources] of [
       [ID_1, undefined, null],
       [ID_2, [], [plugin]],
-      [ID_3, ["npm:pi-lens", "builtin:codemode"], [plugin, "npm:pi-lens", "builtin:codemode"]],
+      [ID_3, ["npm:pi-lens", "npm:@scope/ext", "builtin:codemode"], [plugin, "npm:pi-lens", installed, "builtin:codemode"]],
     ] as const) {
       const record = task(id);
       restingIn(record, "waiting_approve");

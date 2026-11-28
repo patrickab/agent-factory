@@ -18,8 +18,8 @@ import type { NoticeWave } from "./notify.ts";
 import { runCommand } from "./run.ts";
 import { requireModels } from "./models.ts";
 import { checkSettings, loadSettings, registeredRepos, resolveSettings, type ModelSize, type StoredSettings } from "./settings.ts";
-import { isFinal, minorFindings, type MinorFinding, type State } from "./state.ts";
-import { listTasks, sessionTask, tagInGroup, tasksById, type TaskRecord } from "./tasks.ts";
+import { isFinal, minorFindings, type MinorFinding, type Spent, type State } from "./state.ts";
+import { listTasks, sessionTask, tagInGroup, tasksById, writeTask, type TaskRecord } from "./tasks.ts";
 import { addUsage, cents, errorText, FactoryError, isBusy, short, type Usage } from "./util.ts";
 import {
   appendWaveEvent,
@@ -38,6 +38,7 @@ import {
   validateTaskSpecs,
   waveCounts,
   waveTaskState,
+  waveTime,
   type NewWaveEvent,
   type WaveEvent,
   type WaveConflict,
@@ -98,6 +99,18 @@ export async function sessionWave(sessionId: string): Promise<{ id: string; merg
   return { id, mergeRefusal: `its wave ${short(id)} is ${stage}, its review began: nothing more reaches its branch ${branch} (the reviewed tree is what merges); give the work to the wave with waves.add` };
 }
 
+/** Sets the title of the task in the Pi session `sessionId`: its record and, for a wave's task, the wave's `update` event. */
+export async function retitleSessionTask(sessionId: string, title: string): Promise<void> {
+  const record = await sessionTask(sessionId);
+  if (record === undefined) return;
+  await writeTask({ ...record, title });
+  if (record.wave === null) return;
+  await appendWaveEvents(record.wave, (fold) => {
+    const task = fold.tasks.find((candidate) => candidate.taskId === record.id);
+    return task === undefined ? null : [{ kind: "update", key: task.key, title }];
+  });
+}
+
 /** The wave whose id is `id` or starts with it. */
 export async function findWave(id: unknown): Promise<WaveFile> {
   return byId(await listWaves(), (wave) => wave.declaration.id, id, "wave");
@@ -113,17 +126,18 @@ async function pokeWaveRunner(id: string, env?: RunnerEnv): Promise<void> {
 }
 
 /**
- * The views of the wave's started tasks by key, and their unrounded usage. A started task whose record is gone
+ * The views of the wave's started tasks by key, their unrounded usage and their wall time by state. A started task whose record is gone
  * (removed) counts as `cancelled`: it never finishes.
  */
 export async function waveTaskViews(
   fold: WaveFold,
   read: ListingReads = {},
-): Promise<{ states: TaskStates; views: Map<string, TaskView>; usages: Map<string, Usage | null> }> {
+): Promise<{ states: TaskStates; views: Map<string, TaskView>; usages: Map<string, Usage | null>; spents: Spent<State | "gates">["ms"][] }> {
   const records = read.records ?? await tasksById();
   const states = new Map<string, State | null>();
   const views = new Map<string, TaskView>();
   const usages = new Map<string, Usage | null>();
+  const spents: Spent<State | "gates">["ms"][] = [];
   await Promise.all(
     fold.tasks.map(async (task) => {
       if (task.taskId === null) return;
@@ -132,13 +146,14 @@ export async function waveTaskViews(
         states.set(task.key, "cancelled");
         return;
       }
-      const { view, usage } = await taskLook(record, fold.stage);
+      const { view, usage, spent } = await taskLook(record, fold.stage);
       views.set(task.key, view);
       usages.set(task.key, usage);
+      spents.push(spent);
       states.set(task.key, view.state);
     }),
   );
-  return { states, views, usages };
+  return { states, views, usages, spents };
 }
 
 /** What a listing reads once for all its waves: every task record by id. */
@@ -248,8 +263,8 @@ export async function lookWave(id: string, all?: readonly WaveFile[], read: List
   const held = runners.length > 0 || (await lockHeld(waveLockPath(id)));
   const file = await readWave(id);
   const full = file.fold;
-  const { overrides: _overrides, base: _base, contracts: _contracts, conflicts: _conflicts, taskReviews: _taskReviews, fixes: _fixes, reviewBegan: _began, gatedCommit: _gated, started: _started, ...fold } = full;
-  const { states, views, usages } = await waveTaskViews(full, read);
+  const { overrides: _overrides, base: _base, contracts: _contracts, conflicts: _conflicts, taskReviews: _taskReviews, fixes: _fixes, reviewBegan: _began, gatedCommit: _gated, started: _started, spent: _spent, ...fold } = full;
+  const { states, views, usages, spents } = await waveTaskViews(full, read);
   const running = runners.length > 0;
   const waitingForSlot = await slotWaiting(runners);
   const waves = all ?? (await listWaves());
@@ -260,7 +275,7 @@ export async function lookWave(id: string, all?: readonly WaveFile[], read: List
   const tasks = fold.tasks.map((task) => {
     usage = addUsage(usage, usages.get(task.key) ?? null);
     const state = waveTaskState(task, states);
-    return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state, usage: views.get(task.key)?.usage ?? null, id: task.taskId ?? task.id };
+    return { key: task.key, title: task.title, after: task.after, model: task.model, taskId: task.taskId, sessionId: task.sessionId, state, interrupted: views.get(task.key)?.interrupted ?? false, usage: views.get(task.key)?.usage ?? null, id: task.taskId ?? task.id };
   });
   for (const review of fold.reviews) usage = addUsage(usage, review.usage);
   const minors: MinorFinding[] = [
@@ -283,7 +298,8 @@ export async function lookWave(id: string, all?: readonly WaveFile[], read: List
   const reviews = fold.reviews.map((review) => ({ ...review, usage: { ...review.usage, cost: cents(review.usage.cost) } }));
   const total = usage === null ? null : { ...usage, cost: cents(usage.cost) };
   const attention = interrupted || stuck || waveAttention(fold.stage);
-  return { view: { ...fold, reviews, minors, running, interrupted, stuck, attention, tasks, counts: waveCounts(full, states), usage: total, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, events: file.events };
+  const time = waveTime(full, spents, interrupted, new Date().toISOString());
+  return { view: { ...fold, reviews, minors, running, interrupted, stuck, attention, tasks, counts: waveCounts(full, states), usage: total, time, actions, ...(waitingForSlot ? { waitingForSlot } : {}) }, events: file.events };
 }
 
 /**
@@ -308,9 +324,10 @@ export async function noticeInputs(
  * the wave's branch as target, its tag, plan and id, and records a `task` event for each. Only the wave's runner calls
  * it, holding the runner's lock: no task starts twice. A record of this wave no `task` event names (a runner died
  * between the launch and its event) is adopted for the first pending task of its title instead of a second launch.
- * Nothing starts unless the wave is `building`. Resolves with the started keys; a launch that fails throws (`refused` or `failed`) after the tasks started before it are recorded.
- * `signal` (the runner stops): no further launch, the running one is undone (`launchTask`), and it resolves with the
- * keys started before. A conflict task (`conflictTask`) starts on the wave's branch moved to the target's tip it
+ * Nothing starts unless the wave is `building`. The launches run together; resolves with the started keys, or, once all
+ * ended, throws (`refused` or `failed`) naming every key whose launch failed, the others recorded.
+ * `signal` (the runner stops): every launch in flight is undone (`launchTask`), and it resolves with the keys started.
+ * A conflict task (`conflictTask`) starts on the wave's branch moved to the target's tip it
  * recorded, its worktree holding the wave's change merged onto that tip with the markers left.
  */
 export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: AbortSignal): Promise<string[]> {
@@ -329,41 +346,58 @@ export async function startWaveTasks(id: string, env?: RunnerEnv, signal?: Abort
   const overrides: StoredSettings = { models, maxRounds, review, merge: "auto", branch: fold.branch };
   const named = new Set(fold.tasks.map((task) => task.taskId));
   const orphans = (await listTasks()).filter((record) => record.wave === id && !named.has(record.id));
-  const started: string[] = [];
+  // Prepared one after another (a conflict task's branch move must not race a worktree branching off it), then launched together.
+  const launches: { key: string; launch: () => Promise<TaskRecord> }[] = [];
+  const failures: { key: string; error: unknown }[] = [];
   for (const key of startableKeys(fold, states)) {
     if (signal?.aborted) break;
     const found = fold.tasks.find((candidate) => candidate.key === key);
     if (found === undefined) continue;
     const orphan = orphans.findIndex((record) => record.id === found.id);
-    let record: TaskRecord;
     if (orphan >= 0) {
       // A runner that died after the launch: its record is adopted, no second launch.
-      [record] = orphans.splice(orphan, 1);
-    } else {
-      // Launched with its spec as the log holds it now (`tasks.update` may have changed it since the fold above).
-      const spec = await launchSpec(id, key, found.after);
-      if (spec === null) continue;
-      if (spec.model === "small" && models.small === undefined) {
-        const small = await defaultSmallModel();
-        if (small !== undefined) models.small = small;
-      }
-      try {
-        // A conflict task: the wave's branch on the target's tip, its worktree the wave's change merged onto it.
-        const conflict = fold.conflicts.find((candidate) => candidate.key === key);
-        if (conflict !== undefined) await conflictBranch(fold, conflict);
-        const prepare = conflict === undefined ? {} : { beforeRecord: (_branch: string, worktree: string) => leaveMarkers(worktree, conflict) };
-        // The task's size picks its coder's model of the wave's (`taskModels`); the reviewer's stays the wave's.
-        record = await launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model, id: spec.id, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...prepare, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) });
-      } catch (error) {
-        if (signal?.aborted) break;
-        const why = `starting its task ${key} failed: ${oneLine(errorText(error))}`;
-        throw new FactoryError(error instanceof FactoryError && error.code === "refused" ? "refused" : "failed", why);
-      }
+      const [record] = orphans.splice(orphan, 1);
+      launches.push({ key, launch: async () => record });
+      continue;
     }
-    await appendWaveEvent(id, { kind: "task", key, taskId: record.id, sessionId: record.sessionId });
-    started.push(key);
+    // Launched with its spec as the log holds it now (`tasks.update` may have changed it since the fold above).
+    const spec = await launchSpec(id, key, found.after);
+    if (spec === null) continue;
+    if (spec.model === "small" && models.small === undefined) {
+      const small = await defaultSmallModel();
+      if (small !== undefined) models.small = small;
+    }
+    // A conflict task: the wave's branch on the target's tip, its worktree the wave's change merged onto it.
+    const conflict = fold.conflicts.find((candidate) => candidate.key === key);
+    try {
+      if (conflict !== undefined) await conflictBranch(fold, conflict);
+    } catch (error) {
+      failures.push({ key, error });
+      continue;
+    }
+    const prepare = conflict === undefined ? {} : { beforeRecord: (_branch: string, worktree: string) => leaveMarkers(worktree, conflict) };
+    // The task's size picks its coder's model of the wave's (`taskModels`); the reviewer's stays the wave's.
+    launches.push({ key, launch: () => launchTask({ repo: declaration.repo, title: spec.title, request: spec.request, overrides, size: spec.model, id: spec.id, tag: declaration.tag, plan: declaration.plan, wave: id, origin: declaration.origin, env, signal, ...prepare, ...(declaration.contracts === undefined ? {} : { contracts: declaration.contracts }) }) });
   }
-  return started;
+  const settled = await Promise.allSettled(
+    launches.map(async ({ key, launch }) => {
+      let record: TaskRecord;
+      try {
+        record = await launch();
+      } catch (error) {
+        failures.push({ key, error });
+        return [];
+      }
+      await appendWaveEvent(id, { kind: "task", key, taskId: record.id, sessionId: record.sessionId });
+      return [key];
+    }),
+  );
+  for (const result of settled) if (result.status === "rejected") throw result.reason;
+  if (failures.length > 0 && !signal?.aborted) {
+    const why = `starting its task ${failures.map(({ key }) => key).join(", ")} failed: ${[...new Set(failures.map(({ error }) => oneLine(errorText(error))))].join("; ")}`;
+    throw new FactoryError(failures.every(({ error }) => error instanceof FactoryError && error.code === "refused") ? "refused" : "failed", why);
+  }
+  return settled.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
 }
 
 /** How many conflict tasks (`conflict-<n>`) a wave gets; the next conflict blocks it. */

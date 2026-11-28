@@ -14,7 +14,7 @@ export { oneLine } from "./core-shared.ts";
 export { FactoryError, type FactoryErrorCode, type FactoryErrorDetail } from "./util.ts";
 export type { ActionSpec } from "./feature.ts";
 export type { TaskActionName, TaskView, TimelineEntry, TimelineKind } from "./core-tasks.ts";
-export { noticeInputs, pokeQueuedAfter, startQueuedWave, sessionWave, startWaveTasks, waveBranchName, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
+export { noticeInputs, pokeQueuedAfter, startQueuedWave, retitleSessionTask, sessionWave, startWaveTasks, waveBranchName, waveReviewWorktree, waveTaskViews, type WaveActionName } from "./core-waves.ts";
 
 /** Every feature's actions (`features.ts`), in the features' order. Two features naming one action fail on load. */
 export const ACTIONS = Object.freeze(

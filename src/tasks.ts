@@ -32,6 +32,11 @@ export interface TaskRecord {
   /** The Pi session that started the task (a wave's task: the wave's), notified when it needs attention; null otherwise. */
   origin: string | null;
   /**
+   * The `/factory start ...` command `launchTask` sent; a retry of a task without a state sends it again. Once Pi ran,
+   * the session's first user message holds the same text.
+   */
+  start: string;
+  /**
    * A wave's task with contracts (`contracts.ts`): each contract's stamp (its hash and its facts' hashes) as the task
    * last saw it. Absent: no contracts.
    */

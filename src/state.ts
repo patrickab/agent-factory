@@ -117,6 +117,8 @@ export interface MergeData {
   commit: string | null;
   error: string | null;
   depsSynced: boolean;
+  /** A landing in a checkout whose uncommitted changes did not apply back after it: the conflicting paths (the changes stay in `git stash list`); absent otherwise. */
+  stashConflicts?: string[];
 }
 
 /**
@@ -137,6 +139,22 @@ export interface StateData {
   state: State;
   round: number;
   reason: string;
+}
+
+/**
+ * Wall time by key of the closed spans (ms); `since`: when the open span began. Computed while folding, never stored.
+ * A task's gate time moves from the state it ran in to `gates`.
+ */
+export type Spent<K extends string> = { since: string; ms: Partial<Record<K, number>> };
+
+/** Closes the open span at `at` and counts it for `key`. */
+export function closeSpan<K extends string>(spent: Spent<K>, key: K, at: string): Spent<K> {
+  return { since: at, ms: { ...spent.ms, [key]: (spent.ms[key] ?? 0) + Date.parse(at) - Date.parse(spent.since) } };
+}
+
+/** A task's wall time by state until `now`: the open span counts for its state, for `blocked` when its runner died, for none once final. */
+export function spentUntil(snapshot: Snapshot, interrupted: boolean, now: string): Spent<State | "gates">["ms"] {
+  return isFinal(snapshot.state) ? snapshot.spent.ms : closeSpan(snapshot.spent, interrupted ? "blocked" : snapshot.state, now).ms;
 }
 
 /** What the extension knows about its task: rebuilt from the session's entries, updated with every entry it writes. */
@@ -164,10 +182,14 @@ export interface Snapshot {
   flaky: string[];
   /** The commit the last successful merge landed for the task (`MergeData.commit`). */
   mergedCommit: string | null;
+  /** The last successful merge's `MergeData.stashConflicts`. */
+  stashConflicts?: string[];
   /** The coder's commit message for the next merge (`factory-commit-message`), null when the task title is used; a successful merge clears it. */
   commitMessage: CommitMessage | null;
   /** The coder's open question while the task is `waiting_answer`, else absent. */
   question?: string;
+  /** The wall time spent so far (`Spent`). */
+  spent: Spent<State | "gates">;
 }
 
 export const FEEDBACK_TYPE = "factory-feedback";
@@ -231,21 +253,33 @@ function failedGateText(gate: GateData): string | null {
 }
 
 const REDUCERS: { [K in EntryType]: Reducer<K> } = {
-  "factory-task": (_snapshot, task) => ({ task, state: "running", round: 0, runFirstRound: 1, reason: "", at: null, mergeIntent: null, failure: null, review: null, minors: [], flaky: [], mergedCommit: null, commitMessage: null }),
+  "factory-task": (_snapshot, task, at) => ({ task, state: "running", round: 0, runFirstRound: 1, reason: "", at: null, mergeIntent: null, failure: null, review: null, minors: [], flaky: [], mergedCommit: null, commitMessage: null, spent: { since: at, ms: {} } }),
   "factory-round": (snapshot, { round, trigger }) => {
     if (!snapshot) return undefined;
     const opensRun = RUN_TRIGGERS.includes(trigger) || (trigger === "conflict" && snapshot.state !== "running" && snapshot.state !== "merging");
     return { ...snapshot, round, runFirstRound: opensRun ? round : snapshot.runFirstRound, failure: null };
   },
-  "factory-gate": (snapshot, gate) =>
-    snapshot && { ...snapshot, failure: failedGateText(gate) ?? snapshot.failure, flaky: [...new Set([...snapshot.flaky, ...(gate.flaky ?? [])])] },
+  "factory-gate": (snapshot, gate) => {
+    if (!snapshot) return undefined;
+    const { since, ms } = snapshot.spent;
+    const spent = { since, ms: { ...ms, [snapshot.state]: (ms[snapshot.state] ?? 0) - gate.durationMs, gates: (ms.gates ?? 0) + gate.durationMs } };
+    return { ...snapshot, failure: failedGateText(gate) ?? snapshot.failure, flaky: [...new Set([...snapshot.flaky, ...(gate.flaky ?? [])])], spent };
+  },
   "factory-review": (snapshot, { round, status, approved, findings }) =>
     snapshot && { ...snapshot, review: { round, status, approved, findings }, minors: [...snapshot.minors, ...minorFindings(round, findings)] },
   "factory-merge-intent": (snapshot, mergeIntent) => snapshot && { ...snapshot, mergeIntent },
-  "factory-merge": (snapshot, { ok, error, commit }) =>
-    snapshot && { ...snapshot, mergeIntent: null, failure: ok ? null : (snapshot.failure ?? error), mergedCommit: ok && commit ? commit : snapshot.mergedCommit },
+  "factory-merge": (snapshot, { ok, error, commit, stashConflicts }) =>
+    snapshot && {
+      ...snapshot,
+      mergeIntent: null,
+      failure: ok ? null : (snapshot.failure ?? error),
+      mergedCommit: ok && commit ? commit : snapshot.mergedCommit,
+      // A message is the merge's own: a follow-up run on the done task gets asked for a new one.
+      commitMessage: ok ? null : snapshot.commitMessage,
+      ...(ok ? { stashConflicts } : {}),
+    },
   "factory-state": (snapshot, { state, round, reason }, at) =>
-    snapshot && { ...snapshot, state, round, reason, at, mergeIntent: null, question: state === "waiting_answer" ? snapshot.question : undefined },
+    snapshot && { ...snapshot, state, round, reason, at, mergeIntent: null, question: state === "waiting_answer" ? snapshot.question : undefined, spent: closeSpan(snapshot.spent, snapshot.state, at) },
   "factory-commit-message": (snapshot, commitMessage) => snapshot && { ...snapshot, commitMessage },
   "factory-question": (snapshot, { text }) => snapshot && { ...snapshot, question: text },
 };

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RETRY_PROMPT, roundsUsed, type Finding, type Task } from "./state.ts";
+import { applyEntry, approvedFrom, followUpMessages, mergeFailedPrompt, rebuild, RETRY_PROMPT, roundsUsed, spentUntil, type Finding, type Task } from "./state.ts";
 
 const task: Task = {
   title: "Add notes",
@@ -10,7 +10,7 @@ const task: Task = {
   baseSha: "abc",
 };
 
-const custom = (customType: string, data: unknown) => ({ type: "custom", customType, data, timestamp: "t" });
+const custom = (customType: string, data: unknown, timestamp = "t") => ({ type: "custom", customType, data, timestamp });
 const finding = (severity: Finding["severity"]): Finding => ({ file: "a.ts", line: 1, severity, text: "x" });
 
 describe("rebuild", () => {
@@ -39,7 +39,7 @@ describe("rebuild", () => {
       custom("factory-merge", { ok: true, commit: "def", error: null, depsSynced: false }),
       custom("factory-state", { state: "done", round: 1, reason: "merged" }),
     ]);
-    expect(done).toEqual({ task, state: "done", round: 1, runFirstRound: 1, reason: "merged", at: "t", mergeIntent: null, failure: null, review: null, minors: [], flaky: [], mergedCommit: "def", commitMessage: null });
+    expect(done).toEqual({ task, state: "done", round: 1, runFirstRound: 1, reason: "merged", at: "t", mergeIntent: null, failure: null, review: null, minors: [], flaky: [], mergedCommit: "def", commitMessage: null, spent: expect.any(Object) });
   });
 
   test("message and retry open a run with a fresh round budget", () => {
@@ -77,6 +77,26 @@ describe("rebuild", () => {
     const answered = rebuild([...entries, custom("factory-state", { state: "running", round: 1, reason: "answer" })]);
     expect(answered).toMatchObject({ state: "running", round: 1, runFirstRound: 1 });
     expect(answered?.question).toBeUndefined();
+  });
+
+  test("the time between states sums by state, a gate's time moves to gates; a final state counts until it was entered", () => {
+    const at = (minute: number) => `2025-01-02T10:${String(minute).padStart(2, "0")}:00.000Z`;
+    const state = (minute: number, state: string) => custom("factory-state", { state, round: 1, reason: "" }, at(minute));
+    const gate = (minute: number, phase: string, durationMs: number) => custom("factory-gate", { round: 1, phase, argv: ["t"], exitCode: 0, killed: false, durationMs, outputTail: "" }, at(minute));
+    const snapshot = rebuild([
+      custom("factory-task", task, at(0)),
+      state(0, "running"),
+      gate(10, "gates", 120_000),
+      state(12, "reviewing"),
+      state(15, "running"),
+      state(20, "waiting_answer"),
+      state(30, "running"),
+      state(40, "merging"),
+      gate(44, "merge_gates", 180_000),
+      state(45, "done"),
+    ])!;
+    const minutes = Object.fromEntries(Object.entries(spentUntil(snapshot, false, at(59))).map(([key, ms]) => [key, ms / 60_000]));
+    expect(minutes).toEqual({ running: 25, gates: 5, reviewing: 3, waiting_answer: 10, merging: 2 });
   });
 });
 

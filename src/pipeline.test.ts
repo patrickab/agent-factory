@@ -34,6 +34,7 @@ function snapshotOf(settings: Partial<Settings> = {}, round = 1, runFirstRound =
     flaky: [],
     mergedCommit: null,
     commitMessage: null,
+    spent: { since: "", ms: {} },
   };
 }
 

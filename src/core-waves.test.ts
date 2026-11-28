@@ -7,8 +7,8 @@ import type { TaskView } from "./core-tasks.ts";
 import { caseDigits, caseDir, caseSerial, caseTests, expectError, failure, fakeRecord, git, makeRepo, prompts, RUN, runnerEnded, runnerHolding, stateOf, until, TASK_ENTRY, useCoreFixture, writeSession } from "./core-test-kit.ts";
 import { sessionWave, startWaveTasks } from "./core-waves.ts";
 import { stopRunners } from "./launch.ts";
-import { lastFactoryState } from "./runner.ts";
-import { listTasks, writeTask, type TaskRecord } from "./tasks.ts";
+import { lastFactoryState, sessionFilePath } from "./runner.ts";
+import { listTasks, taskLockPath, writeTask, type TaskRecord } from "./tasks.ts";
 import { liveWaveRunners, pokeWave, stopWaveRunners, waveLockPath, wavePokePath } from "./wave-poke.ts";
 import { appendWaveEvent, createWave, listWaves, readWave, type WaveView } from "./waves.ts";
 
@@ -130,6 +130,25 @@ describe("waves", () => {
     await until(async () => (await lastFactoryState(a.sessionDir, a.sessionId))?.reason === "gates");
   }, 30_000);
 
+  test("a task whose runner died before its first state, its wave's runner gone: both interrupted, waves.retry starts it again", async () => {
+    const repo = await registeredRepo();
+    process.env.FAKE_PI_HOLD = "1";
+    const started = await startWave(repo, [spec("a")]);
+    await until(async () => taskOf(await getWave(started.id), "a").taskId !== null);
+    const record = await recordById(taskOf(await getWave(started.id), "a").taskId);
+    await until(async () => (await stateOf(record)) === "running");
+    await stopWaveRunners(started.id);
+    await stopRunners(record);
+    // As if Pi had died before it answered: no session at all.
+    rmSync((await sessionFilePath(record.sessionDir, record.sessionId)) as string);
+    delete process.env.FAKE_PI_HOLD;
+    const wave = await getWave(started.id);
+    expect([wave.stage, wave.interrupted, taskOf(wave, "a").interrupted]).toEqual(["building", true, true]);
+    expect(((await callAction("waves.retry", { id: wave.id })) as { retried: string[] }).retried).toEqual([record.id]);
+    await until(async () => (await stateOf(record)) !== undefined);
+    expect(prompts().filter((line) => line === record.start)).toHaveLength(2);
+  }, 30_000);
+
   test("a wave's small task runs its coder on the small model, its neighbour on the big one (coder); no reviewer named, none", async () => {
     const repo = await registeredRepo();
     const models = { small: "c/d", big: "a/b" };
@@ -205,6 +224,22 @@ describe("waves", () => {
     expect((await listTasks()).map((record) => record.id)).toEqual([taskId(1), taskId(2)]);
     expect(prompts()).toEqual([]);
   });
+
+  test("the startable tasks launch together: every Pi started before any launch ended", async () => {
+    const repo = makeRepo();
+    git(repo, "branch", "main-factory-w9");
+    const id = waveId(2, 6);
+    await createWave({ id, repo, tag: "factory/w9", plan: null, title: "w", request: "r", branch: "main-factory-w9", target: "main", base: git(repo, "rev-parse", "main"), origin: null, createdAt: "2026-01-01T00:00:00.000Z", overrides: {} });
+    await appendWaveEvent(id, { kind: "tasks", tasks: [spec("a"), spec("b"), spec("c")] });
+    const gate = join(caseDir, "gate");
+    process.env.FAKE_PI_GATE = gate;
+    const starting = startWaveTasks(id);
+    await until(() => prompts().length === 3, 20_000);
+    expect((await readWave(id)).fold.tasks.map((task) => task.taskId)).toEqual([null, null, null]);
+    writeFileSync(gate, "");
+    expect(await starting).toEqual(["a", "b", "c"]);
+    expect((await readWave(id)).fold.tasks.every((task) => task.taskId !== null)).toBe(true);
+  }, 30_000);
 
   test("a stopping runner starts no further task: the launch in progress is undone, nothing of it is left", async () => {
     const repo = makeRepo();
@@ -448,10 +483,17 @@ describe("waiting on waves and the wave actions", () => {
   test("by wave: a task's question needs attention while the wave builds; a cancelled task of it does not", async () => {
     const [, asking] = await writtenWave("/r", ["cancelled", "starting"]);
     const stop = await fakeRunner();
+    // The starting task's runner lives: without one it would be interrupted.
+    const taskEnd = join(caseDir, "task-runner-end");
+    const taskRunner = await runnerHolding(taskLockPath(asking.id), asking.sessionId, { ...process.env, FAKE_RUNNER_END: taskEnd });
     const quiet = await wait({ wave: WAVE(), timeoutMs: 1_000 });
     expect([quiet.timedOut, quiet.attention]).toEqual([true, []]);
-    setTimeout(() => writeSession(asking, [TASK_ENTRY, stateEntry("waiting_answer")]), 300);
+    setTimeout(() => {
+      writeSession(asking, [TASK_ENTRY, stateEntry("waiting_answer")]);
+      writeFileSync(taskEnd, "");
+    }, 300);
     const asked = await wait({ wave: WAVE(), timeoutMs: 10_000 });
+    await taskRunner.exited;
     expect([asked.timedOut, asked.attention, asked.waves[0].stage]).toEqual([false, [taskId(2)], "building"]);
     await stop();
     // Without its runner the building wave is interrupted: attention.

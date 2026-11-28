@@ -43,8 +43,10 @@ export const MERGE_ATTEMPTS = 3;
  * Moves the main branch to the task's commit in one lock holder: `$1` primary, `$2` main branch, `$3` task branch,
  * `$4` the task's commit, `$5` the main branch's commit as the merge read it. A main branch that is no longer an
  * ancestor of the task's commit (another merge landed meanwhile) exits `TARGET_MOVED_EXIT`, nothing moved. Checked
- * out in a worktree (the primary or another one, by `git worktree list`): fast-forward there. Else compare-and-swap of
- * the ref. Prints the commit before and `primary`, `checkout` (another worktree) or `ref`.
+ * out in a worktree (the primary or another one, by `git worktree list`): fast-forward there, `--autostash` carrying
+ * its uncommitted tracked changes over (git exits 0 when they do not apply back, leaving markers and the stash). Else
+ * compare-and-swap of the ref. Prints the commit before and `primary`, `checkout` (another worktree) or `ref`, then on
+ * the next line the checkout's unmerged paths NUL-separated.
  */
 const MOVE_TARGET_SCRIPT =
   `git -C "$1" merge-base --is-ancestor "refs/heads/$2" "$4" || { echo "$2 moved past the task's base" >&2; exit ${TARGET_MOVED_EXIT}; }; ` +
@@ -52,7 +54,7 @@ const MOVE_TARGET_SCRIPT =
   'where=$(printf "%s\\n" "$list" | awk -v ref="branch refs/heads/$2" ' +
   "'/^worktree /{path=substr($0,10);n++} $0==ref{print (n==1?\"primary\":\"checkout\") \" \" path; exit}'); " +
   'if test -n "$where"; then kind=${where%% *}; dir=${where#* }; ' +
-  'before=$(git -C "$dir" rev-parse HEAD) && git -C "$dir" merge --ff-only "$3" >&2 && echo "$before $kind"; exit; fi; ' +
+  'before=$(git -C "$dir" rev-parse HEAD) && git -C "$dir" merge --ff-only --autostash "$3" >&2 && echo "$before $kind" && git -C "$dir" diff --name-only --diff-filter=U -z; exit; fi; ' +
   'git -C "$1" merge-base --is-ancestor "$5" "$4" || { echo "$4 does not descend from $5" >&2; exit 3; }; ' +
   'git -C "$1" update-ref -m "factory: merge $3" "refs/heads/$2" "$4" "$5" >&2 && echo "$5 ref"';
 
@@ -218,7 +220,6 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
   const status = input.status ?? (() => undefined);
   const message = input.message ?? commitMessageFallback(task.title);
   const text = commitText(message);
-  const merged = (commit: string, error: string | null, depsSynced: boolean): MergeResult => ({ kind: "merged", merge: { ok: true, commit, error, depsSynced } });
   const fail = (error: string): MergeResult => ({ kind: "failed", merge: { ok: false, commit: null, error, depsSynced: false } });
   // Unlike `outputTail`, no "killed" for an empty output: these commands ran to their exit code.
   const tail = (output: string) => output.trim().slice(-ERROR_TAIL_CHARS);
@@ -254,7 +255,7 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
   const moveTarget = async (landing: string, before: string, name: string): Promise<CommandResult> => {
     const argv = ["flock", "-n", "-E", String(LOCK_BUSY_EXIT), lock, "sh", "-c", MOVE_TARGET_SCRIPT, "sh", primary, task.mainBranch, name, landing, before];
     for (const deadline = Date.now() + LOCK_WAIT_MS; ; ) {
-      const result = await cleanup(argv, { cwd: root, maxStdoutChars: 100 });
+      const result = await cleanup(argv, { cwd: root, maxStdoutChars: 100_000 });
       if (result.exitCode !== LOCK_BUSY_EXIT) return result;
       if (Date.now() > deadline) throw new Error(`the merge lock ${lock} stayed taken for ${LOCK_WAIT_MS / 1000} s`);
       status("wait for the merge lock");
@@ -309,7 +310,14 @@ async function mergeWorktree(input: MergeInput, gates: GateData[]): Promise<Merg
       if (!passed(moveResult)) return fail(`update of ${task.mainBranch} refused: ${tail(moveResult.output)}`);
       break;
     }
-    const [before, moved] = moveResult.stdout.trim().split(" ");
+    const [line, unmerged = ""] = moveResult.stdout.split(/\n(.*)/s);
+    const [before, moved] = line.trim().split(" ");
+    // Uncommitted changes in the target's checkout that conflict with the landing: it counts, the user resolves them.
+    const stashConflicts = nulList(unmerged);
+    const merged = (commit: string, error: string | null, depsSynced: boolean): MergeResult => ({
+      kind: "merged",
+      merge: { ok: true, commit, error, depsSynced, ...(stashConflicts.length > 0 ? { stashConflicts } : {}) },
+    });
     const commit = await git(cleanup, primary, ["rev-parse", `refs/heads/${task.mainBranch}`]);
     if (commit !== landing) return fail(`${task.mainBranch} is at ${commit} after the update, not at the task's commit ${landing}`);
 

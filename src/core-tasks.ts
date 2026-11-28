@@ -30,7 +30,7 @@ import { readFactoryStates, sessionEntries, sessionFilePath, taskMainBranch } fr
 import { runCommand } from "./run.ts";
 import { requireModels } from "./models.ts";
 import { checkSettings, factoryHome, loadSettings, resolveSettings } from "./settings.ts";
-import { COMMIT_ASK_TYPE, isFactoryTurn, isFinal, isFactoryPrompt, messageText, rebuild, isResting, type Finding, type MinorFinding, type ReviewData, type Settings, type Snapshot, type State } from "./state.ts";
+import { COMMIT_ASK_TYPE, isFactoryTurn, isFinal, isFactoryPrompt, messageText, rebuild, isResting, spentUntil, type Finding, type MinorFinding, type ReviewData, type Settings, type Snapshot, type Spent, type State } from "./state.ts";
 import { listTasks, lockTask, tagInGroup, taskLockPath, type TaskRecord } from "./tasks.ts";
 import { unlockFile } from "./lock.ts";
 import { addUsage, cents, FactoryError, isRecord, jsonLines, piUsage, short, writeAtomic, type Usage } from "./util.ts";
@@ -63,7 +63,7 @@ export interface TaskView {
   /** The coder's open question (`factory_ask_supervisor`) while the state is `waiting_answer`, else null. */
   question: string | null;
   running: boolean;
-  /** The state is `running` or `merging` but no runner lives (it crashed, or the host rebooted). */
+  /** No runner lives and the state does not rest: `running` or `merging` (it crashed, the host rebooted), or none yet (its runner died before its first state). */
   interrupted: boolean;
   /** Its runner waits for a test slot (`test-slots.ts`) to run a gate; absent otherwise. */
   waitingForSlot?: true;
@@ -84,6 +84,8 @@ export interface TaskView {
   minors: MinorFinding[];
   /** The commit the last successful merge landed, null before one. */
   merged: string | null;
+  /** The last merge's `MergeData.stashConflicts`. */
+  stashConflicts?: string[];
   /** The `flaky` names of the task's gate records (steps that failed and then passed on their rerun), in order. */
   flaky: string[];
   /** The task actions the core would accept now (`remove` maybe only with `force`). */
@@ -209,8 +211,8 @@ async function sessionSummary(sessionPath: string | null): Promise<SessionSummar
   return summary;
 }
 
-/** The task as clients see it, and its unrounded usage for sums (the view shows cents). `knownWaveStage`: its wave's stage, read already. */
-export async function taskLook(record: TaskRecord, knownWaveStage?: WaveStage): Promise<{ view: TaskView; usage: Usage | null }> {
+/** The task as clients see it, its unrounded usage for sums (the view shows cents) and its wall time by state. `knownWaveStage`: its wave's stage, read already. */
+export async function taskLook(record: TaskRecord, knownWaveStage?: WaveStage): Promise<{ view: TaskView; usage: Usage | null; spent: Spent<State | "gates">["ms"] }> {
   // Liveness before the state: a runner writes its last state before it exits, so a state read after a dead runner is
   // its last one; read the other way round, a runner that wrote `done` and exited in between looks interrupted.
   const runners = await liveRunners(record);
@@ -221,7 +223,7 @@ export async function taskLook(record: TaskRecord, knownWaveStage?: WaveStage): 
   const usage = addUsage(sessionUsage, await scoutUsage({ kind: "task", id: record.id }));
   // The task has a state once it wrote a `factory-state` entry.
   const last = snapshot?.at ? snapshot : null;
-  const { sessionDir: _dir, contracts: _contracts, contractNotes: _notes, ...fields } = record;
+  const { sessionDir: _dir, contracts: _contracts, contractNotes: _notes, start: _start, ...fields } = record;
   const view: Omit<TaskView, "actions"> = {
     ...fields,
     sessionPath,
@@ -231,7 +233,7 @@ export async function taskLook(record: TaskRecord, knownWaveStage?: WaveStage): 
     at: last?.at ?? null,
     question: last?.state === "waiting_answer" ? (last.question ?? null) : null,
     running,
-    interrupted: last !== null && !isResting(last.state) && !running,
+    interrupted: (last === null || !isResting(last.state)) && !running,
     settings: snapshot?.task.settings ?? null,
     usage: usage === null ? null : { ...usage, cost: cents(usage.cost) },
     lastMessage,
@@ -239,11 +241,13 @@ export async function taskLook(record: TaskRecord, knownWaveStage?: WaveStage): 
     review: snapshot?.review ?? null,
     minors: snapshot?.minors ?? [],
     merged: snapshot?.mergedCommit ?? null,
+    ...(snapshot?.stashConflicts ? { stashConflicts: snapshot.stashConflicts } : {}),
     flaky: snapshot?.flaky ?? [],
     ...(waitingForSlot ? { waitingForSlot } : {}),
   };
   const waveStage = await taskWaveStage(record, knownWaveStage);
-  return { view: { ...view, actions: TASK_ACTIONS.filter((action) => refusal(view, action, waveStage) === null) }, usage };
+  const spent = snapshot ? spentUntil(snapshot, view.interrupted, new Date().toISOString()) : {};
+  return { view: { ...view, actions: TASK_ACTIONS.filter((action) => refusal(view, action, waveStage) === null) }, usage, spent };
 }
 
 export async function taskView(record: TaskRecord): Promise<TaskView> {
@@ -286,7 +290,7 @@ export function refusal(view: Omit<TaskView, "actions">, action: TaskActionName,
     case "tasks.message":
       if (view.state === null) return refused("has not started yet, send the message once it runs");
       if (view.state === "merging") return refused(MERGING_REFUSAL);
-      if (view.state === "done") return refused(DONE_REFUSAL);
+      if (view.state === "done" && view.wave !== null) return refused(DONE_REFUSAL);
       return view.state === "waiting_answer" ? null : leftBuilding("a message");
   }
 }
@@ -311,8 +315,8 @@ export function needsAttention(view: TaskView): boolean {
 }
 
 function stateText(view: Omit<TaskView, "actions">): string {
+  if (view.interrupted) return view.state === null ? "interrupted (its runner ended before its first state)" : `interrupted (${view.state} when its runner ended, round ${view.round}, ${view.reason})`;
   if (view.state === null) return "starting";
-  if (view.interrupted) return `interrupted (${view.state} when its runner ended, round ${view.round}, ${view.reason})`;
   return `${view.state} (round ${view.round}, ${view.reason})`;
 }
 
@@ -470,10 +474,11 @@ async function pokeWaveOf(record: TaskRecord, env?: RunnerEnv): Promise<void> {
  * as a `FactoryError`. `waves.retry` retries its interrupted tasks through it and pokes the wave once.
  */
 export async function retryRestingTask(record: TaskRecord, env?: RunnerEnv): Promise<void> {
-  // An interrupted task is set right by the session's start (`resumeTask`) before the retry runs.
+  // An interrupted task is set right by the session's start (`resumeTask`) before the retry runs; one without a state
+  // never started: it gets its start command again.
   const sent = await withTaskLock(record, (view) => requireAction(record, view, "tasks.retry"), async (view) => {
     const statesBefore = (await readFactoryStates(record.sessionDir, record.sessionId)).count;
-    await sendToRestingTask(record, "/factory retry", env);
+    await sendToRestingTask(record, view.state === null ? record.start : "/factory retry", env);
     return { interrupted: view.interrupted, statesBefore };
   });
   if (sent.interrupted) await requireRunnerStarted(record, sent.statesBefore);

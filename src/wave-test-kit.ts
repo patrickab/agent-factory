@@ -57,7 +57,7 @@ export const taskId = (n: number): string => `40000000-${RUN}-4000-8000-${caseDi
 /** The record of the wave's task `key`, the `n`th: its worktree `task-<key>` under the case dir (not made). */
 export function taskRecord(repo: string, key: string, n: number): TaskRecord {
   const branch = `task-${key}`;
-  return { id: taskId(n), repo, worktree: join(caseDir, branch), branch, title: `Task ${key}`, sessionId: `session-${RUN}-${caseSerial()}-${key}`, sessionDir: join(caseDir, "sessions"), createdAt: `2026-01-01T00:00:0${n}.000Z`, tag: TAG, plan: null, wave: WAVE(), origin: null };
+  return { id: taskId(n), repo, worktree: join(caseDir, branch), branch, title: `Task ${key}`, sessionId: `session-${RUN}-${caseSerial()}-${key}`, sessionDir: join(caseDir, "sessions"), createdAt: `2026-01-01T00:00:0${n}.000Z`, tag: TAG, plan: null, wave: WAVE(), origin: null, start: "" };
 }
 
 /** A repo on `main` with `factory.yaml` (`config`) and the wave's branch off it; `onBranch` commits there before the wave is declared with `specs`. */

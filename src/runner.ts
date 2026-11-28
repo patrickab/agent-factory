@@ -7,10 +7,12 @@
  *   that came after stdin closed is the sender's to deliver (`messageTask`)
  * - Imports nothing outside node built-ins and the plain plugin modules: the deployed plugin has no `node_modules`
  */
+import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { contractCheck } from "./contracts.ts";
-import { rebuild, isResting, type StateData } from "./state.ts";
+import { agentDir } from "./settings.ts";
+import { rebuild, isResting, type StartPayload, type StateData } from "./state.ts";
 import { unlockFile } from "./lock.ts";
 import { errorText, ifMissing, isRecord, jsonLines, writeAtomic } from "./util.ts";
 import { pokeWave, TASK_WAVE_ENV } from "./wave-poke.ts";
@@ -23,8 +25,6 @@ const KILL_GRACE_MS = 3000;
 const PROMPT_ID = "1";
 /** Set to `1` in the environment of the Pi a runner starts: that Pi holds a task's session (`tool.ts` reads it). */
 export const TASK_SESSION_ENV = "FACTORY_TASK_SESSION";
-/** The coder model of a `/factory start` (`launchTask`), for Pi's `--model`; Pi never sees it. */
-export const CODER_MODEL_ENV = "FACTORY_CODER_MODEL";
 /** The repository's `extensions` setting as JSON (`sendCommand`), absent when it has none; Pi never sees it. */
 export const CODER_EXTENSIONS_ENV = "FACTORY_CODER_EXTENSIONS";
 const PLUGIN_PATH = join(import.meta.dirname, "pi", "index.ts");
@@ -112,18 +112,26 @@ function inboxLineText(line: string): string | undefined {
 const START_PREFIX = "/factory start ";
 
 /**
- * Pi's arguments for `message`. `/factory start` with a coder model (`CODER_MODEL_ENV`, set by `launchTask`):
- * `--model` with it, so the session starts on the coder's model and the plugin need not switch to it (`setModel` fires
- * `model_select`, which an extension such as `@xynogen/pix-models` answers by writing `defaultProvider`/`defaultModel`
- * into `<worktree>/.pi/settings.json`, and the factory's commit of the worktree then took that file). With
- * `CODER_EXTENSIONS_ENV`: `-ne`, the factory's plugin, one `-e` per listed source, and no skills, prompt templates or themes.
+ * Pi's arguments for `message`. `/factory start` whose payload names a coder model: `--model` with it, so the session
+ * starts on the coder's model and the plugin need not switch to it (`setModel` fires `model_select`, which an extension
+ * such as `@xynogen/pix-models` answers by writing `defaultProvider`/`defaultModel` into `<worktree>/.pi/settings.json`,
+ * and the factory's commit of the worktree then took that file). With `CODER_EXTENSIONS_ENV`: `-ne`, the factory's
+ * plugin, one `-e` per listed source, and no skills, prompt templates or themes. An `npm:` source installed for the user
+ * goes as its directory: Pi would install it again at every start, into one temporary directory all starts share.
  */
 function piArgs(sessionDir: string, sessionId: string, message: string): string[] {
   const args = ["--mode", "rpc", "--session-dir", sessionDir, "--session-id", sessionId];
   const extensions = process.env[CODER_EXTENSIONS_ENV];
-  if (extensions) args.push("-ne", ...[PLUGIN_PATH, ...(JSON.parse(extensions) as string[])].flatMap((source) => ["-e", source]), "--no-skills", "--no-prompt-templates", "--no-themes");
-  const model = process.env[CODER_MODEL_ENV];
-  return model && message.trimStart().startsWith(START_PREFIX) ? [...args, "--model", model] : args;
+  if (extensions) args.push("-ne", ...[PLUGIN_PATH, ...(JSON.parse(extensions) as string[]).map(installedSource)].flatMap((source) => ["-e", source]), "--no-skills", "--no-prompt-templates", "--no-themes");
+  const text = message.trimStart();
+  const model = text.startsWith(START_PREFIX) ? (JSON.parse(text.slice(START_PREFIX.length)) as Partial<StartPayload>).settings?.models.coder : undefined;
+  return model ? [...args, "--model", model] : args;
+}
+
+/** `npm:<name>` as `<agent dir>/npm/node_modules/<name>` when that is installed, else `source` as it is. */
+function installedSource(source: string): string {
+  const installed = source.startsWith("npm:") ? join(agentDir(), "npm", "node_modules", source.slice("npm:".length)) : null;
+  return installed !== null && existsSync(installed) ? installed : source;
 }
 
 /** The follow-ups of the task's changed contracts (`contractCheck`), null when none; a failed look is logged and says none. */
@@ -151,7 +159,7 @@ export async function runTaskCommand(worktree: string, sessionDir: string, sessi
   let inboxOffset = await readInboxOffset(inboxPath);
   const pi = Bun.spawn(["pi", ...piArgs(sessionDir, sessionId, message)], {
     cwd: worktree,
-    env: { ...process.env, [TASK_SESSION_ENV]: "1", [TASK_WAVE_ENV]: undefined, [CODER_MODEL_ENV]: undefined, [CODER_EXTENSIONS_ENV]: undefined },
+    env: { ...process.env, [TASK_SESSION_ENV]: "1", [TASK_WAVE_ENV]: undefined, [CODER_EXTENSIONS_ENV]: undefined },
     stdin: "pipe",
     stdout: "pipe",
     stderr: "inherit",

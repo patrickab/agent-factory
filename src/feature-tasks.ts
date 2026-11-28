@@ -74,7 +74,7 @@ export const TASKS = feature({
         card("action", "quiet", `removed task ${short(result.removed)}`, { id: short(result.removed), rows: result.dropped ? [{ label: "dropped", text: result.dropped }] : [] }),
     ),
     "tasks.message": spec(
-      "Send a task a message: a resting task runs new rounds (a done one is refused: more work is waves.add or a new task), a task in waiting_answer gets it as the answer to its question (same round), a running coder gets it as a follow-up",
+      "Send a task a message: a resting task runs new rounds (a done one outside a wave too, merged as a new commit; a done one of a wave is refused: more work is waves.add), a task in waiting_answer gets it as the answer to its question (same round), a running coder gets it as a follow-up",
       { id: ID, text: { type: "string", description: "The message" } },
       ["id", "text"],
       true,

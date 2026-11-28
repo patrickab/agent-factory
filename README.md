@@ -20,7 +20,7 @@ The views (what agents read, what people see): `VIEWS.md`. Every action's parame
 | **plan** | A memory-store store a wave works by: its contracts, its map for scouts, its feedback and the wave's home |
 | **contract** | Facts the tasks of a wave work by (`<plan>/run/contract/<name>/<fact>` or `<plan>/run/contract/<name>.md`); only the supervisor changes them (`contracts.apply`), the factory tells the affected tasks |
 | **scout** | A read-only `pi` child that answers a concern from the plan's `map/` and writes what it learns there |
-| **rest** | No runner lives and the task waits (`waiting_approve`, `waiting_answer`, `blocked`), ended (`done`, `cancelled`) or was interrupted |
+| **rest** | No runner lives and the task waits (`waiting_approve`, `waiting_answer`, `blocked`), ended (`done`, `cancelled`; a message runs a `done` task outside a wave again) or was interrupted |
 | **attention** | A rest that needs the supervisor: a question, a block, a rejection, waiting for approve, an interruption, tasks that can never start |
 | **origin** | The Pi session that started a task or declared a wave: its notices go there |
 | **card** | The readable form of an event, for people (`VIEWS.md`) |
@@ -41,14 +41,15 @@ Invariants every step keeps:
    the task and every step as `factory-*` session entries: the task's truth
 3. After each coder turn: `gates`, the protected-path check and, with `review` on, the reviewer. A problem goes back
    to the coder as the next round; out of rounds the task is `blocked`
-4. A passed round is squashed into one commit (its message: a conventional title, else one the coder is asked for),
+4. A passed round is squashed into one commit (its message: a conventional title, else one the coder is asked for, its subject then becoming the task's title),
    rebased onto the target and merged through the merge queue (`merge_gates`, fast-forward), or waits in
    `waiting_approve` with `merge: review`
 5. The runner ends when the task rests. `tasks.approve`, `tasks.retry`, `tasks.cancel` and `tasks.message` to a
    resting task start a runner for one command; a live runner gets `tasks.message` through the task's inbox
 6. A coder may ask the supervisor (`factory_ask_supervisor`): the task rests `waiting_answer`, and the next
-   `tasks.message` is the answer within the same round. A `done` task takes no message: more work goes to its wave
-   (`waves.add`) or a new task
+   `tasks.message` is the answer within the same round. A message to a `done` task outside a wave runs it again in
+   the same session: its worktree (made again off the target's tip when it is gone) gets new rounds that merge as a new
+   commit, and the task ends `done` again. A `done` task of a wave takes no message: more work goes to `waves.add`
 
 ## How a wave runs
 
@@ -71,7 +72,8 @@ The supervisor's loop:
 
 1. Declare the whole plan: `waves.start` per wave, later waves with `after`; settle shared interfaces in contracts
 2. Wait: `tasks.wait {wave}` (or `{tag}`) answers when everything rests or one needs attention; in Pi the notices
-   arrive by themselves
+   arrive by themselves; `waves.get` shows where the wave's wall time went (`time`: coding, gates, review, merge,
+   waiting, total), computed from its log and its tasks' sessions when read; parallel tasks sum, so the parts may exceed the total
 3. Decide, from the view's `next:` line: answer a question (`tasks.message`), add tasks (`waves.add`), correct the
    plan (`tasks.update`, `waves.update`, `contracts.apply`), `tasks.retry`/`waves.retry` after fixing a cause,
    `waves.approve`, or cancel. Each such action is recorded as a decision (`decisions.list`). Then wait again
@@ -102,7 +104,7 @@ The supervisor's loop:
   `-merge-intent`, `-merge`, `-state`, `-commit-message`, `-question`
 - **Settings** (`settings.get`/`settings.set`, the table `SETTINGS` in `src/settings.ts`): `branch`, `merge`
   (`auto` | `review`), `maxRounds`, `review`, `models` (`big`, `small`, `reviewer`), `preview` (stored for clients),
-  `squash`, `extensions` (a coder's Pi loads only the factory's plugin and the listed sources, no skills, prompt templates or themes; MCP, codemode and tool search only as `builtin:<name>`). Tasks and waves take some as `overrides`. A model must be on the factory models list
+  `squash`, `extensions` (a coder's Pi loads only the factory's plugin and the listed sources, no skills, prompt templates or themes; MCP, codemode and tool search only as `builtin:<name>`; an `npm:` source installed for the user, under `<agent dir>/npm/node_modules`, loads from there instead of being installed at every start). Tasks and waves take some as `overrides`. A model must be on the factory models list
   (`models.get`/`models.set`); `defaults.yaml` names the default `small` and `big`
 - **Environment**: `PI_CODING_AGENT_DIR` (the agent dir, default `~/.pi/agent`), `MEMORY_STORE_ROOT` (default
   `~/.pi/memory_store`), `FACTORY_SLOTS` (test slots, default cores / 4), `FACTORY_TEST_JOBS`

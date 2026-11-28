@@ -69,6 +69,16 @@ export function fenced(text: string | null | undefined, lang = ""): string | und
 
 const row = (label: string, text: string | null | undefined | false): CardRow[] => (typeof text === "string" && text !== "" ? [{ label, text }] : []);
 
+/** A landing whose fast-forward left the target's checkout with its uncommitted changes conflicting (`MergeData.stashConflicts`). */
+const stashRow = (files: string[] | undefined): CardRow[] =>
+  row("checkout", files && `the uncommitted changes in the target's checkout conflict with the merge in ${files.join(", ")}: resolve them there (git stash list holds them)`);
+
+/** Milliseconds as whole minutes: `41m`, `1h06m`. */
+function duration(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
 /** The actions valid now, the last row of a card an agent acts on. */
 const next = (actions: readonly string[]): CardRow => ({ label: "next", text: actions.length === 0 ? "none, it runs" : actions.join(", ") });
 
@@ -107,10 +117,11 @@ export function taskCard(task: TaskView, title: string, tone: CardTone = "quiet"
       ...row("task", task.title),
       ...row("wave", task.wave !== null && short(task.wave)),
       ...row("round", task.round === null ? null : String(task.round)),
-      ...row("interrupted", task.interrupted && `${task.state}, no runner lives`),
+      ...row("interrupted", task.interrupted && `${task.state ?? "no state yet"}, no runner lives`),
       ...row("why", task.state === "blocked" || (task.state !== null && isFinal(task.state)) ? task.reason : null),
       ...row("review", review !== null && `${review.round}: ${review.status === "ok" ? "rejected" : `failed (${review.status})`}`),
       ...row("merged", task.merged !== null && short(task.merged)),
+      ...stashRow(task.stashConflicts),
       ...row("slot", task.waitingForSlot && "waits for a test slot"),
       ...row("flaky", task.flaky.join(", ")),
       next(task.actions.map((action) => (action === "tasks.message" && asked ? "tasks.message (answers it)" : action))),
@@ -172,10 +183,13 @@ export function waveCard(view: WaveView, title: string, tone: CardTone = "quiet"
       ...row("why", [view.reason, multiline ? null : view.detail].filter((part) => part !== null).join(": ")),
       ...row("waits for", view.stage === "queued" && view.after.map(short).join(", ")),
       ...row("can never start", view.stage === "building" && unreachableTasks(view.tasks).join(", ")),
-      ...row("tasks", view.tasks.map((task) => `${task.key} ${task.state} (${short(task.id)})`).join(", ")),
+      ...row("tasks", view.tasks.map((task) => `${task.key} ${task.interrupted ? "interrupted" : task.state} (${short(task.id)})`).join(", ")),
+      // Parts under half a minute left out; no row before the wave built for one.
+      ...row("time", view.time.total >= 30_000 && Object.entries(view.time).filter(([key, ms]) => key === "total" || ms >= 30_000).map(([key, ms]) => `${key} ${duration(ms)}`).join(" · ")),
       ...row("review", view.stage === "reviewing" ? `${view.reviews.length + 1} runs` : last && `${last.round}: ${last.verdict}${last.verdict === "failed" ? ` (${last.status})` : ""}`),
       ...row("gates failed", failedGate?.phase),
       ...row("merged", view.merge !== null && `${short(view.merge.from)}..${short(view.merge.to)} into ${view.target}`),
+      ...stashRow(view.merge?.stashConflicts),
       ...row("history", view.merge?.ref !== undefined && `${view.merge.ref} (${plural(view.merge.commits ?? 0, "commit")})`),
       ...row("slot", view.waitingForSlot && "waits for a test slot"),
       ...row("flaky", [...new Set(view.gates.flatMap((gate) => gate.flaky ?? []))].join(", ")),

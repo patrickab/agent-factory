@@ -31,7 +31,8 @@ import { listWaves } from "./waves.ts";
  *   run took (`coder`) and `eof <last state>` when its stdin closes; then plays the steps of `$FAKE_PI_SCRIPT` (JSON),
  *   else those of the command. A step: `answer[:disposition]`, `run`, `settle`, `appended`, `wait` (100 ms), `hold`,
  *   `followup` (waits for one), `stubborn` (ignores stdin EOF and SIGTERM), `task` (the `factory-task` entry of a
- *   start), `fix` (a file changed in the worktree), else `<state>[:reason]`. `FAKE_PI_HOLD=1`: a start runs forever;
+ *   start), `fix` (a file changed in the worktree), else `<state>[:reason]`, after the file `$FAKE_PI_GATE` exists when set.
+ *   `FAKE_PI_HOLD=1`: a start runs forever;
  *   `FAKE_PI_START_END`: the state a start rests in (default `waiting_approve`)
  * - `json` with `map_write` (a scout's child): loads its extension, writes `$FAKE_SCOUT.writes`, then holds (`hold`)
  *   or ends with `report`; each assistant message costs `$FAKE_SCOUT.cost`
@@ -134,6 +135,7 @@ const prompt = new Promise((done) => (gotPrompt = done));
 })().finally(() => stubborn || process.exit(0));
 const message = JSON.parse(await prompt).message;
 note("prompt", message);
+while (env.FAKE_PI_GATE && !existsSync(env.FAKE_PI_GATE)) await sleep(20);
 const reviewed = message.startsWith("/factory reviewed ") ? JSON.parse(message.slice("/factory reviewed ".length)) : null;
 const merge = ["answer", "wait", "merging:approved", "appended", "wait", "done:merged", "appended"];
 const scripts = {
@@ -370,6 +372,7 @@ export function fakeRecord(id: string, repo: string): TaskRecord {
     plan: null,
     wave: null,
     origin: null,
+    start: `/factory start ${JSON.stringify({ request: "r", title: `task ${id.slice(0, 8)}`, settings: TASK_ENTRY.data.settings })}`,
   };
 }
 
